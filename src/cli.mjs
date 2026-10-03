@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
-import { spawnSync } from "node:child_process";
+import { spawnSafeSync } from "./lib/spawn-safe.mjs";
 import { loadState, saveState, stateRoot } from "./lib/state.mjs";
 import { t, normalizeLanguage } from "./lib/i18n.mjs";
 import { ERROR_CATALOG } from "./lib/errors.mjs";
@@ -61,7 +61,7 @@ function emit(payload, code = 0) {
 }
 
 function commandExists(name, args = ["--version"]) {
-  const result = spawnSync(name, args, { encoding: "utf8", shell: process.platform === "win32" });
+  const result = spawnSafeSync(name, args, { encoding: "utf8" });
   return { ok: result.status === 0, output: (result.stdout || result.stderr || "").trim() };
 }
 
@@ -287,7 +287,7 @@ function runSetup() {
 
       // Installation isolation: before the sandbox passes, only the generated
       // sandbox may receive checkpoint branches or orchestration writes.
-      const setupSandbox=spawnSync("powershell.exe",[
+      const setupSandbox=spawnSafeSync("powershell.exe",[
         "-NoProfile","-ExecutionPolicy","Bypass","-File",
         path.join(control.control_clone_path,"scripts","setup-project-clone.ps1"),
         "-Project",control.sandbox_project_key
@@ -296,7 +296,7 @@ function runSetup() {
         throw new Error((setupSandbox.stderr||setupSandbox.stdout||("Sandbox clone/checkpoint setup failed for "+control.sandbox_project_key)).trim());
       }
 
-      const runnerInstall=spawnSync("powershell.exe",[
+      const runnerInstall=spawnSafeSync("powershell.exe",[
         "-NoProfile","-ExecutionPolicy","Bypass","-File",
         path.join(control.control_clone_path,"scripts","install-runner.ps1"),
         "-ControlRepository",control.control_repository,
@@ -333,7 +333,7 @@ function runSetup() {
 
   if(!state.reviewer_browser_ready) {
     const browserScript=path.join(state.control_clone_path,"scripts","start-reviewer-browser.ps1");
-    const openBrowser=spawnSync("powershell.exe",[
+    const openBrowser=spawnSafeSync("powershell.exe",[
       "-NoProfile","-ExecutionPolicy","Bypass","-File",browserScript,
       "-ChatUrl",state.reviewer_chat_url
     ],{encoding:"utf8"});
@@ -370,7 +370,7 @@ function runSetup() {
   if (!state.sandbox_verified) {
     try {
       const sessionScript=path.join(state.control_clone_path,"scripts","start-orchestrator-session.ps1");
-      const session=spawnSync("powershell.exe",[
+      const session=spawnSafeSync("powershell.exe",[
         "-NoProfile","-ExecutionPolicy","Bypass","-File",sessionScript,
         "-Project",state.sandbox_project_key
       ],{encoding:"utf8"});
@@ -431,7 +431,7 @@ function runSetup() {
         repository:state.target_repository
       });
 
-      const setupTarget=spawnSync("powershell.exe",[
+      const setupTarget=spawnSafeSync("powershell.exe",[
         "-NoProfile","-ExecutionPolicy","Bypass","-File",
         path.join(state.control_clone_path,"scripts","setup-project-clone.ps1"),
         "-Project",state.project_key
@@ -477,7 +477,7 @@ function runSetup() {
 function codexLogin() {
   const state=loadState();
   const lang=ensureStateLanguage(state);
-  const result=spawnSync("codex",["login"],{stdio:"inherit",shell:process.platform==="win32"});
+  const result=spawnSafeSync("codex",["login"],{stdio:"inherit"});
   const verify=commandExists("codex",["login","status"]);
   if(result.status!==0||!verify.ok){
     return emit({status:"ERROR",error_id:"AUTH-002",recoverable:true,preferred_language:lang,message:t(lang,"codex.login.failed")},1);
@@ -493,7 +493,7 @@ function codexOpen() {
   if(!folder||!fs.existsSync(folder)){
     return emit({status:"ERROR",error_id:"AUTH-004",recoverable:true,preferred_language:lang,message:t(lang,"codex.folder.missing")},1);
   }
-  const result=spawnSync("codex",[],{cwd:folder,stdio:"inherit",shell:process.platform==="win32"});
+  const result=spawnSafeSync("codex",[],{cwd:folder,stdio:"inherit"});
   emit({
     status:result.status===0?"PASS":"NEEDS_USER_ACTION",
     preferred_language:lang,
@@ -555,9 +555,8 @@ function githubLogin() {
   const gh=commandExists("gh");
   if(!gh.ok) return emit({status:"ERROR",error_id:"SETUP-010",recoverable:true,preferred_language:lang,message:t(lang,"github_cli.missing")},1);
 
-  const result=spawnSync("gh",["auth","login","--hostname","github.com","--git-protocol","https","--web"],{
+  const result=spawnSafeSync("gh",["auth","login","--hostname","github.com","--git-protocol","https","--web"],{
     stdio:"inherit",
-    shell:process.platform==="win32"
   });
   if(result.status!==0){
     return emit({status:"ERROR",error_id:"AUTH-003",recoverable:true,preferred_language:lang,message:t(lang,"github_cli.login.failed")},1);
@@ -578,7 +577,7 @@ function runtimeChecks(state) {
   let runnerRunning=false;
   if(process.platform==="win32" && state.runner_path){
     const escaped=String(state.runner_path).replaceAll("'","''");
-    const ps=spawnSync("powershell.exe",["-NoProfile","-Command",
+    const ps=spawnSafeSync("powershell.exe",["-NoProfile","-Command",
       "$root='"+escaped.replaceAll("\\","\\")+"'.TrimEnd('\\')+'\\'; "+
       "$p=@(Get-CimInstance Win32_Process -Filter \"Name='Runner.Listener.exe'\" -ErrorAction SilentlyContinue|Where-Object{$_.ExecutablePath -and $_.ExecutablePath.StartsWith($root,[System.StringComparison]::OrdinalIgnoreCase)}); "+
       "if($p.Count -gt 0){exit 0}else{exit 1}"
@@ -589,7 +588,7 @@ function runtimeChecks(state) {
   let browserReady=false;
   const port=Number(state.browser_port||0);
   if(process.platform==="win32" && Number.isInteger(port) && port>0){
-    const ps=spawnSync("powershell.exe",["-NoProfile","-Command",
+    const ps=spawnSafeSync("powershell.exe",["-NoProfile","-Command",
       "try { Invoke-RestMethod -Uri 'http://127.0.0.1:"+port+"/json/version' -TimeoutSec 2 | Out-Null; exit 0 } catch { exit 1 }"
     ],{encoding:"utf8"});
     browserReady=ps.status===0;
@@ -627,7 +626,7 @@ function doctor() {
   let preflightDetails=null;
   if(state.control_environment_ready&&state.control_clone_path&&state.project_key&&process.platform==="win32"){
     const script=path.join(state.control_clone_path,"scripts","preflight.ps1");
-    const r=spawnSync("powershell.exe",["-NoProfile","-ExecutionPolicy","Bypass","-File",script,"-Project",state.project_key],{encoding:"utf8"});
+    const r=spawnSafeSync("powershell.exe",["-NoProfile","-ExecutionPolicy","Bypass","-File",script,"-Project",state.project_key],{encoding:"utf8"});
     preflight=r.status===0;
     preflightDetails=(r.stdout||r.stderr||"").trim()||null;
   }
@@ -660,7 +659,7 @@ function repair() {
   }
 
   const script=path.join(state.control_clone_path,"scripts","start-orchestrator-session.ps1");
-  const r=spawnSync("powershell.exe",["-NoProfile","-ExecutionPolicy","Bypass","-File",script,"-Project",state.project_key],{encoding:"utf8"});
+  const r=spawnSafeSync("powershell.exe",["-NoProfile","-ExecutionPolicy","Bypass","-File",script,"-Project",state.project_key],{encoding:"utf8"});
   if(r.status!==0){
     state.last_error={error_id:"REPAIR-001",message:(r.stderr||r.stdout||"Repair failed").trim(),at:new Date().toISOString()};
     saveState(state);
