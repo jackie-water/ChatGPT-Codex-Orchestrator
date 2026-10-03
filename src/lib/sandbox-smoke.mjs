@@ -35,7 +35,7 @@ function issueNumberOf(issue){
   throw new Error("Could not determine GitHub issue number for local origin routing");
 }
 
-function registerKnownIssueOrigin(state,issue,projectKey){
+export function registerKnownIssueOrigin(state,issue,projectKey){
   const issueNumber=issueNumberOf(issue);
   const chatUrl=normalizeChatUrl(state?.reviewer_chat_url);
   const file=originRouteFile();
