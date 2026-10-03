@@ -59,6 +59,10 @@ The test environment must be isolated. Existing production orchestrators, runner
 - [ ] Repair retries pending callbacks.
 - [ ] Manual Send of a visible `callback_id` message is safe.
 - [ ] A delivered callback is not intentionally sent a second time.
+- [ ] Two different Chats can create separate orchestration issues concurrently and each callback returns to the correct originating Chat.
+- [ ] An origin-route conflict does not silently overwrite the existing issue-to-Chat mapping.
+- [ ] A missing exact target Chat tab is opened in a new tab; another Chat is never navigated away from its conversation.
+- [ ] The project reviewer is used only as delayed fallback when the issue origin remains unresolved.
 - [ ] Sleep/wake does not require rerunning Codex.
 - [ ] Session recovery restarts/checks runner, browser, pending callbacks and preflight.
 
