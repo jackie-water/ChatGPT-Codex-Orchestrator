@@ -116,3 +116,18 @@ When an installation-smoke CODEX callback arrives:
 9. Resume installer verification after the sandbox merge callback completes.
 
 The sandbox merge is the only merge performed during installation. The user's real project must remain unmodified.
+
+
+## Real-project activation gate
+
+The real application project is deliberately registered as disabled during installation.
+
+Before the Sandbox reaches COMPLETE:
+- do not create CODEX-RUN, CODE-REVIEW or MERGE-APPROVE requests for the real project;
+- do not ask the user to work around PROJECT_DISABLED;
+- do not create a checkpoint branch in the real repository;
+- do not treat a local read-only clone as permission to modify the remote repository.
+
+After the Sandbox has passed and the installer activates the target project, normal orchestration can begin.
+
+If any command reports PROJECT_DISABLED, resume the official installer rather than bypassing the gate.
