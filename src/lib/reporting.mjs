@@ -1,5 +1,5 @@
 import fs from "node:fs";
-import {spawnSync} from "node:child_process";
+import {spawnSafeSync} from "./spawn-safe.mjs";
 
 export function submitDiagnosticReport({file,repository}){
   if(!fs.existsSync(file)) throw new Error("Diagnostic report file does not exist");
@@ -28,9 +28,8 @@ export function submitDiagnosticReport({file,repository}){
   const temp=file+".issue.md";
   fs.writeFileSync(temp,body);
   try{
-    const r=spawnSync("gh",["issue","create","--repo",repository,"--title",title,"--body-file",temp],{
+    const r=spawnSafeSync("gh",["issue","create","--repo",repository,"--title",title,"--body-file",temp],{
       encoding:"utf8",
-      shell:process.platform==="win32"
     });
     if(r.status!==0) throw new Error((r.stderr||r.stdout||"GitHub issue submission failed").trim());
     const output=(r.stdout||"").trim();
