@@ -11,6 +11,7 @@ $key=$Project.ToLowerInvariant()
 $projectProp=$registry.projects.PSObject.Properties[$key]
 if(-not $projectProp){throw "Unknown project: $key"}
 $p=$projectProp.Value
+if($p.PSObject.Properties.Name -contains "enabled" -and -not [bool]$p.enabled){throw "PROJECT_DISABLED: project is not activated yet"}
 $pathVar=Get-Variable -Name "PROJECT_LOCAL_PATHS" -ErrorAction SilentlyContinue
 $target=$null
 if($pathVar -and $pathVar.Value -is [System.Collections.IDictionary] -and $pathVar.Value.Contains([string]$p.local_path_key)){$target=[string]$pathVar.Value[[string]$p.local_path_key]}
