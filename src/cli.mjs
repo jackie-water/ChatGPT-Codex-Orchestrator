@@ -85,6 +85,86 @@ function action(state, actionId, messageKey, extra = {}) {
   };
 }
 
+
+function dryRun() {
+  const state=loadState();
+  const lang=ensureStateLanguage(state);
+  const git=commandExists("git");
+  const node=commandExists("node");
+  const gh=commandExists("gh");
+  const codex=commandExists("codex");
+  const ghAuth=gh.ok?commandExists("gh",["auth","status"]):{ok:false};
+
+  const plan=[
+    {
+      step:"prerequisites",
+      automatic:true,
+      current:{
+        git:git.ok,
+        node:node.ok,
+        github_cli:gh.ok,
+        codex:codex.ok
+      },
+      action:"Install any supported missing prerequisites automatically."
+    },
+    {
+      step:"github_cli_sign_in",
+      automatic:false,
+      required:!ghAuth.ok,
+      action:"Ask the user to complete GitHub sign-in only if it is not already authenticated."
+    },
+    {
+      step:"github_plugin_authorization",
+      automatic:false,
+      required:!state.github_plugin_authorized,
+      action:"Ask the user to connect/authorize the GitHub Plugin in ChatGPT."
+    },
+    {
+      step:"project_selection",
+      automatic:false,
+      required:!state.target_repository,
+      current_repository:state.target_repository||null,
+      action:"Ask for one GitHub repository in owner/repository form."
+    },
+    {
+      step:"reviewer_chat",
+      automatic:false,
+      required:!state.reviewer_chat_url,
+      action:"Ask for the reviewer ChatGPT conversation URL."
+    },
+    {
+      step:"isolated_control_environment",
+      automatic:true,
+      action:"Create a private control repository, private sandbox repository, isolated local paths, isolated runner label and isolated browser profile."
+    },
+    {
+      step:"sandbox_end_to_end",
+      automatic:"mixed",
+      action:"Run implementation, wrapper validation and independent Code Review in the generated sandbox only. Require explicit approval before the sandbox-only merge."
+    },
+    {
+      step:"real_project_activation",
+      automatic:true,
+      gated_by:"sandbox_complete",
+      action:"Keep the real project disabled until the sandbox is complete, then create its checkpoint branch and activate orchestration."
+    },
+    {
+      step:"project_folder_trust",
+      automatic:false,
+      action:"Ask the user to approve Codex trust for the real project only after sandbox verification."
+    }
+  ];
+
+  emit({
+    status:"PASS",
+    preferred_language:lang,
+    message:lang==="zh-CN"?"安装预演完成，没有修改任何 GitHub repository、runner 或项目。":"Installation dry-run complete. No GitHub repository, runner or project was modified.",
+    dry_run:true,
+    mutations_performed:false,
+    plan
+  });
+}
+
 function answer() {
   const state = loadState();
   const lang = ensureStateLanguage(state);
@@ -618,7 +698,8 @@ function submitReport() {
   }
 }
 
-if (command==="setup"||command==="resume") runSetup();
+if (command==="dry-run") dryRun();
+else if (command==="setup"||command==="resume") runSetup();
 else if (command==="github-login") githubLogin();
 else if (command==="codex-login") codexLogin();
 else if (command==="codex-open") codexOpen();
@@ -632,4 +713,4 @@ else if (command==="report-problem") reportProblem();
 else if (command==="submit-report") submitReport();
 else if (command==="answer") answer();
 else if (command==="errors") emit({status:"PASS",errors:ERROR_CATALOG});
-else emit({status:"PASS",message:"Commands: setup, resume, answer, github-login, codex-login, codex-open, smoke-status, smoke-review, smoke-approve, doctor, status, repair, report-problem, submit-report, errors"});
+else emit({status:"PASS",message:"Commands: dry-run, setup, resume, answer, github-login, codex-login, codex-open, smoke-status, smoke-review, smoke-approve, doctor, status, repair, report-problem, submit-report, errors"});
