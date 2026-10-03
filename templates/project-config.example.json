@@ -1,0 +1,21 @@
+{
+  "project_key":"example-project",
+  "repository":"owner/repository",
+  "default_branch":"main",
+  "checkpoint_branch":"codex/checkpoints",
+  "safe_mode":true,
+  "max_iterations":5,
+  "prompt_limits":{
+    "initial_max_chars":12000,
+    "revise_max_chars":6000
+  },
+  "validation":{
+    "allowed_executables":["git"],
+    "steps":[]
+  },
+  "code_review":{
+    "enabled":true,
+    "required_for_code_changes":true,
+    "docs_only_skip":true
+  }
+}
