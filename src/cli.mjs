@@ -10,6 +10,7 @@ import { ERROR_CATALOG } from "./lib/errors.mjs";
 import { sanitizeObject } from "./lib/sanitize.mjs";
 import { submitDiagnosticReport } from "./lib/reporting.mjs";
 import { prepareControlEnvironment, activateTargetProject } from "./lib/control-env.mjs";
+import { renderProjectInstructions } from "./lib/project-instructions.mjs";
 import {
   sandboxSmokeStatus,
   startSandboxSmoke,
@@ -351,7 +352,12 @@ function runSetup() {
   const templateName = lang === "zh-CN" ? "chatgpt-project-instructions.zh-CN.md" : "chatgpt-project-instructions.md";
   const template = fs.readFileSync(path.resolve("templates",templateName),"utf8");
   const projectKey = state.project_key || state.target_repository.split("/").pop().toLowerCase().replace(/[^a-z0-9-]+/g,"-");
-  const rendered = template.replaceAll("{{PROJECT_KEY}}",projectKey).replaceAll("{{REPOSITORY}}",state.target_repository);
+  const rendered = renderProjectInstructions(template,{
+    projectKey,
+    repository:state.target_repository,
+    controlRepository:state.control_repository,
+    sandboxProjectKey:state.sandbox_project_key
+  });
   fs.writeFileSync(path.join(generated,"chatgpt-project-instructions.md"),rendered);
   state.project_key = projectKey;
   if (!state.completed.includes("instructions_generated")) state.completed.push("instructions_generated");
