@@ -110,7 +110,7 @@ function Notify-PreCodexRejection([string]$Reason, [string]$RepairAction) {
   }
   $rejectionMessage = "[ORCHESTRATOR-AUTO callback_id=$rejectionCallbackId] CODEX-RUN issue #$($event.issue.number) was rejected BEFORE Codex started, so no Codex tokens were consumed. Reason: $Reason ACTION REQUIRED FOR THIS CHAT: $RepairAction Fetch rejected issue #$($event.issue.number). Preserve project, target branch, objective, review route, and every implementation requirement that is still valid. Correct only the prompt-policy defect. Before creating anything, check that no replacement CODEX-RUN already exists for this rejected issue. Then create a replacement CODEX-RUN using the SAME logical iteration $iteration/$effectiveMax. Do not ask the user because this is a deterministic prompt-format correction. Do not increment the implementation iteration."
   try {
-    & (Join-Path $PSScriptRoot "wake-chat.ps1") -ChatUrl $chatUrl -Message $rejectionMessage -CallbackId $rejectionCallbackId -QueueOnFailure
+    & (Join-Path $PSScriptRoot "dispatch-chat-callback.ps1") -ProjectKey $projectKey -IssueNumber ([int]$event.issue.number) -ReviewRoute $reviewRoute -Message $rejectionMessage -CallbackId $rejectionCallbackId
   } catch {
     Write-Warning "Could not notify reviewer Chat about pre-Codex rejection: $($_.Exception.Message)"
   }
@@ -448,7 +448,7 @@ try {
 
   $callbackId = "codex-$projectKey-$($event.issue.number)-$iteration-$commit"
   $wakeMessage = "[CODEX-AUTO callback_id=$callbackId] Project '$projectKey' Codex completed. Orchestrator issue #$($event.issue.number), iteration $iteration/$effectiveMax, repository $repository, branch $branch, commit $commit. Read ${checkpointBranch}:.codex/latest-run.md, inspect the exact recorded commit/diff and wrapper validation evidence, and return PASS, REVISE, or NEEDS_HUMAN. Treat callback_id as idempotent: do not create a duplicate successor CODEX-RUN for the same reviewed commit. PASS is review-only and must not merge. Merge requires the user's explicit approval for commit $commit."
-  & (Join-Path $PSScriptRoot "wake-chat.ps1") -ChatUrl $chatUrl -Message $wakeMessage -CallbackId $callbackId -QueueOnFailure
+  & (Join-Path $PSScriptRoot "dispatch-chat-callback.ps1") -ProjectKey $projectKey -IssueNumber ([int]$event.issue.number) -ReviewRoute $reviewRoute -Message $wakeMessage -CallbackId $callbackId
 
   if ($codexExit -ne 0) {
     throw "Codex execution failed with exit code $codexExit. Checkpoint was published and reviewer Chat was notified."
