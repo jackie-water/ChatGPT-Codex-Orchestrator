@@ -60,6 +60,11 @@ Current work succeeded.
 ### NEEDS_USER_ACTION
 Explain only the returned current action, wait, verify, then resume.
 
+### WAITING
+The system is waiting for an asynchronous automation step such as Codex execution, callback delivery, Chat review or independent Code Review.
+
+Do **not** invent a manual workaround and do not rerun Codex. If a callback arrives, process that callback according to the generated Project Instructions. Otherwise check status again after the relevant automation completes.
+
 ### ERROR
 Attempt safe automatic repair first when recoverable. If repair fails, offer a sanitised diagnostic report. Obtain explicit consent before any upload.
 
@@ -92,3 +97,22 @@ Never:
 This DEV repository must use its own config root, runner label, browser profile/debug port and sandbox repository when end-to-end testing begins.
 
 Existing Priceup and Clean Energy production infrastructure is outside the test scope.
+
+
+## Installation sandbox
+
+The installer creates a separate private sandbox repository automatically. The real application repository must not be used for the first end-to-end test.
+
+When an installation-smoke CODEX callback arrives:
+
+1. Read the exact implementation checkpoint/diff.
+2. Confirm the sandbox task is limited to the expected ready-state fixture.
+3. If deterministic implementation defects exist, use the normal delta-only REVISE flow.
+4. If the implementation is a near-final candidate, create the exact-SHA CODE-REVIEW request.
+5. Adjudicate the independent review.
+6. If there are no blocking findings, ask the user for **one explicit approval** to merge the exact reviewed commit into the sandbox only.
+7. Never infer approval from installation intent.
+8. After approval, create MERGE-APPROVE for that exact sandbox SHA.
+9. Resume installer verification after the sandbox merge callback completes.
+
+The sandbox merge is the only merge performed during installation. The user's real project must remain unmodified.
