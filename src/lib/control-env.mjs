@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import {spawnSync} from "node:child_process";
+import {spawnSafeSync} from "./spawn-safe.mjs";
 import {detectProjectProfile} from "./project-detect.mjs";
 import {
   defaultLocalPaths,
@@ -13,7 +13,7 @@ import {
 } from "./control-render.mjs";
 
 function run(command,args,{cwd,allowFailure=false}={}){
-  const r=spawnSync(command,args,{cwd,encoding:"utf8",shell:process.platform==="win32"});
+  const r=spawnSafeSync(command,args,{cwd,encoding:"utf8"});
   if(r.status!==0&&!allowFailure){
     throw new Error((r.stderr||r.stdout||command+" failed").trim());
   }
