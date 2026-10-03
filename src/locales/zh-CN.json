@@ -28,5 +28,11 @@
   "setup.github_plugin.connect": "现在请在 ChatGPT 里连接并授权 GitHub Plugin，让它可以访问你准备使用的 repository。只完成这一步，完成后告诉我。",
   "github_cli.missing": "目前没有检测到 GitHub CLI。",
   "github_cli.login.failed": "GitHub CLI 登录没有成功完成。",
-  "github_cli.login.success": "GitHub CLI 登录已经完成。"
+  "github_cli.login.success": "GitHub CLI 登录已经完成。",
+  "setup.control.failed": "自动创建 control environment 没有完成。我可以检查错误并重试，不会因此修改你的项目 main 分支。",
+  "setup.codex.ready": "现在需要完成 Codex 登录，并信任安装器创建的独立项目文件夹。只完成这一步，完成后告诉我。",
+  "setup.codex.helper": "请在提示的项目文件夹中打开 Codex。如果要求登录，请用 ChatGPT 登录；如果要求信任文件夹，请确认。暂时不要给 Codex 任何代码任务。",
+  "setup.browser.login": "现在需要在专用 reviewer browser 里登录 ChatGPT。请只在新打开的独立浏览器窗口/profile 中完成登录，完成后告诉我。",
+  "answer.codex.invalid": "目前还没有确认 Codex 登录和文件夹信任完成。",
+  "answer.browser.invalid": "目前还没有确认 reviewer browser 登录完成。"
 }
