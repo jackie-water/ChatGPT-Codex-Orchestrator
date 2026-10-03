@@ -23,5 +23,10 @@
   "report.file.missing": "找不到之前生成的脱敏诊断报告。",
   "report.destination.missing": "当前开发版本还没有配置错误反馈 GitHub repository。",
   "report.submitted": "脱敏诊断报告已经提交。",
-  "report.submit.failed": "诊断报告提交失败，本地报告仍然保留。"
+  "report.submit.failed": "诊断报告提交失败，本地报告仍然保留。",
+  "setup.github_cli.connect": "现在只需要完成这台电脑上的 GitHub CLI 登录。完成这个登录步骤后，安装才能继续。",
+  "setup.github_plugin.connect": "现在请在 ChatGPT 里连接并授权 GitHub Plugin，让它可以访问你准备使用的 repository。只完成这一步，完成后告诉我。",
+  "github_cli.missing": "目前没有检测到 GitHub CLI。",
+  "github_cli.login.failed": "GitHub CLI 登录没有成功完成。",
+  "github_cli.login.success": "GitHub CLI 登录已经完成。"
 }
