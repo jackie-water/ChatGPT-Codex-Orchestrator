@@ -1,22 +1,79 @@
 {
-  "$schema":"https://json-schema.org/draft/2020-12/schema",
-  "title":"Orchestrated Project Configuration",
-  "type":"object",
-  "required":["project_key","repository","default_branch","safe_mode"],
-  "properties":{
-    "project_key":{"type":"string","pattern":"^[a-z0-9][a-z0-9-]{1,62}$"},
-    "repository":{"type":"string","pattern":"^[^/]+/[^/]+$"},
-    "default_branch":{"type":"string"},
-    "checkpoint_branch":{"type":"string","default":"codex/checkpoints"},
-    "safe_mode":{"type":"boolean","const":true},
-    "max_iterations":{"type":"integer","minimum":1,"maximum":10,"default":5},
-    "validation":{
-      "type":"object",
-      "properties":{
-        "allowed_executables":{"type":"array","items":{"type":"string"},"uniqueItems":true},
-        "steps":{"type":"array","items":{"type":"object","required":["command"],"properties":{"name":{"type":"string"},"command":{"type":"string"},"arguments":{"type":"array","items":{"type":"string"}}},"additionalProperties":false}}
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Orchestrated Project Configuration",
+  "type": "object",
+  "required": [
+    "project_key",
+    "repository",
+    "default_branch",
+    "safe_mode"
+  ],
+  "properties": {
+    "project_key": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{1,62}$"
+    },
+    "repository": {
+      "type": "string",
+      "pattern": "^[^/]+/[^/]+$"
+    },
+    "default_branch": {
+      "type": "string"
+    },
+    "checkpoint_branch": {
+      "type": "string",
+      "default": "codex/checkpoints"
+    },
+    "safe_mode": {
+      "type": "boolean",
+      "const": true
+    },
+    "max_iterations": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 10,
+      "default": 5
+    },
+    "validation": {
+      "type": "object",
+      "properties": {
+        "allowed_executables": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "command"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "command": {
+                "type": "string"
+              },
+              "arguments": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "additionalProperties": false
+          }
+        }
       }
+    },
+    "enabled": {
+      "type": "boolean",
+      "default": true
     }
   },
-  "additionalProperties":true
+  "additionalProperties": true
 }
