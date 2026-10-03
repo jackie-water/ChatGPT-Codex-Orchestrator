@@ -3,7 +3,14 @@ import path from "node:path";
 import os from "node:os";
 import {spawnSync} from "node:child_process";
 import {detectProjectProfile} from "./project-detect.mjs";
-import {defaultLocalPaths,renderProjectsJson,renderConfigPs1,renderWorkflow,safeKey} from "./control-render.mjs";
+import {
+  defaultLocalPaths,
+  projectEntry,
+  renderProjectsRegistry,
+  renderConfigPs1,
+  renderWorkflow,
+  safeKey
+} from "./control-render.mjs";
 
 function run(command,args,{cwd,allowFailure=false}={}){
   const r=spawnSync(command,args,{cwd,encoding:"utf8",shell:process.platform==="win32"});
@@ -21,25 +28,26 @@ export function githubLogin(){
 
 export function repositoryInfo(repository){
   if(!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) throw new Error("Invalid repository");
-  const r=run("gh",["repo","view",repository,"--json","nameWithOwner,defaultBranchRef,visibility"]);
+  const r=run("gh",["repo","view",repository,"--json","nameWithOwner,defaultBranchRef,visibility,description"]);
   return JSON.parse(r.stdout);
 }
 
-function ensureEmptyOrOwnedControlRepo({fullName,installationId}){
+function ensureOwnedPrivateRepo({fullName,installationId,purpose}){
+  const marker="ChatGPT Codex Orchestrator "+purpose+" installation "+installationId;
   const view=run("gh",["repo","view",fullName,"--json","nameWithOwner,visibility,description"],{allowFailure:true});
   if(!view.ok){
-    run("gh",["repo","create",fullName,"--private","--description","Private control repository for ChatGPT Codex Orchestrator installation "+installationId]);
-    return {created:true};
+    run("gh",["repo","create",fullName,"--private","--description",marker]);
+    return {created:true,marker};
   }
 
   const existing=JSON.parse(view.stdout);
   if(String(existing.visibility).toUpperCase()!=="PRIVATE"){
-    throw new Error("Refusing to use an existing non-private control repository");
+    throw new Error("Refusing to use an existing non-private "+purpose+" repository");
   }
   if(!String(existing.description||"").includes(installationId)){
-    throw new Error("A repository with the generated control-repo name already exists and is not marked as belonging to this installation");
+    throw new Error("A repository with the generated "+purpose+" name already exists and does not belong to this installation");
   }
-  return {created:false};
+  return {created:false,marker};
 }
 
 function ensureClone(repository,target){
@@ -64,13 +72,74 @@ function copyDirectory(src,dst){
   }
 }
 
-function commitControlRepo(controlPath){
-  run("git",["add","-A"],{cwd:controlPath});
-  const diff=run("git",["diff","--cached","--quiet"],{cwd:controlPath,allowFailure:true});
+function commitAndPush({repoPath,message,branch="main"}){
+  run("git",["add","-A"],{cwd:repoPath});
+  const diff=run("git",["diff","--cached","--quiet"],{cwd:repoPath,allowFailure:true});
   if(diff.ok) return {changed:false};
-  run("git",["-c","user.name=ChatGPT Codex Orchestrator","-c","user.email=codex-orchestrator@users.noreply.github.com","commit","-m","chore: configure private orchestrator control plane"],{cwd:controlPath});
-  run("git",["push","-u","origin","HEAD:main"],{cwd:controlPath});
+  run("git",[
+    "-c","user.name=ChatGPT Codex Orchestrator",
+    "-c","user.email=codex-orchestrator@users.noreply.github.com",
+    "commit","-m",message
+  ],{cwd:repoPath});
+  run("git",["push","-u","origin","HEAD:"+branch],{cwd:repoPath});
   return {changed:true};
+}
+
+function seedSandbox({repoPath,installationId}){
+  const marker=path.join(repoPath,".orchestrator-sandbox");
+  if(fs.existsSync(marker)){
+    const value=fs.readFileSync(marker,"utf8").trim();
+    if(value!==installationId) throw new Error("Existing sandbox marker belongs to a different installation");
+    return {changed:false};
+  }
+
+  if(fs.readdirSync(repoPath).filter(x=>x!==".git").length>0){
+    throw new Error("Generated sandbox repository is not empty and has no matching installation marker");
+  }
+
+  fs.mkdirSync(path.join(repoPath,"src"),{recursive:true});
+  fs.mkdirSync(path.join(repoPath,"test"),{recursive:true});
+  fs.writeFileSync(marker,installationId+"\n");
+  fs.writeFileSync(path.join(repoPath,"README.md"),[
+    "# ChatGPT Codex Orchestrator Sandbox",
+    "",
+    "This private repository exists only for installation and end-to-end safety tests.",
+    "It is not a production application repository.",
+    ""
+  ].join("\n"));
+  fs.writeFileSync(path.join(repoPath,"package.json"),JSON.stringify({
+    name:"chatgpt-codex-orchestrator-sandbox",
+    version:"1.0.0",
+    private:true,
+    type:"module",
+    engines:{node:">=22"},
+    scripts:{test:"node --test"}
+  },null,2)+"\n");
+  fs.writeFileSync(path.join(repoPath,"src","status.mjs"),'export const status = "not-ready";\n');
+  fs.writeFileSync(path.join(repoPath,"test","status.test.mjs"),[
+    'import test from "node:test";',
+    'import assert from "node:assert/strict";',
+    'import {status} from "../src/status.mjs";',
+    "",
+    'test("sandbox starts in not-ready state",()=>{',
+    '  assert.equal(status,"not-ready");',
+    "});",
+    ""
+  ].join("\n"));
+
+  return commitAndPush({
+    repoPath,
+    message:"chore: initialize isolated orchestrator sandbox",
+    branch:"main"
+  });
+}
+
+function commitControlRepo(controlPath){
+  return commitAndPush({
+    repoPath:controlPath,
+    message:"chore: configure private orchestrator control plane",
+    branch:"main"
+  });
 }
 
 export function prepareControlEnvironment({
@@ -87,36 +156,62 @@ export function prepareControlEnvironment({
   const target=repositoryInfo(targetRepository);
   const projectKey=safeKey(String(targetRepository).split("/").pop());
   const paths=defaultLocalPaths({home,installationId,projectKey});
+  const short=String(installationId).replace(/[^A-Za-z0-9]/g,"").slice(0,8).toLowerCase()||"default";
 
   ensureClone(targetRepository,paths.project);
   const validationProfile=detectProjectProfile(paths.project);
 
-  const short=String(installationId).replace(/[^A-Za-z0-9]/g,"").slice(0,8).toLowerCase()||"default";
+  const sandboxProjectKey="sandbox-"+short;
+  const sandboxRepository=login+"/chatgpt-codex-orchestrator-sandbox-"+short;
+  const sandboxClonePath=path.join(home,"ChatGPTCodexOrchestrator","sandbox-"+short);
+  ensureOwnedPrivateRepo({fullName:sandboxRepository,installationId,purpose:"sandbox"});
+  ensureClone(sandboxRepository,sandboxClonePath);
+  seedSandbox({repoPath:sandboxClonePath,installationId});
+  const sandboxValidationProfile=detectProjectProfile(sandboxClonePath);
+
   const controlRepository=login+"/chatgpt-codex-orchestrator-control-"+short;
-  ensureEmptyOrOwnedControlRepo({fullName:controlRepository,installationId});
+  ensureOwnedPrivateRepo({fullName:controlRepository,installationId,purpose:"control"});
   ensureClone(controlRepository,paths.control);
 
-  const runtimeSource=path.join(sourceRoot,"runtime");
-  const scriptsSource=path.join(runtimeSource,"scripts");
+  const scriptsSource=path.join(sourceRoot,"runtime","scripts");
   const workflowTemplate=fs.readFileSync(path.join(sourceRoot,"templates","control-repo","orchestrator.yml.template"),"utf8");
 
   copyDirectory(scriptsSource,path.join(paths.control,"scripts"));
   fs.mkdirSync(path.join(paths.control,".github","workflows"),{recursive:true});
-  fs.writeFileSync(path.join(paths.control,".github","workflows","orchestrator.yml"),renderWorkflow(workflowTemplate,{runnerLabel:paths.runnerLabel}));
-  fs.writeFileSync(path.join(paths.control,"projects.json"),renderProjectsJson({
+  fs.writeFileSync(
+    path.join(paths.control,".github","workflows","orchestrator.yml"),
+    renderWorkflow(workflowTemplate,{runnerLabel:paths.runnerLabel})
+  );
+
+  const targetEntry=projectEntry({
     projectKey,
     repository:targetRepository,
     defaultBranch:target.defaultBranchRef?.name||"main",
     validationProfile
-  }));
+  });
+  const sandboxEntry=projectEntry({
+    projectKey:sandboxProjectKey,
+    repository:sandboxRepository,
+    defaultBranch:"main",
+    validationProfile:sandboxValidationProfile
+  });
+  fs.writeFileSync(
+    path.join(paths.control,"projects.json"),
+    renderProjectsRegistry([targetEntry,sandboxEntry])
+  );
+
   fs.writeFileSync(path.join(paths.control,"README.md"),[
     "# Private ChatGPT Codex Orchestrator Control Repository",
     "",
-    "This repository was generated automatically for one Orchestrator installation.",
+    "This private repository was generated automatically for one Orchestrator installation.",
     "Keep it private because its self-hosted runner can execute automation on the configured machine.",
     "",
-    "Do not use this repository as an application/project repository."
-  ].join("\n")+"\n");
+    "Configured application project: "+targetRepository,
+    "Installation sandbox: "+sandboxRepository,
+    "",
+    "The sandbox is the only repository used for first-time end-to-end installation tests.",
+    ""
+  ].join("\n"));
 
   const configRoot=path.join(home,".chatgpt-codex-orchestrator");
   fs.mkdirSync(configRoot,{recursive:true});
@@ -124,12 +219,13 @@ export function prepareControlEnvironment({
     ? path.join(process.env.LOCALAPPDATA||path.join(home,"AppData","Local"),"ChatGPTCodexOrchestratorReviewer-"+short)
     : path.join(configRoot,"browser-profile-"+short);
 
-  let browserPort=9333;
+  const browserPort=9333;
   const configText=renderConfigPs1({
     githubLogin:login,
-    projectKey,
-    projectClonePath:paths.project,
-    reviewerChatUrl,
+    projectMappings:[
+      {projectKey,projectClonePath:paths.project,reviewerChatUrl},
+      {projectKey:sandboxProjectKey,projectClonePath:sandboxClonePath,reviewerChatUrl}
+    ],
     runnerPath:paths.runner,
     browserPort,
     browserProfile
@@ -147,6 +243,10 @@ export function prepareControlEnvironment({
     control_repository:controlRepository,
     control_clone_path:paths.control,
     project_clone_path:paths.project,
+    sandbox_project_key:sandboxProjectKey,
+    sandbox_repository:sandboxRepository,
+    sandbox_clone_path:sandboxClonePath,
+    sandbox_validation_profile:sandboxValidationProfile,
     runner_path:paths.runner,
     runner_label:paths.runnerLabel,
     config_path:path.join(configRoot,"config.ps1"),
