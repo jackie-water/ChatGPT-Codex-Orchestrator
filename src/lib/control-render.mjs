@@ -75,7 +75,7 @@ export function renderConfigPs1({githubLogin,projectKey,projectClonePath,reviewe
     "$env:ORCHESTRATOR_BROWSER_DEBUG_PORT = "+psQuote(String(browserPort)),
     "$env:ORCHESTRATOR_BROWSER_PROFILE = "+psQuote(browserProfile),
     "$env:ORCHESTRATOR_ORIGIN_FALLBACK_MINUTES = '30'",
-    "$env:ORCHESTRATOR_INSTANCE_ID = "+psQuote(path.basename(runnerPath)),
+    "$env:ORCHESTRATOR_INSTANCE_ID = "+psQuote(String(runnerPath).split(/[\\\\/]/).filter(Boolean).pop()||"default"),
     "$env:CODEX_ORCHESTRATOR_MODEL = 'gpt-5.6-luna'",
     "$env:CODEX_ORCHESTRATOR_REASONING = 'low'",
     "$env:CODEX_ORCHESTRATOR_RUNNER_PATH = "+psQuote(runnerPath),
