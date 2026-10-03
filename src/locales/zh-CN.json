@@ -34,5 +34,8 @@
   "setup.codex.helper": "请在提示的项目文件夹中打开 Codex。如果要求登录，请用 ChatGPT 登录；如果要求信任文件夹，请确认。暂时不要给 Codex 任何代码任务。",
   "setup.browser.login": "现在需要在专用 reviewer browser 里登录 ChatGPT。请只在新打开的独立浏览器窗口/profile 中完成登录，完成后告诉我。",
   "answer.codex.invalid": "目前还没有确认 Codex 登录和文件夹信任完成。",
-  "answer.browser.invalid": "目前还没有确认 reviewer browser 登录完成。"
+  "answer.browser.invalid": "目前还没有确认 reviewer browser 登录完成。",
+  "repair.not_ready": "独立 runtime 还没有配置完成，所以目前不能启动 Repair。",
+  "repair.failed": "自动修复没有完成。我可以根据诊断信息继续只处理下一个需要的步骤。",
+  "repair.success": "Repair 已完成：runner/browser 已检查，并已重试等待发送的 callback。"
 }
