@@ -42,7 +42,7 @@ v0.1 最终会需要：
 
 > 帮我安装这个项目。请按照项目里的 AI 安装协议执行，每次只让我完成一个必须人工操作的步骤。
 
-AI 应读取 [AI_INSTALL.md](AI_INSTALL.md)，并使用项目提供的正式 installer，而不是自己随意设计安装命令。
+AI 应读取 [AI_INSTALL.md](AI_INSTALL.md)，并使用项目提供的正式 installer，而不是自己随意设计安装命令。正式改动任何配置之前，可以先运行 dry-run：只说明接下来会做什么，不创建 repository、runner 或项目分支。
 
 ## Windows 自己安装
 
