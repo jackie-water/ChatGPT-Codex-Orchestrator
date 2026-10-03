@@ -22,5 +22,9 @@ export const ERROR_CATALOG={
   "REVIEW-002":"Requested reviewed commit became stale.",
   "MERGE-001":"Approved commit does not match the branch head.",
   "MERGE-002":"Required code-review evidence is missing.",
-  "DOCTOR-001":"One or more health checks require attention."
+  "DOCTOR-001":"One or more health checks require attention.",
+  "REPORT-001":"Diagnostic upload consent was not provided.",
+  "REPORT-002":"Diagnostic report file is missing.",
+  "REPORT-003":"Feedback repository is not configured.",
+  "REPORT-004":"Diagnostic submission failed."
 };
