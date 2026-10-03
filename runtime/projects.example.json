@@ -6,11 +6,35 @@
       "checkpoint_branch": "codex/checkpoints",
       "local_path_key": "example-project",
       "default_review_route": "example-project",
-      "allowed_validation_executables": ["git", "node", "npm"],
+      "allowed_validation_executables": [
+        "git",
+        "node",
+        "npm"
+      ],
       "default_validation_steps": [
-        {"name":"tests","command":"npm","arguments":["test"]},
-        {"name":"lint","command":"npm","arguments":["run","lint"]},
-        {"name":"build","command":"npm","arguments":["run","build"]}
+        {
+          "name": "tests",
+          "command": "npm",
+          "arguments": [
+            "test"
+          ]
+        },
+        {
+          "name": "lint",
+          "command": "npm",
+          "arguments": [
+            "run",
+            "lint"
+          ]
+        },
+        {
+          "name": "build",
+          "command": "npm",
+          "arguments": [
+            "run",
+            "build"
+          ]
+        }
       ],
       "prompt_limits": {
         "initial_max_chars": 12000,
@@ -24,7 +48,8 @@
         "review_model": "gpt-5.6-luna",
         "review_reasoning": "medium",
         "docs_only_skip": true
-      }
+      },
+      "enabled": true
     }
   }
 }
