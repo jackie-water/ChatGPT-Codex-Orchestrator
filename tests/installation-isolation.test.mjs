@@ -40,3 +40,13 @@ test("generated control registry disables the real project until activation",()=
   assert.match(sandboxBlock,/enabled:true/);
   assert.match(source,/export function activateTargetProject/);
 });
+
+
+test("setup requires ChatGPT access to generated private repos before Codex trust",()=>{
+  const cli=fs.readFileSync(new URL("../src/cli.mjs",import.meta.url),"utf8");
+  const authGate=cli.indexOf('action(state,"generated_repo_authorization"');
+  const codexTrust=cli.indexOf('action(state,"codex_trust_sandbox"');
+  assert.ok(authGate>=0,"generated repository authorization gate must exist");
+  assert.ok(codexTrust>authGate,"generated repository authorization must occur before sandbox Codex trust");
+  assert.match(cli,/repositories:\[state\.control_repository,state\.sandbox_repository\]/);
+});
