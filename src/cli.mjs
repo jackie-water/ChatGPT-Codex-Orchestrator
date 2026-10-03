@@ -8,6 +8,7 @@ import { loadState, saveState, stateRoot } from "./lib/state.mjs";
 import { t, normalizeLanguage } from "./lib/i18n.mjs";
 import { ERROR_CATALOG } from "./lib/errors.mjs";
 import { sanitizeObject } from "./lib/sanitize.mjs";
+import { submitDiagnosticReport } from "./lib/reporting.mjs";
 
 const argv = process.argv.slice(2);
 const command = argv[0] || "help";
@@ -186,7 +187,30 @@ function reportProblem() {
   fs.mkdirSync(dir,{recursive:true});
   const file=path.join(dir,`diagnostic-${Date.now()}.json`);
   fs.writeFileSync(file,JSON.stringify(report,null,2));
-  emit({status:"PASS",preferred_language:lang,message:t(lang,"report.prepared"),report_file:file,uploaded:false,consent_required_before_upload:true});
+  emit({status:"PASS",preferred_language:lang,message:t(lang,"report.prepared"),report_file:file,preview:report,uploaded:false,consent_required_before_upload:true});
+}
+
+function submitReport() {
+  const state=loadState();
+  const lang=ensureStateLanguage(state);
+  const file=valueOf("--file");
+  const consent=/^(true|yes|y|1)$/i.test(String(valueOf("--consent")||""));
+  const feedbackRepository=process.env.ORCHESTRATOR_FEEDBACK_REPOSITORY||"";
+  if(!consent){
+    return emit({status:"ERROR",error_id:"REPORT-001",recoverable:false,preferred_language:lang,message:t(lang,"report.consent.required"),uploaded:false},1);
+  }
+  if(!file||!fs.existsSync(file)){
+    return emit({status:"ERROR",error_id:"REPORT-002",recoverable:true,preferred_language:lang,message:t(lang,"report.file.missing"),uploaded:false},1);
+  }
+  if(!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(feedbackRepository)){
+    return emit({status:"ERROR",error_id:"REPORT-003",recoverable:true,preferred_language:lang,message:t(lang,"report.destination.missing"),uploaded:false},1);
+  }
+  try{
+    const result=submitDiagnosticReport({file,repository:feedbackRepository});
+    emit({status:"PASS",preferred_language:lang,message:t(lang,"report.submitted"),uploaded:true,url:result.url||null});
+  }catch(error){
+    emit({status:"ERROR",error_id:"REPORT-004",recoverable:true,preferred_language:lang,message:t(lang,"report.submit.failed"),details:String(error.message||error),uploaded:false},1);
+  }
 }
 
 if (command==="setup"||command==="resume") runSetup();
@@ -194,6 +218,7 @@ else if (command==="doctor") doctor();
 else if (command==="status") status();
 else if (command==="repair") repair();
 else if (command==="report-problem") reportProblem();
+else if (command==="submit-report") submitReport();
 else if (command==="answer") answer();
 else if (command==="errors") emit({status:"PASS",errors:ERROR_CATALOG});
-else emit({status:"PASS",message:"Commands: setup, resume, answer, doctor, status, repair, report-problem, errors"});
+else emit({status:"PASS",message:"Commands: setup, resume, answer, doctor, status, repair, report-problem, submit-report, errors"});
