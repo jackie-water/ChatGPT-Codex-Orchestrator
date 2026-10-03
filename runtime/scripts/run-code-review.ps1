@@ -124,7 +124,7 @@ try {
     if ($reviewEvidenceExists) {
       $callbackId = "code-review-existing-$projectKey-$reviewedCommit"
       $message = "[CODE-REVIEW-AUTO callback_id=$callbackId] Independent Codex code review evidence already exists for project '$projectKey', branch $sourceBranch, commit $reviewedCommit. Read $($checkpointBranch):.codex/reviews/by-commit/$reviewedCommit.md and adjudicate the findings. Do not rerun Code Review for this exact commit."
-      & (Join-Path $PSScriptRoot "wake-chat.ps1") -ChatUrl $chatUrl -Message $message -CallbackId $callbackId -QueueOnFailure
+      & (Join-Path $PSScriptRoot "dispatch-chat-callback.ps1") -ProjectKey $projectKey -IssueNumber ([int]$event.issue.number) -ReviewRoute $reviewRoute -Message $message -CallbackId $callbackId
       Write-Host "CODE_REVIEW_ALREADY_EXISTS commit=$reviewedCommit"
       return
     }
@@ -174,7 +174,7 @@ try {
 
     $callbackId = "code-review-docs-$projectKey-$reviewedCommit"
     $message = "[CODE-REVIEW-AUTO callback_id=$callbackId] Code Review was skipped as docs-only for project '$projectKey', branch $sourceBranch, commit $reviewedCommit. Read $($checkpointBranch):.codex/reviews/by-commit/$reviewedCommit.md and continue final Chat review."
-    & (Join-Path $PSScriptRoot "wake-chat.ps1") -ChatUrl $chatUrl -Message $message -CallbackId $callbackId -QueueOnFailure
+    & (Join-Path $PSScriptRoot "dispatch-chat-callback.ps1") -ProjectKey $projectKey -IssueNumber ([int]$event.issue.number) -ReviewRoute $reviewRoute -Message $message -CallbackId $callbackId
     return
   }
 
@@ -254,7 +254,7 @@ try {
 
   $callbackId = "code-review-$projectKey-$($event.issue.number)-$reviewedCommit"
   $message = "[CODE-REVIEW-AUTO callback_id=$callbackId] Independent Codex code review finished for project '$projectKey', branch $sourceBranch, commit $reviewedCommit. Review exit=$reviewExit, tokens=$reviewTokens. Read $($checkpointBranch):.codex/reviews/by-commit/$reviewedCommit.md and independently adjudicate every finding before final PASS/REVISE/NEEDS_HUMAN. Treat this review as valid only for commit $reviewedCommit."
-  & (Join-Path $PSScriptRoot "wake-chat.ps1") -ChatUrl $chatUrl -Message $message -CallbackId $callbackId -QueueOnFailure
+  & (Join-Path $PSScriptRoot "dispatch-chat-callback.ps1") -ProjectKey $projectKey -IssueNumber ([int]$event.issue.number) -ReviewRoute $reviewRoute -Message $message -CallbackId $callbackId
 
   if ($reviewExit -ne 0) { throw "Codex code review failed with exit code $reviewExit; review evidence and Chat callback were published." }
 } finally {
