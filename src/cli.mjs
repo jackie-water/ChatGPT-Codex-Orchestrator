@@ -9,6 +9,7 @@ import { t, normalizeLanguage } from "./lib/i18n.mjs";
 import { ERROR_CATALOG } from "./lib/errors.mjs";
 import { sanitizeObject } from "./lib/sanitize.mjs";
 import { submitDiagnosticReport } from "./lib/reporting.mjs";
+import { prepareControlEnvironment } from "./lib/control-env.mjs";
 
 const argv = process.argv.slice(2);
 const command = argv[0] || "help";
@@ -75,6 +76,12 @@ function answer() {
       return emit({status:"ERROR",error_id:"SETUP-006",recoverable:true,preferred_language:lang,message:t(lang,"answer.chat.invalid")},1);
     }
     state.reviewer_chat_url = value;
+  } else if (actionId === "codex_ready") {
+    if (!bool(value)) return emit({status:"ERROR",error_id:"AUTH-002",recoverable:true,preferred_language:lang,message:t(lang,"answer.codex.invalid")},1);
+    state.codex_ready = true;
+  } else if (actionId === "reviewer_browser_login") {
+    if (!bool(value)) return emit({status:"ERROR",error_id:"SETUP-012",recoverable:true,preferred_language:lang,message:t(lang,"answer.browser.invalid")},1);
+    state.reviewer_browser_ready = true;
   } else if (actionId === "chatgpt_project_instructions") {
     if (!bool(value)) return emit({status:"ERROR",error_id:"SETUP-007",recoverable:true,preferred_language:lang,message:t(lang,"answer.instructions.invalid")},1);
     state.instructions_added = true;
@@ -135,6 +142,73 @@ function runSetup() {
 
   if (!state.reviewer_chat_url) return emit(action(state,"reviewer_chat_url","setup.chat.ask"));
   if (!state.completed.includes("reviewer_chat_url")) state.completed.push("reviewer_chat_url");
+
+  if (!state.control_environment_ready) {
+    try {
+      const control=prepareControlEnvironment({
+        installationId:state.installation_id,
+        targetRepository:state.target_repository,
+        reviewerChatUrl:state.reviewer_chat_url,
+        sourceRoot:process.cwd(),
+        home:os.homedir()
+      });
+      Object.assign(state,{
+        github_login:control.github_login,
+        project_key:control.project_key,
+        default_branch:control.default_branch,
+        validation_profile:control.validation_profile,
+        control_repository:control.control_repository,
+        control_clone_path:control.control_clone_path,
+        project_clone_path:control.project_clone_path,
+        runner_path:control.runner_path,
+        runner_label:control.runner_label,
+        config_path:control.config_path,
+        browser_port:control.browser_port,
+        browser_profile:control.browser_profile
+      });
+
+      const setupClone=spawnSync("powershell.exe",[
+        "-NoProfile","-ExecutionPolicy","Bypass","-File",
+        path.join(control.control_clone_path,"scripts","setup-project-clone.ps1"),
+        "-Project",control.project_key
+      ],{encoding:"utf8"});
+      if(setupClone.status!==0) throw new Error((setupClone.stderr||setupClone.stdout||"Project clone/checkpoint setup failed").trim());
+
+      const runnerInstall=spawnSync("powershell.exe",[
+        "-NoProfile","-ExecutionPolicy","Bypass","-File",
+        path.join(control.control_clone_path,"scripts","install-runner.ps1"),
+        "-ControlRepository",control.control_repository,
+        "-RunnerPath",control.runner_path,
+        "-RunnerLabel",control.runner_label
+      ],{encoding:"utf8"});
+      if(runnerInstall.status!==0) throw new Error((runnerInstall.stderr||runnerInstall.stdout||"Runner installation failed").trim());
+
+      state.control_environment_ready=true;
+      if(!state.completed.includes("control_environment")) state.completed.push("control_environment");
+      saveState(state);
+    } catch(error) {
+      state.last_error={error_id:"SETUP-011",message:String(error.message||error),at:new Date().toISOString()};
+      saveState(state);
+      return emit({status:"ERROR",error_id:"SETUP-011",recoverable:true,preferred_language:lang,message:t(lang,"setup.control.failed"),details:String(error.message||error)},1);
+    }
+  }
+
+  const codexLogin=commandExists("codex",["login","status"]);
+  if(!codexLogin.ok || !state.codex_ready) {
+    return emit(action(state,"codex_ready","setup.codex.ready",{
+      project_clone_path:state.project_clone_path,
+      helper_instruction:t(lang,"setup.codex.helper")
+    }));
+  }
+  if(!state.completed.includes("codex_ready")) state.completed.push("codex_ready");
+
+  if(!state.reviewer_browser_ready) {
+    return emit(action(state,"reviewer_browser_login","setup.browser.login",{
+      helper_script:path.join(state.control_clone_path,"scripts","start-reviewer-browser.ps1"),
+      reviewer_chat_url:state.reviewer_chat_url
+    }));
+  }
+  if(!state.completed.includes("reviewer_browser_login")) state.completed.push("reviewer_browser_login");
 
   const generated = path.resolve(".generated");
   fs.mkdirSync(generated,{recursive:true});
