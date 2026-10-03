@@ -20,6 +20,7 @@ import {
 const argv = process.argv.slice(2);
 const command = argv[0] || "help";
 const wantsJson = argv.includes("--json");
+const productConfig = JSON.parse(fs.readFileSync(new URL("../product.json", import.meta.url),"utf8"));
 
 function valueOf(flag) {
   const i = argv.indexOf(flag);
@@ -586,7 +587,7 @@ function repair() {
 function reportProblem() {
   const state=loadState();
   const lang=ensureStateLanguage(state);
-  const report=sanitizeObject({generated_at:new Date().toISOString(),version:"0.1.0-dev",platform:process.platform,os_release:os.release(),current_step:state.current_step||null,preferred_language:lang,last_error:state.last_error||null,environment:state.environment||null});
+  const report=sanitizeObject({generated_at:new Date().toISOString(),version:productConfig.version||"unknown",release_channel:productConfig.release_channel||null,platform:process.platform,os_release:os.release(),current_step:state.current_step||null,preferred_language:lang,last_error:state.last_error||null,environment:state.environment||null});
   const dir=path.join(stateRoot(),"diagnostics");
   fs.mkdirSync(dir,{recursive:true});
   const file=path.join(dir,`diagnostic-${Date.now()}.json`);
@@ -599,7 +600,7 @@ function submitReport() {
   const lang=ensureStateLanguage(state);
   const file=valueOf("--file");
   const consent=/^(true|yes|y|1)$/i.test(String(valueOf("--consent")||""));
-  const feedbackRepository=process.env.ORCHESTRATOR_FEEDBACK_REPOSITORY||"";
+  const feedbackRepository=process.env.ORCHESTRATOR_FEEDBACK_REPOSITORY||productConfig.feedback_repository||"";
   if(!consent){
     return emit({status:"ERROR",error_id:"REPORT-001",recoverable:false,preferred_language:lang,message:t(lang,"report.consent.required"),uploaded:false},1);
   }
