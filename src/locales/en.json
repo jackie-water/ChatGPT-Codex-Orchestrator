@@ -56,5 +56,7 @@
   "sandbox.approval.required": "Explicit approval is required before the reviewed sandbox commit can be merged.",
   "sandbox.approval.created": "The exact reviewed sandbox commit was approved for sandbox-only merge.",
   "sandbox.approval.failed": "The sandbox merge approval could not be created.",
-  "setup.target.activate_failed": "The sandbox passed, but activation of your real project did not finish. The real project main branch was not changed; I can repair this activation step."
+  "setup.target.activate_failed": "The sandbox passed, but activation of your real project did not finish. The real project main branch was not changed; I can repair this activation step.",
+  "setup.generated_repo.connect": "Two private repositories were created for this installation. Add both generated repositories to the ChatGPT GitHub connection, then verify that ChatGPT can access both before continuing.",
+  "answer.generated_repo.invalid": "ChatGPT access to the generated control and sandbox repositories has not been verified yet."
 }
