@@ -20,6 +20,9 @@ if ([string]::IsNullOrWhiteSpace($projectKey)) { throw "project is required" }
 $projectProp = $registry.projects.PSObject.Properties[$projectKey]
 if (-not $projectProp) { throw "Unknown project: $projectKey" }
 $project = $projectProp.Value
+if ($project.PSObject.Properties.Name -contains "enabled" -and -not [bool]$project.enabled) {
+  throw "PROJECT_DISABLED: project '$projectKey' is registered but is not activated yet"
+}
 $repository = [string]$project.repository
 $defaultBranch = [string]$project.default_branch
 $localPathKey = [string]$project.local_path_key
