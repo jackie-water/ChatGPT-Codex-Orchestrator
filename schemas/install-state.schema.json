@@ -1,21 +1,92 @@
 {
-  "$schema":"https://json-schema.org/draft/2020-12/schema",
-  "title":"ChatGPT Codex Orchestrator Install State",
-  "type":"object",
-  "required":["schema_version","current_step","completed","ready"],
-  "properties":{
-    "schema_version":{"type":"integer","const":1},
-    "installation_id":{"type":["string","null"]},
-    "preferred_language":{"enum":["en","zh-CN",null]},
-    "current_step":{"type":"string"},
-    "completed":{"type":"array","items":{"type":"string"},"uniqueItems":true},
-    "ready":{"type":"boolean"},
-    "github_authorized":{"type":"boolean"},
-    "target_repository":{"type":"string"},
-    "reviewer_chat_url":{"type":"string"},
-    "project_key":{"type":"string"},
-    "instructions_added":{"type":"boolean"},
-    "sandbox_verified":{"type":"boolean"}
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ChatGPT Codex Orchestrator Install State",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "current_step",
+    "completed",
+    "ready"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "installation_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "preferred_language": {
+      "enum": [
+        "en",
+        "zh-CN",
+        null
+      ]
+    },
+    "current_step": {
+      "type": "string"
+    },
+    "completed": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true
+    },
+    "ready": {
+      "type": "boolean"
+    },
+    "target_repository": {
+      "type": "string"
+    },
+    "reviewer_chat_url": {
+      "type": "string"
+    },
+    "project_key": {
+      "type": "string"
+    },
+    "instructions_added": {
+      "type": "boolean"
+    },
+    "sandbox_verified": {
+      "type": "boolean"
+    },
+    "github_plugin_authorized": {
+      "type": "boolean"
+    },
+    "control_environment_ready": {
+      "type": "boolean"
+    },
+    "control_repository": {
+      "type": "string"
+    },
+    "control_clone_path": {
+      "type": "string"
+    },
+    "project_clone_path": {
+      "type": "string"
+    },
+    "runner_path": {
+      "type": "string"
+    },
+    "runner_label": {
+      "type": "string"
+    },
+    "codex_ready": {
+      "type": "boolean"
+    },
+    "reviewer_browser_ready": {
+      "type": "boolean"
+    },
+    "browser_port": {
+      "type": "integer"
+    },
+    "browser_profile": {
+      "type": "string"
+    }
   },
-  "additionalProperties":true
+  "additionalProperties": true
 }
