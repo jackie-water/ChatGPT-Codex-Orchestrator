@@ -160,6 +160,10 @@ function runSetup() {
         control_repository:control.control_repository,
         control_clone_path:control.control_clone_path,
         project_clone_path:control.project_clone_path,
+        sandbox_project_key:control.sandbox_project_key,
+        sandbox_repository:control.sandbox_repository,
+        sandbox_clone_path:control.sandbox_clone_path,
+        sandbox_validation_profile:control.sandbox_validation_profile,
         runner_path:control.runner_path,
         runner_label:control.runner_label,
         config_path:control.config_path,
@@ -167,12 +171,16 @@ function runSetup() {
         browser_profile:control.browser_profile
       });
 
-      const setupClone=spawnSync("powershell.exe",[
-        "-NoProfile","-ExecutionPolicy","Bypass","-File",
-        path.join(control.control_clone_path,"scripts","setup-project-clone.ps1"),
-        "-Project",control.project_key
-      ],{encoding:"utf8"});
-      if(setupClone.status!==0) throw new Error((setupClone.stderr||setupClone.stdout||"Project clone/checkpoint setup failed").trim());
+      for(const projectToPrepare of [control.project_key,control.sandbox_project_key]){
+        const setupClone=spawnSync("powershell.exe",[
+          "-NoProfile","-ExecutionPolicy","Bypass","-File",
+          path.join(control.control_clone_path,"scripts","setup-project-clone.ps1"),
+          "-Project",projectToPrepare
+        ],{encoding:"utf8"});
+        if(setupClone.status!==0) {
+          throw new Error((setupClone.stderr||setupClone.stdout||("Project clone/checkpoint setup failed for "+projectToPrepare)).trim());
+        }
+      }
 
       const runnerInstall=spawnSync("powershell.exe",[
         "-NoProfile","-ExecutionPolicy","Bypass","-File",
