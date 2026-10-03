@@ -9,7 +9,7 @@ import { t, normalizeLanguage } from "./lib/i18n.mjs";
 import { ERROR_CATALOG } from "./lib/errors.mjs";
 import { sanitizeObject } from "./lib/sanitize.mjs";
 import { submitDiagnosticReport } from "./lib/reporting.mjs";
-import { prepareControlEnvironment } from "./lib/control-env.mjs";
+import { prepareControlEnvironment, activateTargetProject } from "./lib/control-env.mjs";
 import {
   sandboxSmokeStatus,
   startSandboxSmoke,
@@ -180,15 +180,15 @@ function runSetup() {
         browser_profile:control.browser_profile
       });
 
-      for(const projectToPrepare of [control.project_key,control.sandbox_project_key]){
-        const setupClone=spawnSync("powershell.exe",[
-          "-NoProfile","-ExecutionPolicy","Bypass","-File",
-          path.join(control.control_clone_path,"scripts","setup-project-clone.ps1"),
-          "-Project",projectToPrepare
-        ],{encoding:"utf8"});
-        if(setupClone.status!==0) {
-          throw new Error((setupClone.stderr||setupClone.stdout||("Project clone/checkpoint setup failed for "+projectToPrepare)).trim());
-        }
+      // Installation isolation: before the sandbox passes, only the generated
+      // sandbox may receive checkpoint branches or orchestration writes.
+      const setupSandbox=spawnSync("powershell.exe",[
+        "-NoProfile","-ExecutionPolicy","Bypass","-File",
+        path.join(control.control_clone_path,"scripts","setup-project-clone.ps1"),
+        "-Project",control.sandbox_project_key
+      ],{encoding:"utf8"});
+      if(setupSandbox.status!==0) {
+        throw new Error((setupSandbox.stderr||setupSandbox.stdout||("Sandbox clone/checkpoint setup failed for "+control.sandbox_project_key)).trim());
       }
 
       const runnerInstall=spawnSync("powershell.exe",[
@@ -308,6 +308,44 @@ function runSetup() {
       state.last_error={error_id:"SANDBOX-001",message:String(error.message||error),at:new Date().toISOString()};
       saveState(state);
       return emit({status:"ERROR",error_id:"SANDBOX-001",recoverable:true,preferred_language:lang,message:t(lang,"setup.sandbox.start_failed"),details:String(error.message||error)},1);
+    }
+  }
+
+  if(!state.target_environment_ready) {
+    try {
+      if(!state.sandbox_verified) throw new Error("Target project cannot be activated before sandbox verification");
+
+      const activation=activateTargetProject({
+        controlClonePath:state.control_clone_path,
+        projectKey:state.project_key,
+        repository:state.target_repository
+      });
+
+      const setupTarget=spawnSync("powershell.exe",[
+        "-NoProfile","-ExecutionPolicy","Bypass","-File",
+        path.join(state.control_clone_path,"scripts","setup-project-clone.ps1"),
+        "-Project",state.project_key
+      ],{encoding:"utf8"});
+      if(setupTarget.status!==0) {
+        throw new Error((setupTarget.stderr||setupTarget.stdout||("Target clone/checkpoint setup failed for "+state.project_key)).trim());
+      }
+
+      state.target_environment_ready=true;
+      state.target_registry_activated=true;
+      state.target_activation_changed=Boolean(activation.changed);
+      if(!state.completed.includes("target_environment_ready")) state.completed.push("target_environment_ready");
+      saveState(state);
+    } catch(error) {
+      state.last_error={error_id:"SETUP-013",message:String(error.message||error),at:new Date().toISOString()};
+      saveState(state);
+      return emit({
+        status:"ERROR",
+        error_id:"SETUP-013",
+        recoverable:true,
+        preferred_language:lang,
+        message:t(lang,"setup.target.activate_failed"),
+        details:String(error.message||error)
+      },1);
     }
   }
 
