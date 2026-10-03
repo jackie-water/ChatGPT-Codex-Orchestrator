@@ -53,6 +53,47 @@ function action(state, actionId, messageKey, extra = {}) {
   };
 }
 
+function answer() {
+  const state = loadState();
+  const lang = ensureStateLanguage(state);
+  const actionId = valueOf("--action");
+  const value = valueOf("--value");
+
+  const bool = v => /^(true|yes|y|1|done|completed)$/i.test(String(v || ""));
+
+  if (actionId === "github_authorization") {
+    if (!bool(value)) return emit({status:"ERROR",error_id:"AUTH-001",recoverable:true,preferred_language:lang,message:t(lang,"answer.github.invalid")},1);
+    state.github_authorized = true;
+  } else if (actionId === "target_repository") {
+    if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(String(value || ""))) {
+      return emit({status:"ERROR",error_id:"SETUP-005",recoverable:true,preferred_language:lang,message:t(lang,"answer.repository.invalid")},1);
+    }
+    state.target_repository = value;
+  } else if (actionId === "reviewer_chat_url") {
+    if (!/^https:\/\/chatgpt\.com\//i.test(String(value || ""))) {
+      return emit({status:"ERROR",error_id:"SETUP-006",recoverable:true,preferred_language:lang,message:t(lang,"answer.chat.invalid")},1);
+    }
+    state.reviewer_chat_url = value;
+  } else if (actionId === "chatgpt_project_instructions") {
+    if (!bool(value)) return emit({status:"ERROR",error_id:"SETUP-007",recoverable:true,preferred_language:lang,message:t(lang,"answer.instructions.invalid")},1);
+    state.instructions_added = true;
+  } else if (actionId === "sandbox_verification") {
+    if (!bool(value)) return emit({status:"ERROR",error_id:"SETUP-008",recoverable:true,preferred_language:lang,message:t(lang,"answer.sandbox.invalid")},1);
+    state.sandbox_verified = true;
+  } else {
+    return emit({status:"ERROR",error_id:"SETUP-009",recoverable:false,preferred_language:lang,message:t(lang,"answer.action.unknown")},1);
+  }
+
+  saveState(state);
+  emit({
+    status:"PASS",
+    preferred_language:lang,
+    message:t(lang,"answer.saved"),
+    action_id:actionId,
+    resume_command:"node src/cli.mjs resume --json"
+  });
+}
+
 function runSetup() {
   const state = loadState();
   const lang = ensureStateLanguage(state);
@@ -153,5 +194,6 @@ else if (command==="doctor") doctor();
 else if (command==="status") status();
 else if (command==="repair") repair();
 else if (command==="report-problem") reportProblem();
+else if (command==="answer") answer();
 else if (command==="errors") emit({status:"PASS",errors:ERROR_CATALOG});
-else emit({status:"PASS",message:"Commands: setup, resume, doctor, status, repair, report-problem, errors"});
+else emit({status:"PASS",message:"Commands: setup, resume, answer, doctor, status, repair, report-problem, errors"});
