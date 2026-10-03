@@ -6,12 +6,13 @@ export function safeKey(value){
   return key;
 }
 
-export function projectEntry({projectKey,repository,defaultBranch="main",validationProfile}){
+export function projectEntry({projectKey,repository,defaultBranch="main",validationProfile,enabled=true}){
   const allowed=[...new Set(["git",...(validationProfile?.allowed_executables||[])])];
   return {
     key:projectKey,
     value:{
       repository,
+      enabled:Boolean(enabled),
       default_branch:defaultBranch,
       checkpoint_branch:"codex/checkpoints",
       local_path_key:projectKey,
