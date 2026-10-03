@@ -189,6 +189,14 @@ while($true){
       $value=Read-Host $m.ChatPrompt
       Save-Answer $action $value
     }
+    "generated_repo_authorization" {
+      if($payload.repositories){
+        Write-Host ""
+        foreach($repo in @($payload.repositories)){ Write-Host ("  - "+$repo) -ForegroundColor Yellow }
+      }
+      Read-Host $m.PressAfter | Out-Null
+      Save-Answer $action "true"
+    }
     "codex_login" {
       Run-InteractiveHelper @("codex-login")
     }
