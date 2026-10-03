@@ -20,6 +20,9 @@ if ([string]::IsNullOrWhiteSpace($projectKey)) { throw "project is required" }
 $projectProp = $registry.projects.PSObject.Properties[$projectKey]
 if (-not $projectProp) { throw "Unknown project: $projectKey" }
 $project = $projectProp.Value
+if ($project.PSObject.Properties.Name -contains "enabled" -and -not [bool]$project.enabled) {
+  throw "PROJECT_DISABLED: project '$projectKey' is registered but is not activated yet"
+}
 
 if (-not ($project.PSObject.Properties.Name -contains "code_review") -or -not [bool]$project.code_review.enabled) {
   throw "Code review is not enabled for project '$projectKey'"
