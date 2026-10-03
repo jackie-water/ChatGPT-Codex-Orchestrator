@@ -27,6 +27,7 @@ export const ERROR_CATALOG={
   "MERGE-001":"Approved commit does not match the branch head.",
   "MERGE-002":"Required code-review evidence is missing.",
   "DOCTOR-001":"One or more health checks require attention.",
+  "REPAIR-001":"Automatic runtime repair failed or is not ready.",
   "REPORT-001":"Diagnostic upload consent was not provided.",
   "REPORT-002":"Diagnostic report file is missing.",
   "REPORT-003":"Feedback repository is not configured.",
