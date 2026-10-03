@@ -43,6 +43,7 @@ AI / structured bootstrap:
 After Node bootstrap:
 
 - setup: `node src/cli.mjs setup --json --language <en|zh-CN>`
+- save a verified user answer: `node src/cli.mjs answer --action <action_id> --value <value> --json`
 - resume: `node src/cli.mjs resume --json`
 - doctor: `node src/cli.mjs doctor --json`
 - status: `node src/cli.mjs status --json`
