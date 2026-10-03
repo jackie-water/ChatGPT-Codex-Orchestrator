@@ -29,7 +29,30 @@ function valueOf(flag) {
 function emit(payload, code = 0) {
   if (wantsJson) process.stdout.write(JSON.stringify(payload, null, 2) + "\n");
   else {
+    const zh=payload.preferred_language==="zh-CN";
     console.log(payload.message || payload.status || "");
+    if(payload.error_id) console.log((zh?"错误编号":"Error ID")+": "+payload.error_id);
+    if(payload.current_step) console.log((zh?"当前步骤":"Current step")+": "+payload.current_step);
+    if(payload.report_file) console.log((zh?"本地诊断报告":"Local diagnostic report")+": "+payload.report_file);
+    if(payload.consent_required_before_upload) {
+      console.log(zh?"报告尚未上传。提交前会再次征求你的明确同意。":"The report has not been uploaded. Explicit consent will be requested before submission.");
+    }
+    if(payload.checks&&typeof payload.checks==="object"){
+      console.log("");
+      console.log(zh?"检查结果：":"Checks:");
+      for(const [key,value] of Object.entries(payload.checks)){
+        if(typeof value==="boolean") console.log("  "+(value?"✓":"✗")+" "+key.replaceAll("_"," "));
+        else if(key==="pending_callbacks") console.log("  "+key.replaceAll("_"," ")+": "+value);
+      }
+    }
+    if(payload.runtime&&typeof payload.runtime==="object"){
+      console.log("");
+      console.log(zh?"运行状态：":"Runtime:");
+      for(const [key,value] of Object.entries(payload.runtime)){
+        if(typeof value==="boolean") console.log("  "+(value?"✓":"✗")+" "+key.replaceAll("_"," "));
+        else console.log("  "+key.replaceAll("_"," ")+": "+value);
+      }
+    }
     if (payload.details) console.log(payload.details);
   }
   process.exitCode = code;
