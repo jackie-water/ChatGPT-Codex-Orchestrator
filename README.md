@@ -46,7 +46,9 @@ The AI should read [AI_INSTALL.md](AI_INSTALL.md) and use the official installer
 
 Double-click **Install.cmd**.
 
-The setup assistant will guide you. Advanced terminal knowledge should not be required.
+The setup assistant stays open and gives you **one step at a time**. It can ask for your repository name or reviewer Chat URL, open sign-in steps when needed, copy generated ChatGPT Project Instructions to your clipboard, and wait for you before continuing.
+
+Advanced terminal knowledge should not be required.
 
 ## How you will use it after setup
 
@@ -55,6 +57,12 @@ Work normally in your ChatGPT Project. For example:
 > Add a page that lets users export their report as CSV.
 
 The orchestrator handles the technical workflow behind the scenes: implementation branch, validation, review, correction loops, callbacks and exact-version merge approval.
+
+## Your real project stays untouched during the installation test
+
+The installer creates a separate private Sandbox repository first. Your real project is registered as **disabled** until the Sandbox has completed implementation, automated validation, independent Code Review, and the explicitly approved Sandbox-only merge.
+
+Only after that test passes can the installer activate orchestration for your real project.
 
 ## Safe Mode
 
@@ -79,9 +87,11 @@ you can safely press **Send** yourself. The callback ID lets the workflow recogn
 
 Do **not** rerun Codex just because the callback message is waiting in the input box.
 
-If it happens repeatedly, use the repair flow. Repair should retry pending callbacks before asking you to rerun any coding task.
+If it happens repeatedly, double-click **Repair Chat Connection.cmd**. Repair retries pending callbacks before asking you to rerun any coding task.
 
 ## Check whether everything is working
+
+Double-click **Check Status.cmd**.
 
 Doctor/Status is intended to show simple results such as:
 
@@ -100,7 +110,7 @@ Technical details stay hidden unless you ask for them.
 
 ## Report a problem
 
-If repair fails, the project can prepare a **sanitised diagnostic report**.
+If repair fails, double-click **Report a Problem.cmd**. The project prepares a **sanitised diagnostic report on your computer**.
 
 Nothing is uploaded automatically. You can review the report and decide whether to submit it.
 
