@@ -10,6 +10,12 @@ import { ERROR_CATALOG } from "./lib/errors.mjs";
 import { sanitizeObject } from "./lib/sanitize.mjs";
 import { submitDiagnosticReport } from "./lib/reporting.mjs";
 import { prepareControlEnvironment } from "./lib/control-env.mjs";
+import {
+  sandboxSmokeStatus,
+  startSandboxSmoke,
+  createSandboxCodeReview,
+  createSandboxMergeApproval
+} from "./lib/sandbox-smoke.mjs";
 
 const argv = process.argv.slice(2);
 const command = argv[0] || "help";
@@ -76,9 +82,12 @@ function answer() {
       return emit({status:"ERROR",error_id:"SETUP-006",recoverable:true,preferred_language:lang,message:t(lang,"answer.chat.invalid")},1);
     }
     state.reviewer_chat_url = value;
-  } else if (actionId === "codex_ready") {
+  } else if (actionId === "codex_trust_sandbox") {
     if (!bool(value)) return emit({status:"ERROR",error_id:"AUTH-002",recoverable:true,preferred_language:lang,message:t(lang,"answer.codex.invalid")},1);
-    state.codex_ready = true;
+    state.codex_trust_sandbox = true;
+  } else if (actionId === "codex_trust_project") {
+    if (!bool(value)) return emit({status:"ERROR",error_id:"AUTH-002",recoverable:true,preferred_language:lang,message:t(lang,"answer.codex.invalid")},1);
+    state.codex_trust_project = true;
   } else if (actionId === "reviewer_browser_login") {
     if (!bool(value)) return emit({status:"ERROR",error_id:"SETUP-012",recoverable:true,preferred_language:lang,message:t(lang,"answer.browser.invalid")},1);
     state.reviewer_browser_ready = true;
@@ -202,17 +211,32 @@ function runSetup() {
   }
 
   const codexLogin=commandExists("codex",["login","status"]);
-  if(!codexLogin.ok || !state.codex_ready) {
-    return emit(action(state,"codex_ready","setup.codex.ready",{
-      project_clone_path:state.project_clone_path,
-      helper_instruction:t(lang,"setup.codex.helper")
+  if(!codexLogin.ok) {
+    return emit(action(state,"codex_login","setup.codex.login",{
+      helper_command:"node src/cli.mjs codex-login --json"
     }));
   }
-  if(!state.completed.includes("codex_ready")) state.completed.push("codex_ready");
+  if(!state.completed.includes("codex_login")) state.completed.push("codex_login");
+
+  if(!state.codex_trust_sandbox) {
+    return emit(action(state,"codex_trust_sandbox","setup.codex.trust_sandbox",{
+      folder:state.sandbox_clone_path,
+      helper_command:"node src/cli.mjs codex-open --scope sandbox"
+    }));
+  }
+  if(!state.completed.includes("codex_trust_sandbox")) state.completed.push("codex_trust_sandbox");
 
   if(!state.reviewer_browser_ready) {
+    const browserScript=path.join(state.control_clone_path,"scripts","start-reviewer-browser.ps1");
+    const openBrowser=spawnSync("powershell.exe",[
+      "-NoProfile","-ExecutionPolicy","Bypass","-File",browserScript,
+      "-ChatUrl",state.reviewer_chat_url
+    ],{encoding:"utf8"});
+    if(openBrowser.status!==0){
+      state.last_error={error_id:"CALLBACK-001",message:(openBrowser.stderr||openBrowser.stdout||"Reviewer browser launch failed").trim(),at:new Date().toISOString()};
+      saveState(state);
+    }
     return emit(action(state,"reviewer_browser_login","setup.browser.login",{
-      helper_script:path.join(state.control_clone_path,"scripts","start-reviewer-browser.ps1"),
       reviewer_chat_url:state.reviewer_chat_url
     }));
   }
@@ -234,15 +258,147 @@ function runSetup() {
   }
 
   if (!state.sandbox_verified) {
-    saveState(state);
-    return emit(action(state,"sandbox_verification","setup.sandbox.required"));
+    try {
+      const sessionScript=path.join(state.control_clone_path,"scripts","start-orchestrator-session.ps1");
+      const session=spawnSync("powershell.exe",[
+        "-NoProfile","-ExecutionPolicy","Bypass","-File",sessionScript,
+        "-Project",state.sandbox_project_key
+      ],{encoding:"utf8"});
+      if(session.status!==0){
+        throw new Error((session.stderr||session.stdout||"Sandbox session startup failed").trim());
+      }
+
+      let smoke=sandboxSmokeStatus(state);
+      if(smoke.stage==="NOT_STARTED"){
+        const started=startSandboxSmoke(state);
+        state.sandbox_smoke_started=true;
+        state.sandbox_smoke_issue=started.issue?.url||null;
+        saveState(state);
+        smoke=sandboxSmokeStatus(state);
+      }
+
+      if(smoke.stage==="COMPLETE"){
+        state.sandbox_verified=true;
+        if(!state.completed.includes("sandbox_verified")) state.completed.push("sandbox_verified");
+        saveState(state);
+      } else if(smoke.stage==="MERGE_APPROVAL_REQUIRED"){
+        saveState(state);
+        return emit(action(state,"sandbox_merge_approval","setup.sandbox.merge_approval",{
+          sandbox_repository:state.sandbox_repository,
+          reviewed_commit:smoke.commit,
+          branch:smoke.branch,
+          approve_command:"node src/cli.mjs smoke-approve --commit "+smoke.commit+" --yes --json"
+        }));
+      } else if(smoke.stage==="IMPLEMENTATION_FAILED"){
+        state.last_error={error_id:"SANDBOX-002",message:"Sandbox implementation/validation failed",details:smoke,at:new Date().toISOString()};
+        saveState(state);
+        return emit({status:"ERROR",error_id:"SANDBOX-002",recoverable:true,preferred_language:lang,message:t(lang,"setup.sandbox.failed"),smoke},1);
+      } else {
+        state.current_step="sandbox_smoke_waiting";
+        saveState(state);
+        return emit({
+          status:"WAITING",
+          preferred_language:lang,
+          message:t(lang,"setup.sandbox.waiting"),
+          smoke,
+          note:t(lang,"setup.sandbox.chat_handles_review")
+        });
+      }
+    } catch(error) {
+      state.last_error={error_id:"SANDBOX-001",message:String(error.message||error),at:new Date().toISOString()};
+      saveState(state);
+      return emit({status:"ERROR",error_id:"SANDBOX-001",recoverable:true,preferred_language:lang,message:t(lang,"setup.sandbox.start_failed"),details:String(error.message||error)},1);
+    }
   }
+
+  if(!state.codex_trust_project) {
+    return emit(action(state,"codex_trust_project","setup.codex.trust_project",{
+      folder:state.project_clone_path,
+      helper_command:"node src/cli.mjs codex-open --scope project"
+    }));
+  }
+  if(!state.completed.includes("codex_trust_project")) state.completed.push("codex_trust_project");
 
   state.current_step="ready";
   state.ready=true;
   if (!state.completed.includes("ready")) state.completed.push("ready");
   saveState(state);
   emit({status:"PASS",preferred_language:lang,message:t(lang,"setup.ready"),project_key:state.project_key,repository:state.target_repository});
+}
+
+function codexLogin() {
+  const state=loadState();
+  const lang=ensureStateLanguage(state);
+  const result=spawnSync("codex",["login"],{stdio:"inherit",shell:process.platform==="win32"});
+  const verify=commandExists("codex",["login","status"]);
+  if(result.status!==0||!verify.ok){
+    return emit({status:"ERROR",error_id:"AUTH-002",recoverable:true,preferred_language:lang,message:t(lang,"codex.login.failed")},1);
+  }
+  emit({status:"PASS",preferred_language:lang,message:t(lang,"codex.login.success"),resume_command:"node src/cli.mjs resume --json"});
+}
+
+function codexOpen() {
+  const state=loadState();
+  const lang=ensureStateLanguage(state);
+  const scope=valueOf("--scope");
+  const folder=scope==="sandbox"?state.sandbox_clone_path:scope==="project"?state.project_clone_path:null;
+  if(!folder||!fs.existsSync(folder)){
+    return emit({status:"ERROR",error_id:"AUTH-004",recoverable:true,preferred_language:lang,message:t(lang,"codex.folder.missing")},1);
+  }
+  const result=spawnSync("codex",[],{cwd:folder,stdio:"inherit",shell:process.platform==="win32"});
+  emit({
+    status:result.status===0?"PASS":"NEEDS_USER_ACTION",
+    preferred_language:lang,
+    message:t(lang,"codex.trust.after_open"),
+    scope,
+    folder,
+    confirm_command:"node src/cli.mjs answer --action codex_trust_"+scope+" --value true --json"
+  },result.status===0?0:0);
+}
+
+function smokeStatusCommand() {
+  const state=loadState();
+  const lang=ensureStateLanguage(state);
+  try{
+    const smoke=sandboxSmokeStatus(state);
+    emit({status:smoke.status,preferred_language:lang,message:t(lang,"sandbox.status"),smoke});
+  }catch(error){
+    emit({status:"ERROR",error_id:"SANDBOX-001",recoverable:true,preferred_language:lang,message:t(lang,"setup.sandbox.start_failed"),details:String(error.message||error)},1);
+  }
+}
+
+function smokeReviewCommand() {
+  const state=loadState();
+  const lang=ensureStateLanguage(state);
+  const commit=String(valueOf("--commit")||"").toLowerCase();
+  try{
+    const result=createSandboxCodeReview(state,{commit});
+    emit({status:"PASS",preferred_language:lang,message:t(lang,"sandbox.review.created"),...result});
+  }catch(error){
+    emit({status:"ERROR",error_id:"SANDBOX-003",recoverable:true,preferred_language:lang,message:t(lang,"sandbox.review.failed"),details:String(error.message||error)},1);
+  }
+}
+
+function smokeApproveCommand() {
+  const state=loadState();
+  const lang=ensureStateLanguage(state);
+  const commit=String(valueOf("--commit")||"").toLowerCase();
+  const yes=argv.includes("--yes");
+  if(!yes){
+    return emit({status:"ERROR",error_id:"SANDBOX-004",recoverable:false,preferred_language:lang,message:t(lang,"sandbox.approval.required")},1);
+  }
+  try{
+    const status=sandboxSmokeStatus(state);
+    if(status.stage!=="MERGE_APPROVAL_REQUIRED"||status.commit!==commit){
+      throw new Error("The requested commit is not the current independently reviewed sandbox commit");
+    }
+    const result=createSandboxMergeApproval(state,{commit});
+    state.sandbox_merge_approved_commit=commit;
+    saveState(state);
+    emit({status:"PASS",preferred_language:lang,message:t(lang,"sandbox.approval.created"),...result,resume_command:"node src/cli.mjs resume --json"});
+  }catch(error){
+    emit({status:"ERROR",error_id:"SANDBOX-005",recoverable:true,preferred_language:lang,message:t(lang,"sandbox.approval.failed"),details:String(error.message||error)},1);
+  }
 }
 
 function githubLogin() {
@@ -402,6 +558,11 @@ function submitReport() {
 
 if (command==="setup"||command==="resume") runSetup();
 else if (command==="github-login") githubLogin();
+else if (command==="codex-login") codexLogin();
+else if (command==="codex-open") codexOpen();
+else if (command==="smoke-status") smokeStatusCommand();
+else if (command==="smoke-review") smokeReviewCommand();
+else if (command==="smoke-approve") smokeApproveCommand();
 else if (command==="doctor") doctor();
 else if (command==="status") status();
 else if (command==="repair") repair();
@@ -409,4 +570,4 @@ else if (command==="report-problem") reportProblem();
 else if (command==="submit-report") submitReport();
 else if (command==="answer") answer();
 else if (command==="errors") emit({status:"PASS",errors:ERROR_CATALOG});
-else emit({status:"PASS",message:"Commands: setup, resume, answer, github-login, doctor, status, repair, report-problem, submit-report, errors"});
+else emit({status:"PASS",message:"Commands: setup, resume, answer, github-login, codex-login, codex-open, smoke-status, smoke-review, smoke-approve, doctor, status, repair, report-problem, submit-report, errors"});
