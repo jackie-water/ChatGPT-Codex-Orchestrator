@@ -141,3 +141,18 @@ Before the first real setup mutation, run the official dry-run once.
 The dry-run may inspect local command availability and existing installer state, but it must report `mutations_performed: false`. It must not create GitHub repositories, configure a runner, create checkpoint branches, or modify the user's project.
 
 Use the dry-run output to explain only the next relevant user action. Do not turn the dry-run into a long list of technical instructions.
+
+
+## Issue-origin callback routing
+
+Normal callbacks should return to the Chat that created the corresponding GitHub orchestration issue.
+
+After an AI Chat creates a CODEX-RUN, CODE-REVIEW or MERGE-APPROVE issue, it must emit the generated ORCHESTRATOR-ORIGIN marker in that same Chat reply, using the exact issue number and project key from the generated Project Instructions.
+
+Do not put ChatGPT conversation URLs into GitHub issues.
+
+The configured project reviewer URL is a delayed disaster-recovery fallback only. Do not route a fresh callback to the fallback just because the issue-origin marker has not been captured yet.
+
+Multiple Chats may create independent issues concurrently. Never reuse another issue's origin marker.
+
+Installer-created sandbox issues are registered locally by the installer because their reviewer Chat is already known.
