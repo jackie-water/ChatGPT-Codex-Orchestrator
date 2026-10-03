@@ -54,6 +54,9 @@ foreach ($scriptName in @(
   "publish-checkpoint.ps1",
   "publish-code-review.ps1",
   "wake-chat.ps1",
+  "chat-routing.ps1",
+  "dispatch-chat-callback.ps1",
+  "origin-router-loop.ps1",
   "setup-project-clone.ps1",
   "start-orchestrator-session.ps1",
   "retry-pending-callbacks.ps1",
@@ -92,6 +95,8 @@ node --check (Join-Path $PSScriptRoot "wake-chat.mjs")
 if ($LASTEXITCODE -ne 0) { throw "wake-chat.mjs syntax validation failed" }
 node --check (Join-Path $PSScriptRoot "navigate-reviewer-chat.mjs")
 if ($LASTEXITCODE -ne 0) { throw "navigate-reviewer-chat.mjs syntax validation failed" }
+node --check (Join-Path $PSScriptRoot "capture-chat-origins.mjs")
+if ($LASTEXITCODE -ne 0) { throw "capture-chat-origins.mjs syntax validation failed" }
 
 $pathVar = Get-Variable -Name "PROJECT_LOCAL_PATHS" -ErrorAction SilentlyContinue
 $repoPath = $null
