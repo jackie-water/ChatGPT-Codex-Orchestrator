@@ -200,8 +200,10 @@ async function composerState(send) {
 
 async function clearKnownAutomationDraft(send, draftText) {
   const knownAutomationDraft =
-    draftText.startsWith("[ORCHESTRATOR-AUTO]") ||
+    draftText.startsWith("[ORCHESTRATOR-AUTO") ||
     draftText.startsWith("[CODEX-AUTO") ||
+    draftText.startsWith("[CODE-REVIEW-AUTO") ||
+    draftText.startsWith("[MERGE-AUTO") ||
     draftText.startsWith("Orchestrator wake test") ||
     draftText.startsWith("Orchestrator Codex completed.");
 
