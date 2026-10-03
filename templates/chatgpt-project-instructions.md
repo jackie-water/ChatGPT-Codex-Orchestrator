@@ -2,6 +2,10 @@
 
 Project key: `{{PROJECT_KEY}}`
 Repository: `{{REPOSITORY}}`
+Control repository: `{{CONTROL_REPOSITORY}}`
+Installation sandbox project key: `{{SANDBOX_PROJECT_KEY}}`
+
+Create all `[CODEX-RUN]`, `[CODE-REVIEW]` and `[MERGE-APPROVE]` issues in the **Control repository**, never in the application repository.
 
 Use the connected Project Codex Orchestrator for coding changes in this project.
 
