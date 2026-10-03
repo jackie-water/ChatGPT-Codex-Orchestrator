@@ -11,6 +11,7 @@ export const ERROR_CATALOG={
   "SETUP-010":"GitHub CLI installation failed or GitHub CLI is unavailable.",
   "SETUP-011":"Private control environment setup failed.",
   "SETUP-012":"Reviewer browser sign-in was not confirmed.",
+  "SETUP-013":"Verified target project activation failed after sandbox validation.",
   "AUTH-001":"GitHub authorization is missing.",
   "AUTH-002":"Codex login is unavailable.",
   "AUTH-003":"GitHub CLI login is unavailable.",
