@@ -62,9 +62,9 @@ function answer() {
 
   const bool = v => /^(true|yes|y|1|done|completed)$/i.test(String(v || ""));
 
-  if (actionId === "github_authorization") {
+  if (actionId === "github_plugin_authorization" || actionId === "github_authorization") {
     if (!bool(value)) return emit({status:"ERROR",error_id:"AUTH-001",recoverable:true,preferred_language:lang,message:t(lang,"answer.github.invalid")},1);
-    state.github_authorized = true;
+    state.github_plugin_authorized = true;
   } else if (actionId === "target_repository") {
     if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(String(value || ""))) {
       return emit({status:"ERROR",error_id:"SETUP-005",recoverable:true,preferred_language:lang,message:t(lang,"answer.repository.invalid")},1);
@@ -103,21 +103,32 @@ function runSetup() {
 
   const git = commandExists("git");
   const node = commandExists("node");
+  const gh = commandExists("gh");
   const codex = commandExists("codex");
-  state.environment = { platform:process.platform, release:os.release(), git:git.output||null, node:node.output||null, codex:codex.output||null };
+  const ghAuth = gh.ok ? commandExists("gh",["auth","status"]) : {ok:false,output:""};
+  state.environment = { platform:process.platform, release:os.release(), git:git.output||null, node:node.output||null, gh:gh.output||null, codex:codex.output||null };
 
-  if (!git.ok || !node.ok || !codex.ok) {
+  if (!git.ok || !node.ok || !gh.ok || !codex.ok) {
     saveState(state);
     return emit({
       status:"ERROR", error_id:"SETUP-004", recoverable:true, preferred_language:lang,
       message:t(lang,"setup.prerequisites.failed"),
-      missing:{git:!git.ok,node:!node.ok,codex:!codex.ok}
+      missing:{git:!git.ok,node:!node.ok,gh:!gh.ok,codex:!codex.ok}
     },1);
   }
   if (!state.completed.includes("environment_check")) state.completed.push("environment_check");
 
-  if (!state.github_authorized) return emit(action(state,"github_authorization","setup.github.connect"));
-  if (!state.completed.includes("github_authorization")) state.completed.push("github_authorization");
+  if (!ghAuth.ok) {
+    return emit(action(state,"github_cli_authorization","setup.github_cli.connect",{
+      helper_command:"node src/cli.mjs github-login --json"
+    }));
+  }
+  if (!state.completed.includes("github_cli_authorization")) state.completed.push("github_cli_authorization");
+
+  if (!state.github_plugin_authorized) {
+    return emit(action(state,"github_plugin_authorization","setup.github_plugin.connect"));
+  }
+  if (!state.completed.includes("github_plugin_authorization")) state.completed.push("github_plugin_authorization");
 
   if (!state.target_repository) return emit(action(state,"target_repository","setup.repository.ask"));
   if (!state.completed.includes("target_repository")) state.completed.push("target_repository");
@@ -152,15 +163,38 @@ function runSetup() {
   emit({status:"PASS",preferred_language:lang,message:t(lang,"setup.ready"),project_key:state.project_key,repository:state.target_repository});
 }
 
+function githubLogin() {
+  const state=loadState();
+  const lang=ensureStateLanguage(state);
+  const gh=commandExists("gh");
+  if(!gh.ok) return emit({status:"ERROR",error_id:"SETUP-010",recoverable:true,preferred_language:lang,message:t(lang,"github_cli.missing")},1);
+
+  const result=spawnSync("gh",["auth","login","--hostname","github.com","--git-protocol","https","--web"],{
+    stdio:"inherit",
+    shell:process.platform==="win32"
+  });
+  if(result.status!==0){
+    return emit({status:"ERROR",error_id:"AUTH-003",recoverable:true,preferred_language:lang,message:t(lang,"github_cli.login.failed")},1);
+  }
+  const verify=commandExists("gh",["auth","status"]);
+  if(!verify.ok){
+    return emit({status:"ERROR",error_id:"AUTH-003",recoverable:true,preferred_language:lang,message:t(lang,"github_cli.login.failed")},1);
+  }
+  emit({status:"PASS",preferred_language:lang,message:t(lang,"github_cli.login.success"),resume_command:"node src/cli.mjs resume --json"});
+}
+
 function doctor() {
   const state=loadState();
   const lang=ensureStateLanguage(state);
   const checks={
     git:commandExists("git").ok,
     node:commandExists("node").ok,
+    gh:commandExists("gh").ok,
+    github_cli_authenticated:commandExists("gh",["auth","status"]).ok,
     codex:commandExists("codex").ok,
     install_state:fs.existsSync(path.join(stateRoot(),"install-state.json")),
-    github_configured:Boolean(state.github_authorized&&state.target_repository),
+    github_plugin_configured:Boolean(state.github_plugin_authorized),
+    github_repository_configured:Boolean(state.target_repository),
     reviewer_chat_configured:Boolean(state.reviewer_chat_url)
   };
   const healthy=Object.values(checks).every(Boolean);
@@ -214,6 +248,7 @@ function submitReport() {
 }
 
 if (command==="setup"||command==="resume") runSetup();
+else if (command==="github-login") githubLogin();
 else if (command==="doctor") doctor();
 else if (command==="status") status();
 else if (command==="repair") repair();
@@ -221,4 +256,4 @@ else if (command==="report-problem") reportProblem();
 else if (command==="submit-report") submitReport();
 else if (command==="answer") answer();
 else if (command==="errors") emit({status:"PASS",errors:ERROR_CATALOG});
-else emit({status:"PASS",message:"Commands: setup, resume, answer, doctor, status, repair, report-problem, submit-report, errors"});
+else emit({status:"PASS",message:"Commands: setup, resume, answer, github-login, doctor, status, repair, report-problem, submit-report, errors"});
