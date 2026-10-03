@@ -21,3 +21,12 @@ test("core Node runtime contains no shell-true child process invocation",()=>{
     assert.doesNotMatch(text,/shell\s*:\s*(?:true|process\.platform)/,file+" must not enable command shells");
   }
 });
+
+
+test("Windows shim runner transports arguments as Base64 JSON instead of shell text",()=>{
+  const text=fs.readFileSync(new URL("../src/lib/spawn-safe.mjs",import.meta.url),"utf8");
+  assert.match(text,/ORCH_SAFE_ARGS_B64/);
+  assert.match(text,/Buffer\.from\(JSON\.stringify\(args\)/);
+  assert.doesNotMatch(text,/cmd\.exe|\/c/i);
+  assert.doesNotMatch(text,/shell\s*:\s*true/);
+});
