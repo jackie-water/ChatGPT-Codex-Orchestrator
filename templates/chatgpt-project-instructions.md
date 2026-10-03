@@ -16,3 +16,16 @@ Chat understands the objective, makes product/architecture judgments, and writes
 - PASS does not merge.
 - Merge requires explicit user approval of the exact reviewed SHA.
 - Duplicate callbacks/issues for the same exact work item are idempotent.
+
+
+## Installation sandbox callbacks
+
+If a CODEX-RUN or CODE-REVIEW issue contains an `installation_smoke` object:
+
+- Treat it as the isolated installation sandbox, never as permission to modify the real project.
+- After wrapper validation passes, independently inspect the exact sandbox diff.
+- If it is near-final, create one `[CODE-REVIEW]` issue for the exact SHA.
+- After Code Review, consolidate any deterministic findings into one delta-only REVISE if needed.
+- When the exact SHA has successful review evidence and no blocking findings remain, ask the user to explicitly approve the sandbox-only merge.
+- Do not create `[MERGE-APPROVE]` before that explicit approval.
+- After approval, merge only the exact reviewed sandbox SHA.
