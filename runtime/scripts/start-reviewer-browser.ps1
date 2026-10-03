@@ -39,5 +39,9 @@ if(-not $up){
 $env:ORCHESTRATOR_BROWSER_DEBUG_PORT=$Port
 node (Join-Path $PSScriptRoot "navigate-reviewer-chat.mjs") $ChatUrl
 if($LASTEXITCODE -ne 0){throw "Could not navigate the dedicated reviewer browser. On first use, sign into ChatGPT in that browser profile, then retry."}
+
+node (Join-Path $PSScriptRoot "capture-chat-origins.mjs")
+if($LASTEXITCODE -notin @(0,3)){Write-Warning "Initial origin-route scan failed; configured fallback remains available."}
 Write-Host "Reviewer browser ready on isolated debug port $Port." -ForegroundColor Green
+Write-Host "Issue-origin routing is enabled. Keep active coding Chats open as tabs in this dedicated browser profile."
 Write-Host "Profile: $ProfilePath"
