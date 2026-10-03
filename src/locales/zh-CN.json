@@ -56,5 +56,7 @@
   "sandbox.approval.required": "合并已经审查过的 Sandbox commit 前必须获得你的明确批准。",
   "sandbox.approval.created": "已经批准把准确的 reviewed commit 合并到 Sandbox，仅影响 Sandbox。",
   "sandbox.approval.failed": "无法创建 Sandbox merge approval。",
-  "setup.target.activate_failed": "Sandbox 已通过，但真实项目的启用步骤没有完成。真实项目的 main 分支没有被修改；我可以只修复这一步。"
+  "setup.target.activate_failed": "Sandbox 已通过，但真实项目的启用步骤没有完成。真实项目的 main 分支没有被修改；我可以只修复这一步。",
+  "setup.generated_repo.connect": "安装程序已经创建了两个 private repository。现在请把这两个新 repository 加入 ChatGPT 的 GitHub 授权范围，并确认 ChatGPT 能访问它们后再继续。",
+  "answer.generated_repo.invalid": "目前还没有确认 ChatGPT 可以访问新生成的 control 和 sandbox repository。"
 }
