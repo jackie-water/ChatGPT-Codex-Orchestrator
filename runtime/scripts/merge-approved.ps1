@@ -152,7 +152,6 @@ try {
   Pop-Location
 }
 
-if (-not [string]::IsNullOrWhiteSpace($chatUrl)) {
-  $message = "[MERGE-AUTO] Human-approved merge completed for project '$projectKey'. Repository $repository default branch '$defaultBranch' now contains approved commit $approvedCommit from $sourceBranch. No force-push, rebase, or deployment command was performed."
-  & (Join-Path $PSScriptRoot "wake-chat.ps1") -ChatUrl $chatUrl -Message $message
-}
+$callbackId = "merge-$projectKey-$($event.issue.number)-$approvedCommit"
+$message = "[MERGE-AUTO callback_id=$callbackId] Human-approved merge completed for project '$projectKey'. Repository $repository default branch '$defaultBranch' now contains approved commit $approvedCommit from $sourceBranch. No force-push, rebase, or deployment command was performed."
+& (Join-Path $PSScriptRoot "dispatch-chat-callback.ps1") -ProjectKey $projectKey -IssueNumber ([int]$event.issue.number) -ReviewRoute $reviewRoute -Message $message -CallbackId $callbackId
