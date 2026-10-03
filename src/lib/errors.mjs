@@ -16,6 +16,7 @@ export const ERROR_CATALOG={
   "AUTH-002":"Codex login is unavailable.",
   "AUTH-003":"GitHub CLI login is unavailable.",
   "AUTH-004":"Requested Codex trust folder is unavailable.",
+  "AUTH-005":"ChatGPT GitHub access to generated private repositories is not verified.",
   "RUN-001":"Automation runner is offline.",
   "RUN-002":"Repository mapping does not match the configured project.",
   "CODEX-001":"Codex execution failed.",
