@@ -4,9 +4,9 @@ import fs from "node:fs";
 
 test("installer prepares only the sandbox before sandbox verification",()=>{
   const cli=fs.readFileSync(new URL("../src/cli.mjs",import.meta.url),"utf8");
-  const sandboxSetup=cli.indexOf('const setupSandbox=spawnSync("powershell.exe"');
+  const sandboxSetup=cli.indexOf('const setupSandbox=spawnSafeSync("powershell.exe"');
   const sandboxGate=cli.indexOf("if (!state.sandbox_verified)");
-  const targetSetup=cli.indexOf('const setupTarget=spawnSync("powershell.exe"');
+  const targetSetup=cli.indexOf('const setupTarget=spawnSafeSync("powershell.exe"');
 
   assert.ok(sandboxSetup>=0,"sandbox setup call should exist");
   assert.ok(sandboxGate>sandboxSetup,"sandbox verification must happen after sandbox runtime setup");
