@@ -34,5 +34,8 @@
   "setup.codex.helper": "Open Codex in the provided project folder, sign in with ChatGPT if prompted, and approve trust for that folder. Do not give Codex a coding task yet.",
   "setup.browser.login": "The dedicated reviewer browser now needs your ChatGPT sign-in. Sign in only in the separate browser window/profile, then tell me when it is complete.",
   "answer.codex.invalid": "Codex sign-in/trust has not been confirmed yet.",
-  "answer.browser.invalid": "Reviewer browser sign-in has not been confirmed yet."
+  "answer.browser.invalid": "Reviewer browser sign-in has not been confirmed yet.",
+  "repair.not_ready": "Repair cannot start yet because the isolated runtime has not been configured.",
+  "repair.failed": "Automatic repair did not finish. I can use the diagnostic details to guide the next single step.",
+  "repair.success": "Repair completed. The runner/browser were checked and pending callbacks were retried."
 }
