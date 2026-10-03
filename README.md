@@ -40,7 +40,7 @@ Give the AI this repository link and say:
 
 > Install this for me. Use the repository's AI installation protocol. Ask me for only one manual action at a time.
 
-The AI should read [AI_INSTALL.md](AI_INSTALL.md) and use the official installer rather than inventing its own installation commands.
+The AI should read [AI_INSTALL.md](AI_INSTALL.md) and use the official installer rather than inventing its own installation commands. Before making changes, the installer can run a dry-run that explains the plan without creating repositories, runners or project branches.
 
 ## Install by yourself on Windows
 
