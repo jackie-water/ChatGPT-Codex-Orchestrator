@@ -33,6 +33,9 @@ if($runnerProcesses.Count -eq 0){
   if($runnerProcesses.Count -eq 0){throw "Runner.Listener.exe was not detected within 15 seconds"}
 }
 & (Join-Path $PSScriptRoot "start-reviewer-browser.ps1") -ChatUrl $reviewUrl
+$originRouter=Join-Path $PSScriptRoot "origin-router-loop.ps1"
+Start-Process -FilePath "powershell.exe" -WindowStyle Hidden -ArgumentList @("-NoProfile","-ExecutionPolicy","Bypass","-File",$originRouter)|Out-Null
+Start-Sleep -Milliseconds 500
 & (Join-Path $PSScriptRoot "retry-pending-callbacks.ps1")
 & (Join-Path $PSScriptRoot "preflight.ps1") -Project $Project
 Write-Host "ORCHESTRATOR SESSION READY project=$Project" -ForegroundColor Green
