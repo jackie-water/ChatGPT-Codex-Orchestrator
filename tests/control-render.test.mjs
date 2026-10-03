@@ -53,3 +53,16 @@ test("project registry can keep the real project disabled while sandbox is enabl
   })).projects["real-app"];
   assert.equal(disabled.enabled,false);
 });
+
+
+test("generated config enables delayed issue-origin fallback",()=>{
+  const c=renderConfigPs1({
+    githubLogin:"user",
+    projectMappings:[{projectKey:"demo",projectClonePath:"C:\\demo",reviewerChatUrl:"https://chatgpt.com/c/fallback"}],
+    runnerPath:"C:\\runner-demo",
+    browserPort:9333,
+    browserProfile:"C:\\profile-demo"
+  });
+  assert.match(c,/ORCHESTRATOR_ORIGIN_FALLBACK_MINUTES = '30'/);
+  assert.match(c,/ORCHESTRATOR_INSTANCE_ID = 'runner-demo'/);
+});
