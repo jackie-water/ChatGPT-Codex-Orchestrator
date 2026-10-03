@@ -49,4 +49,10 @@ jobs:
           }
       - name: Check browser callback JavaScript
         shell: powershell
-        run: node --check runtime/scripts/wake-chat.mjs
+        run: |
+          node --check runtime/scripts/wake-chat.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --check runtime/scripts/navigate-reviewer-chat.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --check runtime/scripts/capture-chat-origins.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
