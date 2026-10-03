@@ -42,6 +42,7 @@ AI / structured bootstrap:
 
 After Node bootstrap:
 
+- dry-run: `node src/cli.mjs dry-run --json --language <en|zh-CN>`
 - setup: `node src/cli.mjs setup --json --language <en|zh-CN>`
 - save a verified user answer: `node src/cli.mjs answer --action <action_id> --value <value> --json`
 - resume: `node src/cli.mjs resume --json`
@@ -131,3 +132,12 @@ Before the Sandbox reaches COMPLETE:
 After the Sandbox has passed and the installer activates the target project, normal orchestration can begin.
 
 If any command reports PROJECT_DISABLED, resume the official installer rather than bypassing the gate.
+
+
+## Dry-run before mutation
+
+Before the first real setup mutation, run the official dry-run once.
+
+The dry-run may inspect local command availability and existing installer state, but it must report `mutations_performed: false`. It must not create GitHub repositories, configure a runner, create checkpoint branches, or modify the user's project.
+
+Use the dry-run output to explain only the next relevant user action. Do not turn the dry-run into a long list of technical instructions.
