@@ -1,0 +1,21 @@
+export const ERROR_CATALOG={
+  "SETUP-001":"Git installation failed or Git is unavailable.",
+  "SETUP-002":"Node.js installation failed or Node.js is unavailable.",
+  "SETUP-003":"Codex CLI installation failed.",
+  "SETUP-004":"Required local prerequisite is unavailable after bootstrap.",
+  "AUTH-001":"GitHub authorization is missing.",
+  "AUTH-002":"Codex login is unavailable.",
+  "RUN-001":"Automation runner is offline.",
+  "RUN-002":"Repository mapping does not match the configured project.",
+  "CODEX-001":"Codex execution failed.",
+  "CODEX-002":"Prompt was rejected before Codex execution.",
+  "CALLBACK-001":"Reviewer Chat was not found.",
+  "CALLBACK-002":"Chat composer was not found.",
+  "CALLBACK-003":"Callback text reached ChatGPT but submission was not confirmed.",
+  "CALLBACK-004":"Callback was queued for retry.",
+  "REVIEW-001":"Independent Codex review command is unavailable.",
+  "REVIEW-002":"Requested reviewed commit became stale.",
+  "MERGE-001":"Approved commit does not match the branch head.",
+  "MERGE-002":"Required code-review evidence is missing.",
+  "DOCTOR-001":"One or more health checks require attention."
+};

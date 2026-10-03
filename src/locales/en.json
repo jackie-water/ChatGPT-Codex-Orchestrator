@@ -1,0 +1,15 @@
+{
+  "setup.prerequisites.failed":"A required local tool is still unavailable. I can try to repair this before setup continues.",
+  "setup.github.connect":"GitHub access is required now. Connect/authorize GitHub for the repository you want to use, then tell me when it is complete.",
+  "setup.repository.ask":"Which GitHub repository do you want ChatGPT and Codex to work on? Provide it as owner/repository.",
+  "setup.chat.ask":"Please provide the ChatGPT reviewer conversation URL that should receive automation results.",
+  "setup.instructions.add":"Your ChatGPT Project Instructions are ready. Add the generated instructions to your ChatGPT Project, then tell me when it is complete.",
+  "setup.sandbox.required":"Before this installation can be marked ready, the isolated sandbox end-to-end test must pass.",
+  "setup.ready":"Installation is ready.",
+  "doctor.healthy":"Everything checked by Doctor is healthy.",
+  "doctor.attention":"One or more checks need attention. I can guide you through the first problem.",
+  "status.ready":"The orchestrator is ready.",
+  "status.not_ready":"Setup is not finished yet.",
+  "repair.baseline":"The repair framework is available. Runtime callback/runner repair is added in the next integration phase.",
+  "report.prepared":"A sanitised diagnostic report was prepared locally. It has not been uploaded."
+}

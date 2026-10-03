@@ -1,0 +1,15 @@
+{
+  "setup.prerequisites.failed":"仍有必要的本地工具不可用。在继续安装前，我可以先尝试自动修复。",
+  "setup.github.connect":"现在需要连接并授权 GitHub。请只完成 GitHub 连接/授权这一步，完成后告诉我。",
+  "setup.repository.ask":"你希望 ChatGPT 和 Codex 操作哪个 GitHub 项目？请提供 owner/repository。",
+  "setup.chat.ask":"请提供一个用于接收自动化结果的 ChatGPT reviewer 对话地址。",
+  "setup.instructions.add":"ChatGPT Project Instructions 已经生成。请把生成的内容加入对应 ChatGPT Project，完成后告诉我。",
+  "setup.sandbox.required":"在正式标记安装完成前，必须先通过独立 Sandbox 的端到端测试。",
+  "setup.ready":"安装已经完成，可以开始使用。",
+  "doctor.healthy":"Doctor 检查的项目全部正常。",
+  "doctor.attention":"有一项或多项检查需要处理。我可以从第一个问题开始一步一步帮助你。",
+  "status.ready":"Orchestrator 已准备好。",
+  "status.not_ready":"安装还没有完成。",
+  "repair.baseline":"Repair 基础框架已经可用。callback/runner 的运行时修复会在下一阶段接入。",
+  "report.prepared":"已经在本地生成脱敏诊断报告，目前没有上传任何内容。"
+}
