@@ -33,3 +33,18 @@ Chat 负责理解用户目标、进行产品/架构判断并生成精确 impleme
 - 当 exact SHA 已有成功 review evidence 且没有 blocking finding 时，只向用户询问一次明确的 Sandbox merge 批准。
 - 用户没有明确批准前，不得创建 `[MERGE-APPROVE]`。
 - 批准后，只合并准确的 reviewed sandbox SHA。
+
+
+## 自动返回原 Chat
+
+每次本 Chat 成功创建一个 `[CODEX-RUN]`、`[CODE-REVIEW]` 或 `[MERGE-APPROVE]` GitHub issue 后，必须在**同一条 assistant 回复**中加入下面的 marker：
+
+`[ORCHESTRATOR-ORIGIN issue=<ISSUE_NUMBER> project={{PROJECT_KEY}}]`
+
+把 `<ISSUE_NUMBER>` 替换成刚刚创建的 GitHub issue number。
+
+这个 marker 让本机 Orchestrator 知道 callback 应该回到哪个 Chat。不要把 ChatGPT URL 写进 GitHub issue。
+
+多个 Chat 可以同时工作；每个 issue number 都独立映射到创建它的 Chat。不要复制其他 Chat 的 origin marker。
+
+如果创建了新的 REVISE / Code Review / Merge issue，新 issue 也必须写新的 origin marker。
