@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 jobs:
-  test:
+  node-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -19,3 +19,34 @@ jobs:
         with:
           node-version: "22"
       - run: npm test
+
+  windows-static:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Parse runtime PowerShell
+        shell: powershell
+        run: |
+          $failures = @()
+          Get-ChildItem runtime/scripts -Filter *.ps1 -File | ForEach-Object {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              $_.FullName,
+              [ref]$tokens,
+              [ref]$errors
+            ) | Out-Null
+            foreach ($err in @($errors)) {
+              $failures += "$($_.Name):$($err.Extent.StartLineNumber): $($err.Message)"
+            }
+          }
+          if ($failures.Count -gt 0) {
+            throw ("PowerShell parse failures:" + [Environment]::NewLine + ($failures -join [Environment]::NewLine))
+          }
+      - name: Check browser callback JavaScript
+        shell: powershell
+        run: node --check runtime/scripts/wake-chat.mjs
