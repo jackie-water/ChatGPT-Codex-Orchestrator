@@ -2,6 +2,10 @@
 
 Project key: `{{PROJECT_KEY}}`
 Repository: `{{REPOSITORY}}`
+Control repository: `{{CONTROL_REPOSITORY}}`
+Installation sandbox project key: `{{SANDBOX_PROJECT_KEY}}`
+
+所有 `[CODEX-RUN]`、`[CODE-REVIEW]` 和 `[MERGE-APPROVE]` issue 都必须创建在 **Control repository**，不要创建在应用 repository。
 
 本 ChatGPT Project 中涉及代码修改的任务使用已连接的 Project Codex Orchestrator。
 
