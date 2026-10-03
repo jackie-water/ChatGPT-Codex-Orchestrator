@@ -30,3 +30,13 @@ test("all remote execution entrypoints block disabled projects",()=>{
     assert.match(text,/PROJECT_DISABLED/,path+" must enforce the activation gate");
   }
 });
+
+
+test("generated control registry disables the real project until activation",()=>{
+  const source=fs.readFileSync(new URL("../src/lib/control-env.mjs",import.meta.url),"utf8");
+  const targetBlock=source.match(/const targetEntry=projectEntry\(\{[\s\S]*?\}\);/)?.[0]||"";
+  const sandboxBlock=source.match(/const sandboxEntry=projectEntry\(\{[\s\S]*?\}\);/)?.[0]||"";
+  assert.match(targetBlock,/enabled:false/);
+  assert.match(sandboxBlock,/enabled:true/);
+  assert.match(source,/export function activateTargetProject/);
+});
