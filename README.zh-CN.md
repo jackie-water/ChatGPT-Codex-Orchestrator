@@ -48,7 +48,9 @@ AI 应读取 [AI_INSTALL.md](AI_INSTALL.md)，并使用项目提供的正式 ins
 
 双击 **Install.cmd**。
 
-安装向导会一步一步引导。正常情况下不需要使用 PowerShell 或理解 Git。
+安装向导会一直保持打开，并且每次只让你完成**当前这一件事**。需要时，它会让你输入 repository 或 reviewer Chat 地址、打开登录步骤、把生成的 ChatGPT Project Instructions 自动复制到剪贴板，然后等你完成再继续。
+
+正常情况下不需要使用 PowerShell 或理解 Git。
 
 ## 安装完成以后怎么用
 
@@ -57,6 +59,12 @@ AI 应读取 [AI_INSTALL.md](AI_INSTALL.md)，并使用项目提供的正式 ins
 > 帮我增加一个可以把报告导出成 CSV 的页面。
 
 后面的技术流程由 Orchestrator 处理，包括：独立开发分支、自动验证、技术审查、修复迭代、结果返回和精确版本的合并批准。
+
+## 安装测试期间，真实项目不会被操作
+
+安装程序会先自动创建一个独立的 private Sandbox repository。Sandbox 完整通过代码修改、自动验证、独立 Code Review，以及你明确批准的 Sandbox-only merge 之前，真实项目在 Orchestrator 里会保持 **disabled**。
+
+只有 Sandbox 测试完成后，installer 才允许启用真实项目的自动化。
 
 ## 安全模式
 
@@ -83,9 +91,11 @@ callback_id 用来帮助系统识别这是同一条通知，避免故意重复�
 
 **不要因为消息停在输入框里就重新运行 Codex。**
 
-如果这个问题反复出现，请使用 Repair。Repair 应优先重新发送 pending callback，而不是重新跑代码任务。
+如果这个问题反复出现，请双击 **Repair Chat Connection.cmd**。Repair 会优先重新发送 pending callback，而不是重新跑代码任务。
 
 ## 怎么检查系统是否正常
+
+双击 **Check Status.cmd**。
 
 Doctor/Status 的目标是让普通用户看到类似：
 
@@ -104,7 +114,9 @@ Chat 回调               ✓
 
 ## 怎么报告问题
 
-如果发生错误，系统应先尝试安全的自动修复。
+如果发生错误，系统会先尝试安全的自动修复。
+
+如果仍然失败，可以双击 **Report a Problem.cmd**，在你的电脑上生成一份脱敏诊断报告。
 
 修复失败后，可以生成一份**已经脱敏的诊断报告**。任何报告都不能默认自动上传。你可以先查看，再决定是否提交。
 
