@@ -55,12 +55,18 @@ foreach ($scriptName in @(
   "wake-chat.ps1",
   "setup-project-clone.ps1",
   "start-orchestrator-session.ps1",
-  "retry-pending-wakes.ps1",
+  "retry-pending-callbacks.ps1",
+  "start-reviewer-browser.ps1",
+  "install-runner.ps1",
   "preflight.ps1"
 )) {
   $tokens = $null
   $errors = $null
   $scriptPath = Join-Path $PSScriptRoot $scriptName
+  if (-not (Test-Path $scriptPath)) {
+    $syntaxFailures += ($scriptName + ": missing required runtime script")
+    continue
+  }
   [System.Management.Automation.Language.Parser]::ParseFile(
     $scriptPath,
     [ref]$tokens,
@@ -83,6 +89,8 @@ if ($nodeMajor -lt 22) { throw "Node.js 22+ is required for browser wake automat
 
 node --check (Join-Path $PSScriptRoot "wake-chat.mjs")
 if ($LASTEXITCODE -ne 0) { throw "wake-chat.mjs syntax validation failed" }
+node --check (Join-Path $PSScriptRoot "navigate-reviewer-chat.mjs")
+if ($LASTEXITCODE -ne 0) { throw "navigate-reviewer-chat.mjs syntax validation failed" }
 
 $pathVar = Get-Variable -Name "PROJECT_LOCAL_PATHS" -ErrorAction SilentlyContinue
 $repoPath = $null
