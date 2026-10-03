@@ -66,6 +66,16 @@ AI 应读取 [AI_INSTALL.md](AI_INSTALL.md)，并使用项目提供的正式 ins
 
 只有 Sandbox 测试完成后，installer 才允许启用真实项目的自动化。
 
+
+
+## 结果会自动回到发起任务的 Chat
+
+同一个项目可以同时有多个 ChatGPT 对话在工作。每个 coding request 都会独立记录，Codex 完成后，结果优先自动返回到**创建这个 request 的那个 Chat**。
+
+因此多个 Chat 可以同时工作，不应该把 A Chat 的 Codex 结果故意发送到 B Chat。
+
+安装时设置的 reviewer Chat 只作为灾备 fallback：只有系统长时间无法确定原始 Chat 时才会使用。
+
 ## 安全模式
 
 默认开启 Safe Mode：
