@@ -403,27 +403,79 @@ async function sendMessage(send) {
 
   throw new Error("ChatGPT did not expose a usable Send control within 60 seconds; callback will be retried later");
 }
-async function main() {
-  const pages = await fetch(`http://127.0.0.1:${port}/json/list`).then(r => {
+
+function normalizeConversationUrl(value) {
+  try {
+    const u = new URL(value);
+    return u.origin + u.pathname;
+  } catch {
+    return value || "";
+  }
+}
+
+async function listPages() {
+  return fetch(`http://127.0.0.1:${port}/json/list`).then(r => {
     if (!r.ok) throw new Error(`Edge debug endpoint returned ${r.status}`);
     return r.json();
   });
+}
+
+async function createChatTab(url) {
+  const endpoint = `http://127.0.0.1:${port}/json/new?${encodeURIComponent(url)}`;
+  const response = await fetch(endpoint, {method:"PUT"});
+  if (!response.ok) throw new Error(`Could not create target Chat tab: ${response.status}`);
+  return response.json();
+}
+
+async function resolveTargetPage() {
+  let pages = await listPages();
+
+  if (expected) {
+    const wanted = normalizeConversationUrl(expected);
+    let exact = pages.find(p =>
+      p.type === "page" &&
+      p.webSocketDebuggerUrl &&
+      normalizeConversationUrl(p.url || "") === wanted
+    );
+
+    if (!exact) {
+      console.log("CHAT_TARGET_TAB_MISSING: creating a new tab instead of navigating another conversation");
+      const created = await createChatTab(expected);
+      await new Promise(r => setTimeout(r, 1200));
+      pages = await listPages();
+      exact = pages.find(p =>
+        p.type === "page" &&
+        p.webSocketDebuggerUrl &&
+        normalizeConversationUrl(p.url || "") === wanted
+      );
+      if (!exact && created?.webSocketDebuggerUrl) exact = created;
+    }
+
+    if (!exact?.webSocketDebuggerUrl) {
+      throw new Error("Could not open the exact target Chat without reusing another conversation tab");
+    }
+    return exact;
+  }
 
   const page = pages
     .filter(p => p.type === "page" && p.webSocketDebuggerUrl)
     .sort((a,b) => score(b) - score(a))[0];
 
-  if (!page || score(page) < 10) throw new Error("No normal ChatGPT reviewer tab found");
+  if (!page || score(page) < 10) throw new Error("No normal ChatGPT tab found");
+  return page;
+}
 
+async function main() {
+  const page = await resolveTargetPage();
   const { ws, send } = await connect(page.webSocketDebuggerUrl);
 
   try {
     await send("Page.bringToFront");
 
     const currentUrl = await evaluate(send, "location.href");
-    if (expected && currentUrl !== expected && !currentUrl.startsWith(expected)) {
-      await send("Page.navigate", {url: expected});
-      await new Promise(r => setTimeout(r, 1500));
+    if (expected &&
+        normalizeConversationUrl(currentUrl) !== normalizeConversationUrl(expected)) {
+      throw new Error("Resolved Chat tab URL does not match the requested callback destination");
     }
 
     const composer = await waitForComposer(send);
