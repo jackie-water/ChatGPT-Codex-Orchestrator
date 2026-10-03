@@ -64,6 +64,16 @@ The installer creates a separate private Sandbox repository first. Your real pro
 
 Only after that test passes can the installer activate orchestration for your real project.
 
+
+
+## Results return to the Chat that started the work
+
+When several ChatGPT conversations use the same project, each coding request is tracked separately. The result is routed back to the Chat that created that specific request.
+
+You can therefore have more than one Chat working at the same time without intentionally sending one Chat's Codex result to another Chat.
+
+The reviewer Chat selected during setup remains available only as a fallback if the original Chat cannot be resolved for an extended period.
+
 ## Safe Mode
 
 Safe Mode is on by default:
