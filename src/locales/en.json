@@ -18,5 +18,10 @@
   "answer.instructions.invalid": "Confirm after the generated Project Instructions have been added.",
   "answer.sandbox.invalid": "Sandbox verification must pass before setup can finish.",
   "answer.action.unknown": "This installer action is not recognised.",
-  "answer.saved": "Your answer was saved. Setup can continue."
+  "answer.saved": "Your answer was saved. Setup can continue.",
+  "report.consent.required": "Nothing was uploaded. Explicit consent is required before a diagnostic report can be submitted.",
+  "report.file.missing": "The prepared diagnostic report could not be found.",
+  "report.destination.missing": "No feedback repository is configured for this development build.",
+  "report.submitted": "The sanitised diagnostic report was submitted.",
+  "report.submit.failed": "The diagnostic report could not be submitted. The local copy is still available."
 }
