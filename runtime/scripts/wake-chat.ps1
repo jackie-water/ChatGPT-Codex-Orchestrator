@@ -1,0 +1,72 @@
+param(
+  [Parameter(Mandatory=$true)][string]$Message,
+  [string]$ChatUrl,
+  [string]$CallbackId,
+  [switch]$QueueOnFailure
+)
+
+$ErrorActionPreference = "Stop"
+
+$Config = Join-Path $HOME ".chatgpt-codex-orchestrator\config.ps1"
+if (-not (Test-Path $Config)) { throw "Missing local config: $Config" }
+. $Config
+
+$targetChatUrl = if (-not [string]::IsNullOrWhiteSpace($ChatUrl)) { $ChatUrl } else { $env:ORCHESTRATOR_CHAT_URL }
+if ([string]::IsNullOrWhiteSpace($targetChatUrl)) { throw "No Chat URL supplied or configured" }
+if ($targetChatUrl -notmatch '^https://chatgpt\.com/(?:g/[^/]+/)?c/[A-Za-z0-9-]+(?:[/?#].*)?$') {
+  throw "Target is not a normal ChatGPT conversation URL"
+}
+
+if ([string]::IsNullOrWhiteSpace($CallbackId)) {
+  $sha = [System.Security.Cryptography.SHA256]::Create()
+  try {
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($targetChatUrl + [Environment]::NewLine + $Message)
+    $hash = $sha.ComputeHash($bytes)
+    $CallbackId = "wake-" + ([System.BitConverter]::ToString($hash).Replace("-","").ToLowerInvariant().Substring(0,24))
+  } finally {
+    $sha.Dispose()
+  }
+}
+
+if ($CallbackId -notmatch '^[A-Za-z0-9._-]{1,160}$') { throw "CallbackId contains unsupported characters" }
+
+if (-not $env:ORCHESTRATOR_BROWSER_DEBUG_PORT) { $env:ORCHESTRATOR_BROWSER_DEBUG_PORT = "9333" }
+
+$pendingDir = Join-Path $HOME ".chatgpt-codex-orchestrator\pending-wakes"
+$pendingPath = Join-Path $pendingDir ($CallbackId + ".json")
+
+$previousChatUrl = $env:ORCHESTRATOR_CHAT_URL
+$previousCallbackId = $env:CODEX_CALLBACK_ID
+
+try {
+  $env:ORCHESTRATOR_CHAT_URL = $targetChatUrl
+  $env:CODEX_CALLBACK_ID = $CallbackId
+
+  node (Join-Path $PSScriptRoot "wake-chat.mjs") $Message
+  $wakeExit = $LASTEXITCODE
+
+  if ($wakeExit -eq 0) {
+    Remove-Item $pendingPath -Force -ErrorAction SilentlyContinue
+    Write-Host "CHAT_WAKE_DELIVERED callback_id=$CallbackId" -ForegroundColor Green
+    return
+  }
+
+  if (-not $QueueOnFailure) {
+    throw "Normal Chat wake failed with exit code $wakeExit"
+  }
+
+  New-Item -ItemType Directory -Force -Path $pendingDir | Out-Null
+  $pending = [pscustomobject]@{
+    callback_id = $CallbackId
+    chat_url = $targetChatUrl
+    message = $Message
+    queued_at_utc = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+  }
+  $pending | ConvertTo-Json -Depth 4 | Set-Content -Path $pendingPath -Encoding utf8
+
+  Write-Warning "CHAT_WAKE_QUEUED callback_id=$CallbackId path=$pendingPath"
+  Write-Host "Implementation/checkpoint work is complete; callback delivery will be retried later."
+} finally {
+  $env:ORCHESTRATOR_CHAT_URL = $previousChatUrl
+  $env:CODEX_CALLBACK_ID = $previousCallbackId
+}

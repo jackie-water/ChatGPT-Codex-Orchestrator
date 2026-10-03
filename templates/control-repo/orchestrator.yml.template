@@ -1,0 +1,50 @@
+name: ChatGPT Codex Orchestrator
+
+on:
+  issues:
+    types: [opened]
+
+concurrency:
+  group: chatgpt-codex-orchestrator
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: read
+
+jobs:
+  run-codex:
+    if: startsWith(github.event.issue.title, '[CODEX-RUN]')
+    runs-on: [self-hosted, Windows, X64, {{RUNNER_LABEL}}]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Execute Codex request
+        shell: powershell
+        env:
+          ORCHESTRATOR_EVENT_PATH: ${{ github.event_path }}
+        run: ./scripts/run-codex.ps1 -EventPath $env:ORCHESTRATOR_EVENT_PATH
+
+  code-review:
+    if: startsWith(github.event.issue.title, '[CODE-REVIEW]')
+    runs-on: [self-hosted, Windows, X64, {{RUNNER_LABEL}}]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Independent Codex review
+        shell: powershell
+        env:
+          ORCHESTRATOR_EVENT_PATH: ${{ github.event_path }}
+        run: ./scripts/run-code-review.ps1 -EventPath $env:ORCHESTRATOR_EVENT_PATH
+
+  merge-approved:
+    if: startsWith(github.event.issue.title, '[MERGE-APPROVE]')
+    runs-on: [self-hosted, Windows, X64, {{RUNNER_LABEL}}]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply exact approved commit
+        shell: powershell
+        env:
+          ORCHESTRATOR_EVENT_PATH: ${{ github.event_path }}
+        run: ./scripts/merge-approved.ps1 -EventPath $env:ORCHESTRATOR_EVENT_PATH
