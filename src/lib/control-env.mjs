@@ -142,6 +142,28 @@ function commitControlRepo(controlPath){
   });
 }
 
+export function activateTargetProject({controlClonePath,projectKey,repository}){
+  if(!controlClonePath||!projectKey||!repository) throw new Error("Target activation requires control clone, project key and repository");
+  const registryPath=path.join(controlClonePath,"projects.json");
+  if(!fs.existsSync(registryPath)) throw new Error("Control project registry is missing");
+
+  const registry=JSON.parse(fs.readFileSync(registryPath,"utf8"));
+  const project=registry?.projects?.[projectKey];
+  if(!project) throw new Error("Target project is missing from the control registry");
+  if(project.repository!==repository) throw new Error("Target activation repository does not match registry");
+
+  if(project.enabled===true) return {changed:false,already_enabled:true};
+
+  project.enabled=true;
+  fs.writeFileSync(registryPath,JSON.stringify(registry,null,2)+"\n");
+  const commit=commitAndPush({
+    repoPath:controlClonePath,
+    message:"chore: activate verified application project",
+    branch:"main"
+  });
+  return {changed:commit.changed,already_enabled:false};
+}
+
 export function prepareControlEnvironment({
   installationId,
   targetRepository,
@@ -187,13 +209,15 @@ export function prepareControlEnvironment({
     projectKey,
     repository:targetRepository,
     defaultBranch:target.defaultBranchRef?.name||"main",
-    validationProfile
+    validationProfile,
+    enabled:false
   });
   const sandboxEntry=projectEntry({
     projectKey:sandboxProjectKey,
     repository:sandboxRepository,
     defaultBranch:"main",
-    validationProfile:sandboxValidationProfile
+    validationProfile:sandboxValidationProfile,
+    enabled:true
   });
   fs.writeFileSync(
     path.join(paths.control,"projects.json"),
