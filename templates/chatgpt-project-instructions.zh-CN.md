@@ -16,3 +16,16 @@ Chat 负责理解用户目标、进行产品/架构判断并生成精确 impleme
 - PASS 本身不代表允许 merge。
 - Merge 必须由用户明确批准已经 review 的 exact SHA。
 - 相同 work item / exact commit 的重复 callback 或 issue 按幂等方式处理。
+
+
+## 安装 Sandbox callback
+
+如果 CODEX-RUN 或 CODE-REVIEW issue 中包含 `installation_smoke`：
+
+- 把它视为独立安装 Sandbox，不代表允许修改真实项目。
+- wrapper validation 通过后，独立检查准确的 Sandbox diff。
+- 如果已经接近完成，针对 exact SHA 创建一个 `[CODE-REVIEW]` issue。
+- Code Review 后，如有确定性技术问题，把 findings 合并成一次 delta-only REVISE。
+- 当 exact SHA 已有成功 review evidence 且没有 blocking finding 时，只向用户询问一次明确的 Sandbox merge 批准。
+- 用户没有明确批准前，不得创建 `[MERGE-APPROVE]`。
+- 批准后，只合并准确的 reviewed sandbox SHA。
