@@ -10,6 +10,7 @@ test("project config keeps safe defaults and detected validation",()=>{
     validationProfile:{allowed_executables:["node","npm"],validation_steps:[{name:"tests",command:"npm",arguments:["test"]}]}
   });
   const p=JSON.parse(text).projects.demo;
+  assert.equal(p.enabled,true);
   assert.equal(p.max_iterations,5);
   assert.equal(p.enforce_wrapper_validation,true);
   assert.equal(p.code_review.required_for_code_changes,true);
@@ -39,4 +40,16 @@ test("local paths and project keys are deterministic",()=>{
   assert.equal(safeKey("My App!"),"my-app");
   const p=defaultLocalPaths({home:"C:\\Users\\Example",installationId:"abc-def-123",projectKey:"my-app"});
   assert.match(p.runnerLabel,/^codex-orchestrator-/);
+});
+
+
+test("project registry can keep the real project disabled while sandbox is enabled",()=>{
+  const disabled=JSON.parse(renderProjectsJson({
+    projectKey:"real-app",
+    repository:"owner/real-app",
+    defaultBranch:"main",
+    validationProfile:{allowed_executables:["node","npm"],validation_steps:[]},
+    enabled:false
+  })).projects["real-app"];
+  assert.equal(disabled.enabled,false);
 });
