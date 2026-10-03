@@ -257,6 +257,44 @@ function githubLogin() {
   emit({status:"PASS",preferred_language:lang,message:t(lang,"github_cli.login.success"),resume_command:"node src/cli.mjs resume --json"});
 }
 
+function runtimeChecks(state) {
+  const pendingDir=path.join(os.homedir(),".chatgpt-codex-orchestrator","pending-wakes");
+  const pendingCallbacks=fs.existsSync(pendingDir)
+    ? fs.readdirSync(pendingDir).filter(x=>x.endsWith(".json")).length
+    : 0;
+
+  let runnerRunning=false;
+  if(process.platform==="win32" && state.runner_path){
+    const escaped=String(state.runner_path).replaceAll("'","''");
+    const ps=spawnSync("powershell.exe",["-NoProfile","-Command",
+      "$root='"+escaped.replaceAll("\\","\\")+"'.TrimEnd('\\')+'\\'; "+
+      "$p=@(Get-CimInstance Win32_Process -Filter \"Name='Runner.Listener.exe'\" -ErrorAction SilentlyContinue|Where-Object{$_.ExecutablePath -and $_.ExecutablePath.StartsWith($root,[System.StringComparison]::OrdinalIgnoreCase)}); "+
+      "if($p.Count -gt 0){exit 0}else{exit 1}"
+    ],{encoding:"utf8"});
+    runnerRunning=ps.status===0;
+  }
+
+  let browserReady=false;
+  const port=Number(state.browser_port||0);
+  if(process.platform==="win32" && Number.isInteger(port) && port>0){
+    const ps=spawnSync("powershell.exe",["-NoProfile","-Command",
+      "try { Invoke-RestMethod -Uri 'http://127.0.0.1:"+port+"/json/version' -TimeoutSec 2 | Out-Null; exit 0 } catch { exit 1 }"
+    ],{encoding:"utf8"});
+    browserReady=ps.status===0;
+  }
+
+  return {
+    control_repository:Boolean(state.control_repository),
+    control_clone:Boolean(state.control_clone_path&&fs.existsSync(state.control_clone_path)),
+    project_clone:Boolean(state.project_clone_path&&fs.existsSync(state.project_clone_path)),
+    runner_configured:Boolean(state.runner_path&&fs.existsSync(path.join(state.runner_path,".runner"))),
+    runner_running:runnerRunning,
+    reviewer_browser:browserReady,
+    codex_authenticated:commandExists("codex",["login","status"]).ok,
+    pending_callbacks:pendingCallbacks
+  };
+}
+
 function doctor() {
   const state=loadState();
   const lang=ensureStateLanguage(state);
@@ -269,22 +307,55 @@ function doctor() {
     install_state:fs.existsSync(path.join(stateRoot(),"install-state.json")),
     github_plugin_configured:Boolean(state.github_plugin_authorized),
     github_repository_configured:Boolean(state.target_repository),
-    reviewer_chat_configured:Boolean(state.reviewer_chat_url)
+    reviewer_chat_configured:Boolean(state.reviewer_chat_url),
+    ...runtimeChecks(state)
   };
-  const healthy=Object.values(checks).every(Boolean);
-  emit({status:healthy?"PASS":"ERROR",error_id:healthy?null:"DOCTOR-001",recoverable:true,preferred_language:lang,message:healthy?t(lang,"doctor.healthy"):t(lang,"doctor.attention"),checks},healthy?0:1);
+
+  let preflight=true;
+  let preflightDetails=null;
+  if(state.control_environment_ready&&state.control_clone_path&&state.project_key&&process.platform==="win32"){
+    const script=path.join(state.control_clone_path,"scripts","preflight.ps1");
+    const r=spawnSync("powershell.exe",["-NoProfile","-ExecutionPolicy","Bypass","-File",script,"-Project",state.project_key],{encoding:"utf8"});
+    preflight=r.status===0;
+    preflightDetails=(r.stdout||r.stderr||"").trim()||null;
+  }
+  checks.runtime_preflight=preflight;
+
+  const booleanChecks=Object.fromEntries(Object.entries(checks).filter(([,v])=>typeof v==="boolean"));
+  const healthy=Object.values(booleanChecks).every(Boolean);
+  emit({status:healthy?"PASS":"ERROR",error_id:healthy?null:"DOCTOR-001",recoverable:true,preferred_language:lang,message:healthy?t(lang,"doctor.healthy"):t(lang,"doctor.attention"),checks,preflight_details:preflightDetails},healthy?0:1);
 }
 
 function status() {
   const state=loadState();
   const lang=ensureStateLanguage(state);
-  emit({status:state.ready?"PASS":"NEEDS_USER_ACTION",preferred_language:lang,message:state.ready?t(lang,"status.ready"):t(lang,"status.not_ready"),current_step:state.current_step||"not_started",completed:state.completed||[],project_key:state.project_key||null});
+  emit({
+    status:state.ready?"PASS":"NEEDS_USER_ACTION",
+    preferred_language:lang,
+    message:state.ready?t(lang,"status.ready"):t(lang,"status.not_ready"),
+    current_step:state.current_step||"not_started",
+    completed:state.completed||[],
+    project_key:state.project_key||null,
+    runtime:runtimeChecks(state)
+  });
 }
 
 function repair() {
   const state=loadState();
   const lang=ensureStateLanguage(state);
-  emit({status:"PASS",preferred_language:lang,message:t(lang,"repair.baseline"),repaired:[],note:"Runtime callback/runner repair adapters are added in the next integration phase."});
+  if(process.platform!=="win32"||!state.control_environment_ready||!state.control_clone_path||!state.project_key){
+    return emit({status:"ERROR",error_id:"REPAIR-001",recoverable:true,preferred_language:lang,message:t(lang,"repair.not_ready"),runtime:runtimeChecks(state)},1);
+  }
+
+  const script=path.join(state.control_clone_path,"scripts","start-orchestrator-session.ps1");
+  const r=spawnSync("powershell.exe",["-NoProfile","-ExecutionPolicy","Bypass","-File",script,"-Project",state.project_key],{encoding:"utf8"});
+  if(r.status!==0){
+    state.last_error={error_id:"REPAIR-001",message:(r.stderr||r.stdout||"Repair failed").trim(),at:new Date().toISOString()};
+    saveState(state);
+    return emit({status:"ERROR",error_id:"REPAIR-001",recoverable:true,preferred_language:lang,message:t(lang,"repair.failed"),details:state.last_error.message,runtime:runtimeChecks(state)},1);
+  }
+
+  emit({status:"PASS",preferred_language:lang,message:t(lang,"repair.success"),repaired:["runner","reviewer_browser","pending_callbacks","preflight"],runtime:runtimeChecks(state)});
 }
 
 function reportProblem() {
