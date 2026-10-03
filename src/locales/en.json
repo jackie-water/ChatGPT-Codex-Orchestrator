@@ -55,5 +55,6 @@
   "sandbox.review.failed": "The sandbox Code Review request could not be created.",
   "sandbox.approval.required": "Explicit approval is required before the reviewed sandbox commit can be merged.",
   "sandbox.approval.created": "The exact reviewed sandbox commit was approved for sandbox-only merge.",
-  "sandbox.approval.failed": "The sandbox merge approval could not be created."
+  "sandbox.approval.failed": "The sandbox merge approval could not be created.",
+  "setup.target.activate_failed": "The sandbox passed, but activation of your real project did not finish. The real project main branch was not changed; I can repair this activation step."
 }
