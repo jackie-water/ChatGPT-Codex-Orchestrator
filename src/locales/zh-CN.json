@@ -18,5 +18,10 @@
   "answer.instructions.invalid": "请在生成的 Project Instructions 已加入 ChatGPT Project 后再确认。",
   "answer.sandbox.invalid": "Sandbox 验证通过后才能完成安装。",
   "answer.action.unknown": "无法识别这个安装步骤。",
-  "answer.saved": "你的回答已经保存，可以继续安装。"
+  "answer.saved": "你的回答已经保存，可以继续安装。",
+  "report.consent.required": "没有上传任何内容。提交诊断报告前必须获得你的明确同意。",
+  "report.file.missing": "找不到之前生成的脱敏诊断报告。",
+  "report.destination.missing": "当前开发版本还没有配置错误反馈 GitHub repository。",
+  "report.submitted": "脱敏诊断报告已经提交。",
+  "report.submit.failed": "诊断报告提交失败，本地报告仍然保留。"
 }
