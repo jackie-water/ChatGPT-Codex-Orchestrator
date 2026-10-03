@@ -28,5 +28,11 @@
   "setup.github_plugin.connect": "Now connect/authorize the GitHub Plugin in ChatGPT for the repository you want to use. Complete only this step, then tell me.",
   "github_cli.missing": "GitHub CLI is not installed yet.",
   "github_cli.login.failed": "GitHub CLI sign-in did not complete successfully.",
-  "github_cli.login.success": "GitHub CLI sign-in is complete."
+  "github_cli.login.success": "GitHub CLI sign-in is complete.",
+  "setup.control.failed": "Automatic control-environment setup did not finish. I can inspect the error and retry without touching your project main branch.",
+  "setup.codex.ready": "Codex now needs to be signed in and the isolated project folder needs to be trusted. Complete only this step, then tell me.",
+  "setup.codex.helper": "Open Codex in the provided project folder, sign in with ChatGPT if prompted, and approve trust for that folder. Do not give Codex a coding task yet.",
+  "setup.browser.login": "The dedicated reviewer browser now needs your ChatGPT sign-in. Sign in only in the separate browser window/profile, then tell me when it is complete.",
+  "answer.codex.invalid": "Codex sign-in/trust has not been confirmed yet.",
+  "answer.browser.invalid": "Reviewer browser sign-in has not been confirmed yet."
 }
