@@ -23,5 +23,10 @@
   "report.file.missing": "The prepared diagnostic report could not be found.",
   "report.destination.missing": "No feedback repository is configured for this development build.",
   "report.submitted": "The sanitised diagnostic report was submitted.",
-  "report.submit.failed": "The diagnostic report could not be submitted. The local copy is still available."
+  "report.submit.failed": "The diagnostic report could not be submitted. The local copy is still available.",
+  "setup.github_cli.connect": "GitHub CLI needs to sign in on this computer. Complete only this sign-in step, then setup can continue.",
+  "setup.github_plugin.connect": "Now connect/authorize the GitHub Plugin in ChatGPT for the repository you want to use. Complete only this step, then tell me.",
+  "github_cli.missing": "GitHub CLI is not installed yet.",
+  "github_cli.login.failed": "GitHub CLI sign-in did not complete successfully.",
+  "github_cli.login.success": "GitHub CLI sign-in is complete."
 }
