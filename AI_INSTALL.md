@@ -156,3 +156,16 @@ The configured project reviewer URL is a delayed disaster-recovery fallback only
 Multiple Chats may create independent issues concurrently. Never reuse another issue's origin marker.
 
 Installer-created sandbox issues are registered locally by the installer because their reviewer Chat is already known.
+
+
+## Generated private repository authorization
+
+After the installer creates the private control and sandbox repositories, do not assume the existing ChatGPT GitHub authorization automatically includes them.
+
+Before continuing to Codex trust:
+1. read the `generated_repo_authorization` action;
+2. ask the user to add the generated control and sandbox repositories to the ChatGPT GitHub connection if necessary;
+3. verify from ChatGPT that both repositories are actually accessible;
+4. only then save `generated_repo_authorization=true` and resume.
+
+Local `gh` access is not sufficient proof of ChatGPT GitHub access.
