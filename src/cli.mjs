@@ -187,6 +187,9 @@ function answer() {
       return emit({status:"ERROR",error_id:"SETUP-006",recoverable:true,preferred_language:lang,message:t(lang,"answer.chat.invalid")},1);
     }
     state.reviewer_chat_url = value;
+  } else if (actionId === "generated_repo_authorization") {
+    if (!bool(value)) return emit({status:"ERROR",error_id:"AUTH-005",recoverable:true,preferred_language:lang,message:t(lang,"answer.generated_repo.invalid")},1);
+    state.generated_repo_authorized = true;
   } else if (actionId === "codex_trust_sandbox") {
     if (!bool(value)) return emit({status:"ERROR",error_id:"AUTH-002",recoverable:true,preferred_language:lang,message:t(lang,"answer.codex.invalid")},1);
     state.codex_trust_sandbox = true;
@@ -314,6 +317,14 @@ function runSetup() {
       return emit({status:"ERROR",error_id:"SETUP-011",recoverable:true,preferred_language:lang,message:t(lang,"setup.control.failed"),details:String(error.message||error)},1);
     }
   }
+
+  if(!state.generated_repo_authorized) {
+    return emit(action(state,"generated_repo_authorization","setup.generated_repo.connect",{
+      repositories:[state.control_repository,state.sandbox_repository],
+      verification_requirement:"ChatGPT GitHub connection must be able to read both generated private repositories before continuing."
+    }));
+  }
+  if(!state.completed.includes("generated_repo_authorization")) state.completed.push("generated_repo_authorization");
 
   const codexLogin=commandExists("codex",["login","status"]);
   if(!codexLogin.ok) {
