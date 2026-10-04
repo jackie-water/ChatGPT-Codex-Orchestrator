@@ -5,7 +5,6 @@
       "default_branch": "main",
       "checkpoint_branch": "codex/checkpoints",
       "local_path_key": "example-project",
-      "default_review_route": "example-project",
       "allowed_validation_executables": [
         "git",
         "node",
