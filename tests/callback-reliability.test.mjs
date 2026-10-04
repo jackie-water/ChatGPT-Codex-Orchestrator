@@ -105,7 +105,7 @@ test("production callback state store persists legal transitions and rejects ide
 
 test("production callback state store fails closed on disappearance, conflicts, writes, renames, and returns bound fingerprints", () => {
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),"callback-store-")); const file=path.join(dir,"state.json"); const record={routing_version:"explicit-route-v1",delivery_state:"PENDING",callback_id:"x",chat_url:"https://chatgpt.com/c/chat-27",message:"payload"}; const expected={callbackId:"x",chatUrl:record.chat_url,message:record.message}; const write=()=>fs.writeFileSync(file,JSON.stringify(record)); write();
-  const make=(overrides={}, expectedFingerprint="")=>createCallbackStateStore({file,expected:record.chat_url,callbackId:"x",message:"payload",expectedFingerprint,fsModule:Object.assign(Object.create(fs),overrides),pathModule:path}); let store=make({},crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex")); const before=fs.readFileSync(file,"utf8"); fs.writeFileSync(file,before+" "); assert.throws(()=>store.update("DRAFT_INSERTED"),/fingerprint changed/); assert.equal(fs.readFileSync(file,"utf8"),before+" "); write();
+  const make=(overrides={}, expectedFingerprint="")=>createCallbackStateStore({file,expected:record.chat_url,callbackId:"x",message:"payload",expectedFingerprint,fsModule:Object.assign(Object.create(fs),overrides),pathModule:path}); let store=make({},crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex")); const before=fs.readFileSync(file,"utf8"); fs.writeFileSync(file,before+" "); assert.throws(()=>store.read(),/fingerprint changed/); assert.throws(()=>store.update("DRAFT_INSERTED"),/fingerprint changed/); assert.equal(fs.readFileSync(file,"utf8"),before+" "); write();
   for (const method of ["writeFileSync","renameSync"]) { store=make({[method](){throw new Error(method);}}); assert.throws(()=>store.update("DRAFT_INSERTED"),new RegExp(method)); assert.deepEqual(JSON.parse(fs.readFileSync(file)),record); }
   fs.unlinkSync(file); assert.throws(()=>store.read(),/Callback state disappeared/); assert.throws(()=>store.update("DRAFT_INSERTED"),/Callback state disappeared/); assert.equal(fs.existsSync(file),false); write(); const fp=make().update("DRAFT_INSERTED"); assert.equal(fp,crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex"));
 });
@@ -125,4 +125,12 @@ test("deliverCallback blocks send on production state-store faults", async () =>
   write(); const fp=crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex"); fs.appendFileSync(file," "); assert.equal(await attempt(make({},fp)),0); write(); fs.unlinkSync(file); assert.equal(await attempt(make()),0); assert.equal(fs.existsSync(file),false);
   for (const method of ["writeFileSync","renameSync"]) { write(); const before=fs.readFileSync(file); await attempt(make({[method](){throw new Error(method);}})); assert.deepEqual(fs.readFileSync(file),before); }
   for (const bad of [{delivery_state:"BROKEN"},{callback_id:"other"}]) { write(); fs.writeFileSync(file,JSON.stringify({...record,...bad})); let receipts=0; await assert.rejects(()=>deliverCallback({read:make().read,hasReceipt:async()=>{receipts++; return true;},update:make().update,send:async()=>{}})); assert.equal(receipts,0); }
+});
+
+test("deliverCallback supports direct delivery without persisted state", async () => {
+  let before=0, sent=0;
+  const result=await deliverCallback({read:()=>null,hasReceipt:async()=>{throw new Error("must not check receipt");},update:()=>{throw new Error("must not update");},beforeSend:async()=>before++,send:async()=>{sent++; return "ok";}});
+  assert.deepEqual(result,{action:"sent",result:"ok"}); assert.equal(before,1); assert.equal(sent,1);
+  assert.deepEqual(await deliverCallback({read:()=>null,hasReceipt:async()=>true,update:()=>{},beforeSend:async()=>{throw new Error("must not prepare");},send:async()=>{throw new Error("must not send");},allowSend:false}),{action:"reconcile",state:"PENDING"});
+  await assert.rejects(()=>deliverCallback({read:()=>null,hasReceipt:async()=>false,update:()=>{},beforeSend:async()=>{},send:async()=>{const error=new Error("not ready"); error.code="PRE_SEND_NOT_READY"; throw error;}}),/not ready/);
 });

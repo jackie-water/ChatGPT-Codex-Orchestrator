@@ -9,6 +9,7 @@ export function createCallbackStateStore({file, expected, callbackId, message, f
   const read = () => {
     if (!file) return null;
     if (!fs.existsSync(file)) throw new Error("Callback state disappeared");
+    if (currentFingerprint && fingerprint() !== currentFingerprint) throw new Error("Callback state fingerprint changed");
     const current = JSON.parse(fs.readFileSync(file, "utf8").replace(/^\uFEFF/, ""));
     validateCallbackState(current, {callbackId, chatUrl:expected, message});
     return current;
@@ -67,6 +68,11 @@ export function reconcileReceipt({state, receiptMatches}) {
 
 export async function deliverCallback({read, hasReceipt, send, update, beforeSend = async () => {}, allowSend = true}) {
   const stored = read();
+  if (!stored) {
+    if (!allowSend) return {action:"reconcile", state:"PENDING"};
+    await beforeSend();
+    return {action:"sent", result:await send()};
+  }
   if (!states.has(stored.delivery_state)) throw new Error("Invalid callback delivery state");
   if (await hasReceipt()) {
     if (stored.delivery_state !== "DELIVERED") update("DELIVERED", {verified_by:"existing-user-message"});
