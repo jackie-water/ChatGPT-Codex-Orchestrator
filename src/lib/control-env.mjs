@@ -164,6 +164,80 @@ export function activateTargetProject({controlClonePath,projectKey,repository}){
   return {changed:commit.changed,already_enabled:false};
 }
 
+const RETIRED_ROUTING_SCRIPTS=[
+  "capture-chat-origins.mjs",
+  "chat-routing.ps1",
+  "dispatch-chat-callback.ps1",
+  "origin-router-loop.ps1"
+];
+
+function stopRetiredOriginRouter(controlPath){
+  if(process.platform!=="win32") return {stopped:0};
+  const needle=path.join(controlPath,"scripts","origin-router-loop.ps1").toLowerCase();
+  const ps=[
+    "$needle=$env:ORCH_RETIRED_ROUTER_NEEDLE",
+    "$matches=@(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -and $_.CommandLine.ToLowerInvariant().Contains($needle) })",
+    "$count=0",
+    "foreach($p in $matches){ try { Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop; $count++ } catch {} }",
+    "Write-Output $count"
+  ].join("; ");
+  const r=spawnSafeSync("powershell.exe",["-NoProfile","-Command",ps],{
+    encoding:"utf8",
+    env:{...process.env,ORCH_RETIRED_ROUTER_NEEDLE:needle}
+  });
+  return {stopped:r.status===0?Number((r.stdout||"0").trim())||0:0};
+}
+
+export function upgradeControlEnvironment({state,sourceRoot=process.cwd(),home=os.homedir()}){
+  if(!state?.control_clone_path||!fs.existsSync(path.join(state.control_clone_path,".git"))){
+    throw new Error("Existing control clone is unavailable for upgrade");
+  }
+  if(!state?.runner_label||!state?.runner_path||!state?.browser_profile||!state?.browser_port){
+    throw new Error("Existing installation state is incomplete for upgrade");
+  }
+
+  const stopped=stopRetiredOriginRouter(state.control_clone_path);
+  const scriptsDir=path.join(state.control_clone_path,"scripts");
+  copyDirectory(path.join(sourceRoot,"runtime","scripts"),scriptsDir);
+  for(const name of RETIRED_ROUTING_SCRIPTS){
+    fs.rmSync(path.join(scriptsDir,name),{force:true});
+  }
+
+  const workflowTemplate=fs.readFileSync(path.join(sourceRoot,"templates","control-repo","orchestrator.yml.template"),"utf8");
+  fs.mkdirSync(path.join(state.control_clone_path,".github","workflows"),{recursive:true});
+  fs.writeFileSync(
+    path.join(state.control_clone_path,".github","workflows","orchestrator.yml"),
+    renderWorkflow(workflowTemplate,{runnerLabel:state.runner_label})
+  );
+
+  const configRoot=path.join(home,".chatgpt-codex-orchestrator");
+  fs.mkdirSync(configRoot,{recursive:true});
+  const configText=renderConfigPs1({
+    githubLogin:state.github_login,
+    projectMappings:[
+      {projectKey:state.project_key,projectClonePath:state.project_clone_path},
+      {projectKey:state.sandbox_project_key,projectClonePath:state.sandbox_clone_path}
+    ],
+    runnerPath:state.runner_path,
+    browserPort:state.browser_port,
+    browserProfile:state.browser_profile
+  });
+  const configPath=state.config_path||path.join(configRoot,"config.ps1");
+  fs.writeFileSync(configPath,configText,{mode:0o600});
+
+  const instanceId=path.basename(state.runner_path);
+  const chatRouteFile=path.join(home,".chatgpt-codex-orchestrator","routes",instanceId,"chat-routes.json");
+  const commit=commitControlRepo(state.control_clone_path);
+
+  return {
+    changed:commit.changed,
+    stopped_retired_router_processes:stopped.stopped,
+    chat_route_file:chatRouteFile,
+    config_path:configPath,
+    retired_scripts:RETIRED_ROUTING_SCRIPTS
+  };
+}
+
 export function prepareControlEnvironment({
   installationId,
   targetRepository,
