@@ -25,10 +25,10 @@ test("native callback lifecycle uses isolated shipped PowerShell entrypoints", {
     const shim=path.join(scripts,"wake-chat.mjs");
     fs.writeFileSync(shim,`import fs from 'node:fs';
 const file=process.env.CODEX_CALLBACK_STATE_FILE;
-const item=JSON.parse(fs.readFileSync(file,'utf8'));
+const item=JSON.parse(fs.readFileSync(file,'utf8').replace(/^\\uFEFF/,''));
 if(process.env.ARGV_MARKER) fs.writeFileSync(process.env.ARGV_MARKER,process.argv.slice(2).join(' ')+'\\n'+item.message);
 if(process.env.TEST_MODE==='pending'){process.exitCode=3;process.exit();}
-if(process.env.TEST_MODE==='error'){process.exitCode=1;process.exit();}
+if(process.env.TEST_MODE==='error'){console.error('SYNTHETIC_WAKE_FAILURE');process.exitCode=1;process.exit();}
 item.delivery_state='DELIVERED'; fs.writeFileSync(file,JSON.stringify(item)+'\\n');
 const crypto=await import('node:crypto'); console.log('CHAT_STATE_FINGERPRINT:'+crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex'));`);
     const env={...process.env,HOME:home,USERPROFILE:home,TEST_MODE:"pending"};
@@ -61,12 +61,17 @@ const crypto=await import('node:crypto'); console.log('CHAT_STATE_FINGERPRINT:'+
     const retryId="spaces-retry", retryMessage="  payload  ", retryMarker=path.join(dir,"retry.marker");
     result=run(wake,["-ChatUrl","https://chatgpt.com/c/test","-CallbackId",retryId,"-Message",retryMessage,"-QueueOnFailure"],{...env,TEST_MODE:"error"});
     const retryPath=path.join(pending,retryId+".json");
+    assert.match(result.stdout+result.stderr,/SYNTHETIC_WAKE_FAILURE/);
     assert.match(result.stdout+result.stderr,/CHAT_WAKE_QUEUED callback_id=spaces-retry/);
     assert.equal(fs.existsSync(retryPath),true);
     assert.equal(JSON.parse(fs.readFileSync(retryPath,"utf8")).message,retryMessage);
     assert.doesNotMatch(result.stdout+result.stderr,/CHAT_WAKE_DELIVERED/);
+    result=run(wake,["-ReconcileOnly","-CallbackId",retryId],{...env,TEST_MODE:"error"});
+    assert.notEqual(result.status,0); assert.match(result.stdout+result.stderr,/SYNTHETIC_WAKE_FAILURE/); assert.match(result.stdout+result.stderr,/ERROR callback_id=spaces-retry/); assert.equal(fs.existsSync(retryPath),true);
     result=run(wake,["-ReconcileOnly","-CallbackId",retryId],{...env,TEST_MODE:"success",ARGV_MARKER:retryMarker});
     assert.equal(result.status,0); assert.equal(fs.readFileSync(retryMarker,"utf8"),retryMessage+"\n"+retryMessage); assert.equal(fs.existsSync(retryPath),false);
+    result=run(wake,["-ChatUrl","https://chatgpt.com/c/test","-CallbackId","direct-error","-Message","payload"],{...env,TEST_MODE:"error"});
+    assert.notEqual(result.status,0); assert.match(result.stdout+result.stderr,/SYNTHETIC_WAKE_FAILURE/); assert.doesNotMatch(result.stdout+result.stderr,/CHAT_WAKE_QUEUED/); assert.equal(fs.existsSync(path.join(pending,"direct-error.json")),false);
   } finally { fs.rmSync(dir,{recursive:true,force:true}); }
 });
 

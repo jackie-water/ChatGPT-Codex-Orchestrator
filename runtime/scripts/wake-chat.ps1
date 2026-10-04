@@ -112,9 +112,15 @@ try {
   $env:CODEX_CALLBACK_EXPECTED_FINGERPRINT = if ($QueueOnFailure -or $ReconcileOnly) { $recordVersion } else { '' }
   $env:CODEX_RECONCILE_ONLY = if ($ReconcileOnly) { "1" } else { Remove-Item Env:CODEX_RECONCILE_ONLY -ErrorAction SilentlyContinue; $null }
 
-  $nodeOutput = @(node (Join-Path $PSScriptRoot "wake-chat.mjs") $Message 2>&1)
+  $previousErrorActionPreference = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = "Continue"
+    $nodeOutput = @(node (Join-Path $PSScriptRoot "wake-chat.mjs") $Message 2>&1)
+    $wakeExit = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+  }
   $nodeOutput | ForEach-Object { Write-Host $_ }
-  $wakeExit = $LASTEXITCODE
   $returnedFingerprint = ($nodeOutput | Where-Object { $_ -match '^CHAT_STATE_FINGERPRINT:([0-9a-f]{64})$' } | Select-Object -Last 1) -replace '^CHAT_STATE_FINGERPRINT:',''
 
   if ($wakeExit -eq 0) {
