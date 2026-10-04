@@ -64,7 +64,7 @@ const crypto=await import('node:crypto'); console.log('CHAT_STATE_FINGERPRINT:'+
     assert.match(result.stdout+result.stderr,/SYNTHETIC_WAKE_FAILURE/);
     assert.match(result.stdout+result.stderr,/CHAT_WAKE_QUEUED callback_id=spaces-retry/);
     assert.equal(fs.existsSync(retryPath),true);
-    assert.equal(JSON.parse(fs.readFileSync(retryPath,"utf8")).message,retryMessage);
+    assert.equal(JSON.parse(fs.readFileSync(retryPath,"utf8").replace(/^\uFEFF/,"")).message,retryMessage);
     assert.doesNotMatch(result.stdout+result.stderr,/CHAT_WAKE_DELIVERED/);
     result=run(wake,["-ReconcileOnly","-CallbackId",retryId],{...env,TEST_MODE:"error"});
     assert.notEqual(result.status,0); assert.match(result.stdout+result.stderr,/SYNTHETIC_WAKE_FAILURE/); assert.match(result.stdout+result.stderr,/ERROR callback_id=spaces-retry/); assert.equal(fs.existsSync(retryPath),true);
