@@ -113,6 +113,33 @@
     },
     "sandbox_merge_approved_commit": {
       "type": "string"
+    },
+    "instance_id": {
+      "type": "string"
+    },
+    "instance_root": {
+      "type": "string"
+    },
+    "chat_route_file": {
+      "type": "string"
+    },
+    "routing_architecture": {
+      "type": "string",
+      "enum": [
+        "explicit-route-v1"
+      ]
+    },
+    "sandbox_review_route": {
+      "type": "string"
+    },
+    "target_review_route": {
+      "type": "string"
+    },
+    "routing_upgrade": {
+      "type": "object"
+    },
+    "generated_repo_authorized": {
+      "type": "boolean"
     }
   },
   "additionalProperties": true
