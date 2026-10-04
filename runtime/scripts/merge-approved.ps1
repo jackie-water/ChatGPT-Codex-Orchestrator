@@ -9,6 +9,7 @@ if (-not (Test-Path $ConfigPath)) { throw "Missing local config: $ConfigPath" }
 if (-not (Test-Path $RegistryPath)) { throw "Missing project registry: $RegistryPath" }
 
 . $ConfigPath
+. (Join-Path $PSScriptRoot "chat-route-registry.ps1")
 $registry = Get-Content -Raw $RegistryPath | ConvertFrom-Json
 $event = Get-Content -Raw $EventPath | ConvertFrom-Json
 
@@ -48,23 +49,17 @@ if ($sourceBranch -notmatch '^(codex|chore|fix|feat|refactor|test|docs|spike)/[A
 $approvedCommit = ([string]$req.approved_commit).ToLowerInvariant()
 if ($approvedCommit -notmatch '^[0-9a-f]{40}$') { throw "approved_commit must be a full 40-character SHA" }
 
-$reviewRoute = if ($req.PSObject.Properties.Name -contains "review_route" -and -not [string]::IsNullOrWhiteSpace([string]$req.review_route)) {
-  [string]$req.review_route
-} else {
-  [string]$project.default_review_route
+if (-not ($req.PSObject.Properties.Name -contains "review_route") -or [string]::IsNullOrWhiteSpace([string]$req.review_route)) {
+  throw "CHAT_ROUTE_REQUIRED: review_route must be supplied by the originating registered Chat"
 }
+$reviewRoute = [string]$req.review_route
+if ($reviewRoute -notmatch '^[a-z0-9][a-z0-9._-]{0,63}$') { throw "Invalid review_route: $reviewRoute" }
 
-$chatUrl = $null
-$chatVar = Get-Variable -Name "CHAT_ROUTES" -ErrorAction SilentlyContinue
-if ($chatVar -and $chatVar.Value -is [System.Collections.IDictionary] -and $chatVar.Value.Contains($reviewRoute)) {
-  $chatUrl = [string]$chatVar.Value[$reviewRoute]
+$routeRecord = Resolve-RegisteredChatRoute -ProjectKey $projectKey -Route $reviewRoute
+if (-not $routeRecord) {
+  throw "CHAT_ROUTE_UNREGISTERED: route '$reviewRoute' is not an active registered Chat for project '$projectKey'"
 }
-if ([string]::IsNullOrWhiteSpace($chatUrl)) {
-  $projectRouteVar = Get-Variable -Name "PROJECT_REVIEW_ROUTES" -ErrorAction SilentlyContinue
-  if ($projectRouteVar -and $projectRouteVar.Value -is [System.Collections.IDictionary] -and $projectRouteVar.Value.Contains($projectKey)) {
-    $chatUrl = [string]$projectRouteVar.Value[$projectKey]
-  }
-}
+$chatUrl = [string]$routeRecord.chat_url
 
 Push-Location $repoPath
 try {
@@ -154,4 +149,4 @@ try {
 
 $callbackId = "merge-$projectKey-$($event.issue.number)-$approvedCommit"
 $message = "[MERGE-AUTO callback_id=$callbackId] Human-approved merge completed for project '$projectKey'. Repository $repository default branch '$defaultBranch' now contains approved commit $approvedCommit from $sourceBranch. No force-push, rebase, or deployment command was performed."
-& (Join-Path $PSScriptRoot "dispatch-chat-callback.ps1") -ProjectKey $projectKey -IssueNumber ([int]$event.issue.number) -ReviewRoute $reviewRoute -Message $message -CallbackId $callbackId
+& (Join-Path $PSScriptRoot "wake-chat.ps1") -ChatUrl $chatUrl -Message $message -CallbackId $callbackId -QueueOnFailure
