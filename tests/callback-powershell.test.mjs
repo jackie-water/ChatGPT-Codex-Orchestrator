@@ -60,7 +60,11 @@ const crypto=await import('node:crypto'); console.log('CHAT_STATE_FINGERPRINT:'+
 
     const retryId="spaces-retry", retryMessage="  payload  ", retryMarker=path.join(dir,"retry.marker");
     result=run(wake,["-ChatUrl","https://chatgpt.com/c/test","-CallbackId",retryId,"-Message",retryMessage,"-QueueOnFailure"],{...env,TEST_MODE:"error"});
-    assert.equal(result.status,0); const retryPath=path.join(pending,retryId+".json"); assert.equal(JSON.parse(fs.readFileSync(retryPath,"utf8")).message,retryMessage);
+    const retryPath=path.join(pending,retryId+".json");
+    assert.match(result.stdout+result.stderr,/CHAT_WAKE_QUEUED callback_id=spaces-retry/);
+    assert.equal(fs.existsSync(retryPath),true);
+    assert.equal(JSON.parse(fs.readFileSync(retryPath,"utf8")).message,retryMessage);
+    assert.doesNotMatch(result.stdout+result.stderr,/CHAT_WAKE_DELIVERED/);
     result=run(wake,["-ReconcileOnly","-CallbackId",retryId],{...env,TEST_MODE:"success",ARGV_MARKER:retryMarker});
     assert.equal(result.status,0); assert.equal(fs.readFileSync(retryMarker,"utf8"),retryMessage+"\n"+retryMessage); assert.equal(fs.existsSync(retryPath),false);
   } finally { fs.rmSync(dir,{recursive:true,force:true}); }
