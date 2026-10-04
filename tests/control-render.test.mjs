@@ -15,6 +15,7 @@ test("project config keeps safe defaults and detected validation",()=>{
   assert.equal(p.enforce_wrapper_validation,true);
   assert.equal(p.code_review.required_for_code_changes,true);
   assert.deepEqual(p.allowed_validation_executables,["git","node","npm"]);
+  assert.equal("default_review_route" in p,false);
 });
 
 test("workflow only substitutes a validated runner label",()=>{
@@ -22,17 +23,19 @@ test("workflow only substitutes a validated runner label",()=>{
   assert.throws(()=>renderWorkflow("x {{RUNNER_LABEL}}",{runnerLabel:"bad label && cmd"}));
 });
 
-test("PowerShell config quotes user-derived values",()=>{
+test("PowerShell config quotes user-derived values and has no reviewer fallback",()=>{
   const c=renderConfigPs1({
     githubLogin:"user'name",
     projectKey:"demo",
     projectClonePath:"C:\\A B\\demo",
-    reviewerChatUrl:"https://chatgpt.com/c/abc",
-    runnerPath:"C:\\runner",
+    runnerPath:"C:\\runner-demo",
     browserPort:9333,
     browserProfile:"C:\\profile"
   });
   assert.match(c,/user''name/);
+  assert.match(c,/CODEX_CHAT_ROUTE_FILE/);
+  assert.match(c,/ORCHESTRATOR_INSTANCE_ID = 'runner-demo'/);
+  assert.doesNotMatch(c,/PROJECT_REVIEW_ROUTES|CHAT_ROUTES|ORCHESTRATOR_ORIGIN_FALLBACK_MINUTES/);
   assert.doesNotMatch(c,/PRICEUP/i);
 });
 
@@ -41,7 +44,6 @@ test("local paths and project keys are deterministic",()=>{
   const p=defaultLocalPaths({home:"C:\\Users\\Example",installationId:"abc-def-123",projectKey:"my-app"});
   assert.match(p.runnerLabel,/^codex-orchestrator-/);
 });
-
 
 test("project registry can keep the real project disabled while sandbox is enabled",()=>{
   const disabled=JSON.parse(renderProjectsJson({
@@ -52,17 +54,4 @@ test("project registry can keep the real project disabled while sandbox is enabl
     enabled:false
   })).projects["real-app"];
   assert.equal(disabled.enabled,false);
-});
-
-
-test("generated config enables delayed issue-origin fallback",()=>{
-  const c=renderConfigPs1({
-    githubLogin:"user",
-    projectMappings:[{projectKey:"demo",projectClonePath:"C:\\demo",reviewerChatUrl:"https://chatgpt.com/c/fallback"}],
-    runnerPath:"C:\\runner-demo",
-    browserPort:9333,
-    browserProfile:"C:\\profile-demo"
-  });
-  assert.match(c,/ORCHESTRATOR_ORIGIN_FALLBACK_MINUTES = '30'/);
-  assert.match(c,/ORCHESTRATOR_INSTANCE_ID = 'runner-demo'/);
 });
