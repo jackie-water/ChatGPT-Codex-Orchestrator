@@ -2,7 +2,8 @@ param([Parameter(Mandatory=$true)][string]$Project)
 $ErrorActionPreference = "Stop"
 
 $Root = Split-Path $PSScriptRoot -Parent
-$ConfigPath = Join-Path $HOME ".chatgpt-codex-orchestrator\config.ps1"
+. (Join-Path $PSScriptRoot "runtime-context.ps1")
+$ConfigPath = Get-OrchestratorConfigPath
 $RegistryPath = Join-Path $Root "projects.json"
 if (-not (Test-Path $ConfigPath)) { throw "Missing local config: $ConfigPath" }
 
