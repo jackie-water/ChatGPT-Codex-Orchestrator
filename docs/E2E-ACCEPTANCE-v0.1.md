@@ -14,7 +14,7 @@ The test environment must be isolated. Existing production orchestrators, runner
 - [ ] Missing Git, Node.js, GitHub CLI and Codex CLI are detected and installed where supported.
 - [ ] GitHub sign-in pauses for the user and is verified before continuing.
 - [ ] ChatGPT GitHub Plugin authorization pauses for the user and is verified before continuing.
-- [ ] The target repository and reviewer Chat URL are collected without asking the user to edit configuration files.
+- [ ] The target repository and current installation Chat URL are collected without asking the user to edit configuration files.
 - [ ] Closing and restarting setup resumes from persisted state instead of starting over.
 
 ## B. Installation isolation
@@ -31,11 +31,13 @@ The test environment must be isolated. Existing production orchestrators, runner
 ## C. Sandbox implementation lifecycle
 
 - [ ] The sandbox fixture begins in `not-ready`.
-- [ ] Installer starts one sandbox CODEX-RUN.
+- [ ] Installer creates one sandbox `[CHAT-REGISTER]` request before the first sandbox CODEX-RUN.
+- [ ] Sandbox CODEX-RUN cannot start until the same Chat receives `[CHAT-ROUTE-REGISTERED ...]`.
+- [ ] Installer starts one sandbox CODEX-RUN using the registered sandbox `review_route`.
 - [ ] Codex works only on the sandbox task branch.
 - [ ] Prompt-policy validation rejection consumes no Codex execution and returns to Chat for deterministic repair.
 - [ ] Wrapper validation runs outside Codex.
-- [ ] The implementation callback returns to the reviewer Chat.
+- [ ] The implementation callback returns to the exact registered Chat.
 - [ ] A near-final sandbox commit receives one independent exact-SHA Codex Code Review.
 - [ ] Re-requesting review for the same SHA reuses existing evidence.
 - [ ] A changed SHA invalidates the previous review.
@@ -49,22 +51,32 @@ The test environment must be isolated. Existing production orchestrators, runner
 - [ ] Only after sandbox main reaches `ready` does the installer enable the real project.
 - [ ] The real project checkpoint branch is created only after sandbox completion.
 - [ ] The user is asked to trust the real project folder only after sandbox completion.
-- [ ] Installation reaches READY only after real-project activation and trust.
+- [ ] The current installation Chat is explicitly registered for the real project after sandbox completion.
+- [ ] Installation reaches READY only after real-project activation, Chat registration and trust.
 
 ## E. Callback reliability
 
-- [ ] Normal callback delivery succeeds.
+- [ ] A new Chat without registration is rejected before Codex starts.
+- [ ] Re-registering the same active Chat URL for the same project is idempotent.
+- [ ] A different Chat receives a different registered route.
+- [ ] CODEX-RUN, CODE-REVIEW and MERGE-APPROVE reject missing, malformed, unknown or inactive routes.
+- [ ] Normal callback delivery succeeds only to the URL pinned by the registered route.
+- [ ] There is no default reviewer Chat and no fallback Chat.
 - [ ] If ChatGPT is busy generating, the sender waits instead of submitting the form.
-- [ ] If a callback cannot be sent, it is queued without marking completed implementation work as failed.
-- [ ] Repair retries pending callbacks.
+- [ ] If a callback cannot be sent, it is queued with the exact pinned Chat URL without marking completed implementation work as failed.
+- [ ] Pending callback state distinguishes at least PENDING, DRAFT_INSERTED and DELIVERED.
+- [ ] A callback ID appearing only in a composer draft is not treated as delivered.
 - [ ] Manual Send of a visible `callback_id` message is safe.
 - [ ] A delivered callback is not intentionally sent a second time.
-- [ ] Two different Chats can create separate orchestration issues concurrently and each callback returns to the correct originating Chat.
-- [ ] An origin-route conflict does not silently overwrite the existing issue-to-Chat mapping.
+- [ ] Legacy origin/fallback pending callbacks are retired instead of replayed after migration.
 - [ ] A missing exact target Chat tab is opened in a new tab; another Chat is never navigated away from its conversation.
-- [ ] The project reviewer is used only as delayed fallback when the issue origin remains unresolved.
+- [ ] Two different Chats can submit separate orchestration issues without crossing callback destinations.
+- [ ] Three rapid tasks can queue while one is running without the middle task being silently replaced.
+- [ ] Implementation callbacks reference an immutable run report path and checkpoint commit, not `.codex/latest-run.md`.
+- [ ] Code Review callbacks reference immutable by-commit review evidence.
 - [ ] Sleep/wake does not require rerunning Codex.
-- [ ] Session recovery restarts/checks runner, browser, pending callbacks and preflight.
+- [ ] Session recovery checks runner, browser, exact-destination pending callbacks and preflight.
+
 
 ## F. Iteration and token controls
 
@@ -109,5 +121,9 @@ The test environment must be isolated. Existing production orchestrators, runner
 - [ ] Browser callback JavaScript passes syntax checks.
 - [ ] Tests prevent production-specific Priceup/Clean Energy hardcodes.
 - [ ] Tests prevent real-project activation before sandbox verification.
+- [ ] Tests prove old origin-discovery scripts are absent.
+- [ ] Tests prove generated config contains no default/fallback Chat route.
+- [ ] Tests prove workflow concurrency uses `queue: max` so multiple pending runs are not silently replaced.
+- [ ] Upgrade tests retire old origin/fallback pending callbacks instead of delivering them.
 
 v0.1 is not beta-ready until all required items above have either passed or have a documented, user-approved exception.
