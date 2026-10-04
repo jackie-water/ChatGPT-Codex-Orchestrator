@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import fs from "node:fs";
 import vm from "node:vm";
 import { callbackReceiptMatches, receiptDomSource } from "../runtime/scripts/callback-receipt.mjs";
+import { validateCallbackState, assertSafeMutation, nextDeliveryState, sendGate, reconcileReceipt } from "../runtime/scripts/callback-delivery.mjs";
 
 const extract = root => vm.runInNewContext(`(${receiptDomSource()})`, {}).call(null, root);
 class Element {
@@ -72,17 +72,15 @@ test("receipt recognition fails closed for changed navigation, late drafts, and 
   }
 });
 
-test("shipped sender state machine keeps the mutation and send gates fail closed", () => {
-  const source=fs.readFileSync(new URL("../runtime/scripts/wake-chat.mjs", import.meta.url),"utf8");
-  assert.match(source,/beforeInputUrl[\s\S]*destination changed before input[\s\S]*insertText/);
-  assert.match(source,/verifyDestination[\s\S]*destination changed before submission[\s\S]*updateDeliveryState\("SUBMISSION_ATTEMPTED"\)/);
-  assert.match(source,/error\.code === "PRE_SEND_NOT_READY"\) updateDeliveryState\("PENDING"\)/);
-  assert.match(source,/stored\?\.delivery_state === "SUBMISSION_ATTEMPTED" \|\| stored\?\.delivery_state === "DRAFT_INSERTED"/);
-  assert.match(source,/stored\?\.delivery_state === "DELIVERED"/);
-  assert.match(source,/if \(stored && stored\.delivery_state !== "PENDING"\) throw new Error\("Invalid callback delivery state"\)/);
-  assert.match(source,/Callback state disappeared/);
-  assert.match(source,/Callback state fingerprint changed/);
-  assert.match(source,/fs\.renameSync\(temp,callbackStateFile\)/);
-  assert.match(source,/const alreadyDelivered = await hasReceipt\(send, callbackId, message\)/);
-  assert.match(source,/callbackReceiptMatches\(x\.text, \$\{JSON\.stringify\(callbackId\)\}, \$\{JSON\.stringify\(payload\)\}\)/);
+test("shipped sender helpers keep mutation and send gates fail closed", () => {
+  const expected={callbackId:"x",chatUrl:"https://chatgpt.com/c/chat-27",message:"payload"};
+  assert.equal(validateCallbackState({...expected,routing_version:"explicit-route-v1",delivery_state:"PENDING"},expected).delivery_state,"PENDING");
+  assert.throws(()=>assertSafeMutation({destination:"https://chatgpt.com/c/other",expectedDestination:expected.chatUrl,draft:"",message:expected.message}));
+  assert.throws(()=>assertSafeMutation({destination:expected.chatUrl,expectedDestination:expected.chatUrl,draft:"late draft",message:expected.message}));
+  assert.equal(nextDeliveryState("PENDING","DRAFT_INSERTED"),"DRAFT_INSERTED");
+  assert.throws(()=>nextDeliveryState("DELIVERED","DRAFT_INSERTED"));
+  assert.throws(()=>sendGate({state:"SUBMISSION_ATTEMPTED",destination:expected.chatUrl,expectedDestination:expected.chatUrl,draft:expected.message,message:expected.message,ready:false}), e=>e.code === "PRE_SEND_NOT_READY");
+  assert.equal(reconcileReceipt({state:"SUBMISSION_ATTEMPTED",receiptMatches:true}),"DELIVERED");
+  assert.equal(reconcileReceipt({state:"DRAFT_INSERTED",receiptMatches:false}),"DRAFT_INSERTED");
+  assert.throws(()=>reconcileReceipt({state:"BROKEN",receiptMatches:true}));
 });

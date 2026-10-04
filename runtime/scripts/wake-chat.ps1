@@ -131,7 +131,9 @@ try {
   if ($ReconcileOnly) {
     if ($wakeExit -eq 3) { Write-Host "PENDING callback_id=$CallbackId"; return }
     if ($wakeExit -eq 4) { Write-Host "NOT_FOUND callback_id=$CallbackId"; return }
-    Write-Host "ERROR callback_id=$CallbackId"; return
+    Write-Host "ERROR callback_id=$CallbackId"
+    $global:LASTEXITCODE = $wakeExit
+    return
   }
 
   if (-not $QueueOnFailure) {

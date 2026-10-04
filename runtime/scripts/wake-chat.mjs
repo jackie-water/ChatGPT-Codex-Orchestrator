@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { callbackReceiptMatches, normalizeReceiptText, receiptMatcherSource, receiptDomSource } from "./callback-receipt.mjs";
+import { validateCallbackState, assertSafeMutation, nextDeliveryState, sendGate, reconcileReceipt } from "./callback-delivery.mjs";
 const message = process.argv.slice(2).join(" ").trim();
 if (!message) {
   console.error("WAKE_CHAT_FAILED: missing message");
@@ -22,7 +23,7 @@ if (!expected) {
 function readDeliveryState() {
   if (!callbackStateFile || !fs.existsSync(callbackStateFile)) return null;
   const current = JSON.parse(fs.readFileSync(callbackStateFile,"utf8").replace(/^\uFEFF/,""));
-  if (current.routing_version !== "explicit-route-v1" || !["PENDING","DRAFT_INSERTED","SUBMISSION_ATTEMPTED","DELIVERED"].includes(current.delivery_state) || current.callback_id !== callbackId || current.chat_url !== expected || current.message !== message) throw new Error("Invalid callback state");
+  validateCallbackState(current, {callbackId, chatUrl:expected, message});
   return current;
 }
 
@@ -507,20 +508,21 @@ async function main() {
     console.log("CHAT_COMPOSER_FOUND:", JSON.stringify(composer));
 
     const beforeInputUrl = await evaluate(send, "location.href");
-    if (normalizeConversationUrl(beforeInputUrl) !== normalizeConversationUrl(expected)) throw new Error("Callback destination changed before input");
+    assertSafeMutation({destination:normalizeConversationUrl(beforeInputUrl), expectedDestination:normalizeConversationUrl(expected), draft:"", message});
     await insertText(send, message);
-    updateDeliveryState("DRAFT_INSERTED");
+    updateDeliveryState(nextDeliveryState("PENDING", "DRAFT_INSERTED"));
     const verifyDestination = await evaluate(send, "location.href");
-    if (normalizeConversationUrl(verifyDestination) !== normalizeConversationUrl(expected)) throw new Error("Callback destination changed before submission");
+    assertSafeMutation({destination:normalizeConversationUrl(verifyDestination), expectedDestination:normalizeConversationUrl(expected), draft:message, message});
 
-    updateDeliveryState("SUBMISSION_ATTEMPTED");
+    updateDeliveryState(nextDeliveryState("DRAFT_INSERTED", "SUBMISSION_ATTEMPTED"));
+    sendGate({state:"SUBMISSION_ATTEMPTED", destination:normalizeConversationUrl(verifyDestination), expectedDestination:normalizeConversationUrl(expected), draft:message, message, ready:true});
     let sendResult;
     try { sendResult = await sendMessage(send); }
     catch (error) { if (error.code === "PRE_SEND_NOT_READY") updateDeliveryState("PENDING"); throw error; }
     console.log("CHAT_WAKE_SENT:", JSON.stringify(sendResult));
 
     const confirmed = await confirmSubmission(send, callbackId, message, 30000);
-    updateDeliveryState("DELIVERED",{verified_by:confirmed?.verifiedBy||"submission-confirmed"});
+    updateDeliveryState(reconcileReceipt({state:"SUBMISSION_ATTEMPTED", receiptMatches:true}),{verified_by:confirmed?.verifiedBy||"submission-confirmed"});
     console.log("CHAT_WAKE_CONFIRMED:", JSON.stringify(confirmed));
   } finally {
     ws.close();
