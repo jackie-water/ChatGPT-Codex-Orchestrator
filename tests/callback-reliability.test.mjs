@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import vm from "node:vm";
 import { callbackReceiptMatches, receiptDomSource } from "../runtime/scripts/callback-receipt.mjs";
-import { validateCallbackState, assertSafeMutation, nextDeliveryState, sendGate, reconcileReceipt, createCallbackStateStore, deliverCallback } from "../runtime/scripts/callback-delivery.mjs";
+import { validateCallbackState, assertSafeMutation, nextDeliveryState, sendGate, reconcileReceipt, createCallbackStateStore, deliverCallback, isValidCallbackId } from "../runtime/scripts/callback-delivery.mjs";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -20,6 +20,11 @@ class Element {
   cloneNode() { return new Element({...this.attrs}, this.innerText, this.children.map(x => x.cloneNode(true))); }
 }
 const node = (attrs, text="", children=[]) => new Element(attrs, text, children);
+
+test("callback ID contract accepts safe IDs and rejects unsafe IDs", () => {
+  for (const value of ["wake-abc_123.4", "A".repeat(160)]) assert.equal(isValidCallbackId(value), true);
+  for (const value of ["", "   ", "wake/id", "A".repeat(161)]) assert.equal(isValidCallbackId(value), false);
+});
 
 test("matcher requires literal callback id and complete normalized payload", () => {
   const payload = "[CODEX-AUTO callback_id=a.b] line one\nline two";

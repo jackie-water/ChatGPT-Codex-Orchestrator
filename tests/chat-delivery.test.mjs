@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { spawn } from "node:child_process";
 import { callbackReceiptMatches, receiptDomSource } from "../runtime/scripts/callback-receipt.mjs";
 
 test("shipped callback entrypoints preserve the explicit route contract", () => {
@@ -21,4 +22,19 @@ test("delivery matching rejects absent, quoted, assistant, and partial receipts"
   assert.equal(callbackReceiptMatches(`> ${payload}`, "literal", payload), false);
   assert.equal(callbackReceiptMatches("[CODEX-AUTO callback_id=literal] other", "literal", payload), false);
   assert.equal(callbackReceiptMatches("[CODEX-AUTO callback_id=literal2] payload", "literal", payload), false);
+});
+
+test("wake-chat rejects missing or invalid callback IDs before browser discovery", async () => {
+  for (const callbackId of [undefined, "", " ", "wake/id", "A".repeat(161)]) {
+    const child = spawn(process.execPath, [new URL("../runtime/scripts/wake-chat.mjs", import.meta.url), "https://exact.example/payload"], {
+      env: {...process.env, CODEX_CALLBACK_ID: callbackId, ORCHESTRATOR_CHAT_URL: "https://chatgpt.com/c/chat-27", ORCHESTRATOR_BROWSER_DEBUG_PORT: "1"},
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    let stderr = "";
+    child.stderr.on("data", chunk => { stderr += chunk; });
+    const [code] = await new Promise(resolve => child.on("close", (exitCode, signal) => resolve([exitCode, signal])));
+    assert.equal(code, 2);
+    assert.match(stderr, /WAKE_CHAT_FAILED: valid CODEX_CALLBACK_ID is required/);
+    assert.doesNotMatch(stderr, /ECONNREFUSED|debug|browser/i);
+  }
 });

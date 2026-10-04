@@ -1,6 +1,10 @@
 import crypto from "node:crypto";
 const states = new Set(["PENDING", "DRAFT_INSERTED", "SUBMISSION_ATTEMPTED", "DELIVERED"]);
 
+export function isValidCallbackId(value) {
+  return typeof value === "string" && /^[A-Za-z0-9._-]{1,160}$/.test(value);
+}
+
 export function createCallbackStateStore({file, expected, callbackId, message, fsModule, pathModule, expectedFingerprint = "", now = () => new Date().toISOString()}) {
   const fs = fsModule;
   const path = pathModule;

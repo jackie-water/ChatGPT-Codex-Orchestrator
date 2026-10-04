@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { callbackReceiptMatches, normalizeReceiptText, receiptMatcherSource, receiptDomSource } from "./callback-receipt.mjs";
-import { createCallbackStateStore, assertSafeMutation, deliverCallback, nextDeliveryState, reconcileReceipt } from "./callback-delivery.mjs";
+import { createCallbackStateStore, assertSafeMutation, deliverCallback, nextDeliveryState, reconcileReceipt, isValidCallbackId } from "./callback-delivery.mjs";
 const message = process.argv.slice(2).join(" ");
 if (!message.trim()) {
   console.error("WAKE_CHAT_FAILED: missing message");
@@ -15,6 +15,10 @@ const callbackId = process.env.CODEX_CALLBACK_ID || "";
 const callbackStateFile = process.env.CODEX_CALLBACK_STATE_FILE || "";
 const reconcileOnly = process.env.CODEX_RECONCILE_ONLY === "1";
 let expectedFingerprint = process.env.CODEX_CALLBACK_EXPECTED_FINGERPRINT || "";
+if (!isValidCallbackId(callbackId)) {
+  console.error("WAKE_CHAT_FAILED: valid CODEX_CALLBACK_ID is required (1-160 ASCII letters, digits, '.', '_', or '-')");
+  process.exit(2);
+}
 if (!expected) {
   console.error("WAKE_CHAT_FAILED: exact Chat destination is required");
   process.exit(2);
