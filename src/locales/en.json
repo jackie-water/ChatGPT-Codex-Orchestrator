@@ -60,5 +60,6 @@
   "setup.generated_repo.connect": "Two private repositories were created for this installation. Add both generated repositories to the ChatGPT GitHub connection, then verify that ChatGPT can access both before continuing.",
   "answer.generated_repo.invalid": "ChatGPT access to the generated control and sandbox repositories has not been verified yet.",
   "setup.chat_registration.waiting": "This Chat is being registered as an explicit callback destination. Wait for the CHAT-ROUTE-REGISTERED callback in this exact conversation, then resume setup.",
-  "setup.chat_registration.no_fallback": "No other Chat will be used while registration is pending."
+  "setup.chat_registration.no_fallback": "No other Chat will be used while registration is pending.",
+  "setup.routing_upgrade.failed": "The existing installation could not be upgraded to explicit Chat routing. No fallback Chat will be used; repair this upgrade before continuing."
 }
