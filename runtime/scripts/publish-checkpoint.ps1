@@ -30,6 +30,7 @@ try {
   if ($remoteSourceHead -ne $SourceCommit) { throw "source branch moved after wrapper push" }
 
   git fetch origin "refs/heads/$CheckpointBranch`:refs/remotes/origin/$CheckpointBranch" | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw "checkpoint branch is not on origin" }
   git show-ref --verify --quiet "refs/remotes/origin/$CheckpointBranch"
   if ($LASTEXITCODE -ne 0) { throw "checkpoint branch missing for project '$ProjectKey'" }
 

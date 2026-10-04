@@ -319,12 +319,9 @@ async function insertText(send, text) {
 }
 async function userMessageState(send) {
   return evaluate(send, `(() => {
-    const structuredNodes = [...document.querySelectorAll('[data-testid^="conversation-turn-"][data-turn="user"]')];
-    const roleNodes = [
-      ...structuredNodes,
-      ...[...document.querySelectorAll('[data-message-author-role="user"]')]
-        .filter(node => !structuredNodes.some(turn => turn.contains(node)))
-    ];
+    const roleNodes = [...new Set(document.querySelectorAll(
+      '[data-testid^="conversation-turn-"][data-turn="user"], [data-message-author-role="user"]'
+    ))];
     return {
       count: roleNodes.length,
       last: roleNodes.length ? (roleNodes[roleNodes.length - 1].innerText || roleNodes[roleNodes.length - 1].textContent || '').trim() : '',

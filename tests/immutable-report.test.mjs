@@ -9,6 +9,7 @@ test("implementation callbacks point to immutable per-issue reports",()=>{
   assert.match(publisher,/CHECKPOINT_PUBLISHED/);
   assert.match(publisher,/refs\/heads\/\$SourceBranch`:refs\/remotes\/origin\/\$SourceBranch/);
   assert.match(publisher,/refs\/heads\/\$CheckpointBranch`:refs\/remotes\/origin\/\$CheckpointBranch/);
+  assert.match(publisher,/fetch origin "refs\/heads\/\$CheckpointBranch`:refs\/remotes\/origin\/\$CheckpointBranch" \| Out-Null\r?\n\s*if \(\$LASTEXITCODE -ne 0\)/);
   assert.match(runner,/checkpoint_commit=\$checkpointCommit path=\$runReportRel/);
   assert.match(runner,/Do not substitute \.codex\/latest-run\.md/);
 });

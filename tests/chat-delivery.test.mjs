@@ -9,6 +9,8 @@ test("callback delivery requires a committed user-role message",()=>{
   const text=wake();
   assert.match(text,/data-message-author-role=\\"user\\"/);
   assert.match(text,/\[data-testid\^=\\"conversation-turn-\\"\]\[data-turn=\\"user\\"\]/);
+  assert.match(text,/new Set\(document\.querySelectorAll\([\s\S]*data-message-author-role=\\"user\\"/);
+  assert.doesNotMatch(text,/const roleNodes = \[\s*\.\.\.structuredNodes/);
   assert.match(text,/verifiedBy:\"committed-user-turn\"/);
   assert.match(text,/Only a newly committed user-role/);
   assert.doesNotMatch(text,/cleared-composer-and-rendered-text/);
