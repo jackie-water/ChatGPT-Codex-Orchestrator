@@ -45,3 +45,28 @@ test("wrapper labels cannot claim a canonical receipt key before the payload", (
   assert.equal(callbackReceiptMatches(label.innerText,"x",payload.innerText),false);
   assert.deepEqual(JSON.parse(JSON.stringify(extract({querySelectorAll:()=>[label,payload]}))),[{text:label.innerText,key:"m1"},{text:payload.innerText,key:"m2"}]);
 });
+
+test("receipt recognition is independent of DOM count and traversal order", () => {
+  const make = (key, text) => node({"data-message-id":key,"data-message-author-role":"user"}, text);
+  const payload = "[CODEX-AUTO callback_id=x] payload";
+  const first = make("first", payload);
+  const duplicate = make("first", payload);
+  const second = make("second", "unrelated");
+  const one = extract({querySelectorAll:()=>[first,duplicate,second]});
+  const many = extract({querySelectorAll:()=>[second,duplicate,first,make("third",payload)]});
+  assert.equal(one.filter(x => callbackReceiptMatches(x.text, "x", payload)).length, 1);
+  assert.equal(many.filter(x => callbackReceiptMatches(x.text, "x", payload)).length, 2);
+});
+
+test("receipt recognition fails closed for changed navigation, late drafts, and invalid state", () => {
+  const payload = "[CODEX-AUTO callback_id=x] payload";
+  assert.equal(callbackReceiptMatches(payload, "x", payload), true);
+  for (const value of [
+    "[CODEX-AUTO callback_id=x] payload late draft",
+    "[CODEX-AUTO callback_id=x] payload changed navigation",
+    "[CODEX-AUTO callback_id=x] payload\n[CODEX-AUTO callback_id=x] payload"
+  ]) assert.equal(callbackReceiptMatches(value, "x", payload), false);
+  for (const value of ["", "not-json", "{\"delivery_state\":\"DELIVERED\"}"]) {
+    assert.equal(callbackReceiptMatches(value, "x", payload), false);
+  }
+});

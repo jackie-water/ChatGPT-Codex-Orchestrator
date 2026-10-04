@@ -31,7 +31,7 @@ const crypto=await import('node:crypto'); console.log('CHAT_STATE_FINGERPRINT:'+
     assert.equal(result.status,0); assert.match(result.stdout,/PENDING/); assert.deepEqual(JSON.parse(fs.readFileSync(path.join(pending,"pending.json"))),record("pending"));
     env.TEST_MODE="success"; fs.writeFileSync(path.join(pending,"done.json"),JSON.stringify(record("done")));
     result=run(wake,["-ReconcileOnly","-CallbackId","done"],env); assert.equal(result.status,0); assert.match(result.stdout,/CHAT_WAKE_DELIVERED/); assert.equal(fs.existsSync(path.join(pending,"done.json")),false);
-    result=run(wake,["-ReconcileOnly","-CallbackId","done"],env); assert.equal(result.status,0); assert.match(result.stdout,/NOT_FOUND/);
+    result=run(wake,["-ReconcileOnly","-CallbackId","done"],env); assert.equal(result.status,4); assert.match(result.stdout,/NOT_FOUND/); assert.doesNotMatch(result.stdout,/CHAT_WAKE_DELIVERED/); assert.equal(fs.existsSync(path.join(pending,"done.json")),false);
     fs.writeFileSync(path.join(pending,"bad.json"),JSON.stringify({...record("bad"),routing_version:"legacy"})); result=run(wake,["-ReconcileOnly","-CallbackId","bad"],env); assert.notEqual(result.status,0); assert.equal(fs.existsSync(path.join(pending,"bad.json")),true);
     result=run(wake,["-ReconcileOnly","-CallbackId","bad/id"],env); assert.notEqual(result.status,0); assert.equal(fs.existsSync(path.join(pending,"bad_id.json")),false);
     const other=path.join(home,".chatgpt-codex-orchestrator","instances","other","pending-wakes"); fs.mkdirSync(other,{recursive:true}); fs.writeFileSync(path.join(other,"done.json"),JSON.stringify(record("done"))); assert.equal(fs.existsSync(path.join(other,"done.json")),true);
