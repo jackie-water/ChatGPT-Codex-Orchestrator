@@ -17,7 +17,7 @@ $p = $projectProp.Value
 if ($p.PSObject.Properties.Name -contains "enabled" -and -not [bool]$p.enabled) { throw "PROJECT_DISABLED: project is not activated yet" }
 
 if (-not ($p.PSObject.Properties.Name -contains "max_iterations")) { throw "Project max_iterations is required" }
-if ([int]$p.max_iterations -lt 1 -or [int]$p.max_iterations -gt 10) { throw "Project max_iterations must be between 1 and 10" }
+if ([int]$p.max_iterations -lt 1 -or [int]$p.max_iterations -gt 20) { throw "Project max_iterations must be between 1 and 20" }
 
 if ($p.PSObject.Properties.Name -contains "prompt_limits" -and $null -ne $p.prompt_limits) {
   if ([int]$p.prompt_limits.initial_max_chars -lt 1000) { throw "Project initial prompt limit is invalid" }

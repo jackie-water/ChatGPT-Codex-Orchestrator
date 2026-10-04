@@ -14,15 +14,20 @@ export function assertSafeMutation({destination, expectedDestination, draft, mes
 }
 
 export function nextDeliveryState(state, next) {
-  if (state !== "PENDING" && next === "DRAFT_INSERTED") throw new Error("Invalid callback delivery state");
-  if (state !== "DRAFT_INSERTED" && next === "SUBMISSION_ATTEMPTED") throw new Error("Invalid callback delivery state");
+  if (!states.has(state) || !states.has(next)) throw new Error("Invalid callback delivery state");
+  const allowed = {
+    PENDING: new Set(["PENDING", "DRAFT_INSERTED"]),
+    DRAFT_INSERTED: new Set(["DRAFT_INSERTED", "SUBMISSION_ATTEMPTED"]),
+    SUBMISSION_ATTEMPTED: new Set(["SUBMISSION_ATTEMPTED", "DELIVERED"]),
+    DELIVERED: new Set(["DELIVERED"])
+  };
+  if (!allowed[state].has(next)) throw new Error("Invalid callback delivery state");
   return next;
 }
 
-export function sendGate({state, destination, expectedDestination, draft, message, ready}) {
+export function sendGate({state, destination, expectedDestination, draft, message}) {
   if (state !== "SUBMISSION_ATTEMPTED") throw new Error("Invalid callback delivery state");
   assertSafeMutation({destination, expectedDestination, draft, message});
-  if (!ready) { const error = new Error("Send control is not ready"); error.code = "PRE_SEND_NOT_READY"; throw error; }
   return true;
 }
 

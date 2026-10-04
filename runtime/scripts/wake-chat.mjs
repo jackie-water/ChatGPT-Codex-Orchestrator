@@ -21,7 +21,8 @@ if (!expected) {
 }
 
 function readDeliveryState() {
-  if (!callbackStateFile || !fs.existsSync(callbackStateFile)) return null;
+  if (!callbackStateFile) return null;
+  if (!fs.existsSync(callbackStateFile)) throw new Error("Callback state disappeared");
   const current = JSON.parse(fs.readFileSync(callbackStateFile,"utf8").replace(/^\uFEFF/,""));
   validateCallbackState(current, {callbackId, chatUrl:expected, message});
   return current;
@@ -515,7 +516,7 @@ async function main() {
     assertSafeMutation({destination:normalizeConversationUrl(verifyDestination), expectedDestination:normalizeConversationUrl(expected), draft:message, message});
 
     updateDeliveryState(nextDeliveryState("DRAFT_INSERTED", "SUBMISSION_ATTEMPTED"));
-    sendGate({state:"SUBMISSION_ATTEMPTED", destination:normalizeConversationUrl(verifyDestination), expectedDestination:normalizeConversationUrl(expected), draft:message, message, ready:true});
+    sendGate({state:"SUBMISSION_ATTEMPTED", destination:normalizeConversationUrl(verifyDestination), expectedDestination:normalizeConversationUrl(expected), draft:message, message});
     let sendResult;
     try { sendResult = await sendMessage(send); }
     catch (error) { if (error.code === "PRE_SEND_NOT_READY") updateDeliveryState("PENDING"); throw error; }

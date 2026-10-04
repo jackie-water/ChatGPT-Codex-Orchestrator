@@ -70,7 +70,7 @@ if ($branch -notmatch '^(codex|chore|fix|feat|refactor|test|docs|spike)/[A-Za-z0
 
 $iteration = [int]$req.iteration
 $hardMax = if ($project.PSObject.Properties.Name -contains "max_iterations") { [int]$project.max_iterations } else { 5 }
-if ($hardMax -lt 1 -or $hardMax -gt 10) { throw "Project max_iterations is outside supported range 1..10" }
+if ($hardMax -lt 1 -or $hardMax -gt 20) { throw "Project max_iterations is outside supported range 1..20" }
 $requestedMax = [int]$req.max_iterations
 if ($requestedMax -lt 1 -or $requestedMax -gt $hardMax) { throw "Requested max is outside allowed range 1..$hardMax for project '$projectKey'" }
 $effectiveMax = [Math]::Min($requestedMax, $hardMax)

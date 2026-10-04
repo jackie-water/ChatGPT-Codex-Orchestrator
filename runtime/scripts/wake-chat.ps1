@@ -26,6 +26,7 @@ if ($ReconcileOnly -and $CallbackId -notmatch '^[A-Za-z0-9._-]{1,160}$') { throw
 $mutex = $null
 $mutexOwned = $false
 $mutexIdentity = $null
+$processStatus = 0
 function Get-CallbackFingerprint([string]$Path) {
   if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
   return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -41,9 +42,9 @@ if ($ReconcileOnly) {
   trap { if ($mutex) { $mutex.ReleaseMutex(); $mutex.Dispose(); $mutex = $null }; break }
   $pendingPath = Join-Path $pendingDir ($CallbackId + ".json")
   if ([IO.Path]::GetFullPath($pendingPath) -ne ($pendingRoot + $CallbackId + '.json')) { throw "Unsafe callback path" }
-  if (-not (Test-Path $pendingPath)) { Write-Host "NOT_FOUND callback_id=$CallbackId"; $mutex.ReleaseMutex(); $mutex.Dispose(); $mutex = $null; exit 4 }
+  if (-not (Test-Path $pendingPath)) { Write-Host "NOT_FOUND callback_id=$CallbackId"; $processStatus = 4; $mutex.ReleaseMutex(); $mutex.Dispose(); $mutex = $null; return }
   $item = Get-Content -Raw $pendingPath | ConvertFrom-Json
-  if ([string]$item.routing_version -ne "explicit-route-v1" -or [string]$item.callback_id -ne $CallbackId -or [string]::IsNullOrWhiteSpace([string]$item.chat_url) -or [string]::IsNullOrWhiteSpace([string]$item.message)) { Write-Host "ERROR callback_id=$CallbackId"; $mutex.ReleaseMutex(); $mutex.Dispose(); $mutex = $null; exit 5 }
+  if ([string]$item.routing_version -ne "explicit-route-v1" -or [string]$item.callback_id -ne $CallbackId -or [string]::IsNullOrWhiteSpace([string]$item.chat_url) -or [string]::IsNullOrWhiteSpace([string]$item.message)) { Write-Host "ERROR callback_id=$CallbackId"; $processStatus = 5; $mutex.ReleaseMutex(); $mutex.Dispose(); $mutex = $null; return }
   $ChatUrl = [string]$item.chat_url; $Message = [string]$item.message
   $recordVersion = Get-CallbackFingerprint $pendingPath
 }
@@ -130,9 +131,9 @@ try {
 
   if ($ReconcileOnly) {
     if ($wakeExit -eq 3) { Write-Host "PENDING callback_id=$CallbackId"; return }
-    if ($wakeExit -eq 4) { Write-Host "NOT_FOUND callback_id=$CallbackId"; return }
+    if ($wakeExit -eq 4) { Write-Host "NOT_FOUND callback_id=$CallbackId"; $processStatus = 4; return }
     Write-Host "ERROR callback_id=$CallbackId"
-    $global:LASTEXITCODE = $wakeExit
+    $processStatus = if ($wakeExit -ne 0) { $wakeExit } else { 1 }
     return
   }
 
@@ -153,4 +154,5 @@ try {
 }
 } finally {
   if ($mutexOwned -and $mutex) { try { $mutex.ReleaseMutex() } catch {} ; $mutex.Dispose() }
+  if ($processStatus -ne 0) { exit $processStatus }
 }

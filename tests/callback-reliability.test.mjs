@@ -79,7 +79,8 @@ test("shipped sender helpers keep mutation and send gates fail closed", () => {
   assert.throws(()=>assertSafeMutation({destination:expected.chatUrl,expectedDestination:expected.chatUrl,draft:"late draft",message:expected.message}));
   assert.equal(nextDeliveryState("PENDING","DRAFT_INSERTED"),"DRAFT_INSERTED");
   assert.throws(()=>nextDeliveryState("DELIVERED","DRAFT_INSERTED"));
-  assert.throws(()=>sendGate({state:"SUBMISSION_ATTEMPTED",destination:expected.chatUrl,expectedDestination:expected.chatUrl,draft:expected.message,message:expected.message,ready:false}), e=>e.code === "PRE_SEND_NOT_READY");
+  assert.equal(sendGate({state:"SUBMISSION_ATTEMPTED",destination:expected.chatUrl,expectedDestination:expected.chatUrl,draft:expected.message,message:expected.message}), true);
+  assert.throws(()=>nextDeliveryState("PENDING","DELIVERED"));
   assert.equal(reconcileReceipt({state:"SUBMISSION_ATTEMPTED",receiptMatches:true}),"DELIVERED");
   assert.equal(reconcileReceipt({state:"DRAFT_INSERTED",receiptMatches:false}),"DRAFT_INSERTED");
   assert.throws(()=>reconcileReceipt({state:"BROKEN",receiptMatches:true}));
