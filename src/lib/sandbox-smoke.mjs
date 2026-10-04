@@ -1,7 +1,4 @@
 import {spawnSafeSync} from "./spawn-safe.mjs";
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
 
 function run(command,args,{cwd,allowFailure=false}={}){
   const r=spawnSafeSync(command,args,{cwd,encoding:"utf8"});
@@ -9,66 +6,6 @@ function run(command,args,{cwd,allowFailure=false}={}){
     throw new Error((r.stderr||r.stdout||command+" failed").trim());
   }
   return {ok:r.status===0,stdout:(r.stdout||"").trim(),stderr:(r.stderr||"").trim(),status:r.status};
-}
-
-function originRouteFile(){
-  return process.env.ORCHESTRATOR_ORIGIN_ROUTE_FILE ||
-    path.join(os.homedir(),".chatgpt-codex-orchestrator","issue-routes.json");
-}
-
-function normalizeChatUrl(value){
-  try{
-    const u=new URL(value);
-    if(u.origin!=="https://chatgpt.com") throw new Error("invalid origin");
-    if(!/^\/(?:g\/[^/]+\/)?c\/[A-Za-z0-9-]+\/?$/.test(u.pathname)) throw new Error("invalid conversation");
-    return u.origin+u.pathname.replace(/\/$/,"");
-  }catch{
-    throw new Error("Reviewer Chat URL is invalid for local origin routing");
-  }
-}
-
-function issueNumberOf(issue){
-  if(Number.isInteger(issue?.number)&&issue.number>0) return issue.number;
-  const url=String(issue?.url||"");
-  const match=url.match(/\/issues\/(\d+)(?:$|[?#])/);
-  if(match) return Number(match[1]);
-  throw new Error("Could not determine GitHub issue number for local origin routing");
-}
-
-export function registerKnownIssueOrigin(state,issue,projectKey){
-  const issueNumber=issueNumberOf(issue);
-  const chatUrl=normalizeChatUrl(state?.reviewer_chat_url);
-  const file=originRouteFile();
-  fs.mkdirSync(path.dirname(file),{recursive:true});
-
-  let registry={version:1,issues:{}};
-  try{
-    const raw=fs.readFileSync(file,"utf8").replace(/^\uFEFF/,"");
-    const parsed=JSON.parse(raw);
-    if(parsed&&typeof parsed==="object") registry=parsed;
-    registry.version=1;
-    if(!registry.issues||typeof registry.issues!=="object") registry.issues={};
-  }catch{}
-
-  const key=String(issueNumber);
-  const existing=registry.issues[key];
-  if(existing?.chat_url&&existing.chat_url!==chatUrl){
-    throw new Error("Origin route conflict for installer-created issue #"+issueNumber);
-  }
-
-  const now=new Date().toISOString();
-  registry.issues[key]={
-    project:projectKey,
-    chat_url:chatUrl,
-    captured_at_utc:existing?.captured_at_utc||now,
-    last_seen_utc:now,
-    source:"installer-known-origin"
-  };
-
-  const temp=file+"."+process.pid+".tmp";
-  fs.writeFileSync(temp,JSON.stringify(registry,null,2)+"\n","utf8");
-  fs.renameSync(temp,file);
-  return issueNumber;
 }
 
 function shortId(installationId){
@@ -81,6 +18,14 @@ export function smokeBranch(installationId){
 
 function issueMarker(installationId){
   return "INSTALL-SMOKE-"+shortId(installationId);
+}
+
+function requireSandboxRoute(state){
+  const route=String(state?.sandbox_review_route||"");
+  if(!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(route)){
+    throw new Error("Sandbox Chat route is not registered yet");
+  }
+  return route;
 }
 
 function listSmokeIssues(controlRepository,installationId){
@@ -198,11 +143,11 @@ export function startSandboxSmoke(state){
   if(!state?.control_repository||!state?.sandbox_project_key||!state?.sandbox_repository){
     throw new Error("Sandbox/control environment is not configured");
   }
+  const reviewRoute=requireSandboxRoute(state);
 
   const existing=listSmokeIssues(state.control_repository,state.installation_id)
     .find(x=>String(x.title||"").startsWith("[CODEX-RUN]")&&String(x.title||"").includes(issueMarker(state.installation_id)));
   if(existing){
-    registerKnownIssueOrigin(state,existing,state.sandbox_project_key);
     return {created:false,issue:existing,branch:smokeBranch(state.installation_id)};
   }
 
@@ -228,7 +173,7 @@ export function startSandboxSmoke(state){
     target_branch:branch,
     iteration:1,
     max_iterations:5,
-    review_route:state.sandbox_project_key,
+    review_route:reviewRoute,
     prompt,
     installation_smoke:{
       installation_id:state.installation_id,
@@ -239,55 +184,45 @@ export function startSandboxSmoke(state){
   const title="[CODEX-RUN] "+issueMarker(state.installation_id)+" sandbox ready-state";
   const r=run("gh",["issue","create","--repo",state.control_repository,"--title",title,"--body",body]);
   const url=r.stdout.split(/\s+/).find(x=>/^https:\/\/github\.com\//.test(x))||r.stdout;
-  const issue={title,url};
-  registerKnownIssueOrigin(state,issue,state.sandbox_project_key);
-  return {created:true,issue,branch};
+  return {created:true,issue:{title,url},branch};
 }
 
 export function createSandboxCodeReview(state,{commit}){
+  const reviewRoute=requireSandboxRoute(state);
   if(!/^[0-9a-f]{40}$/.test(String(commit||""))) throw new Error("Full reviewed commit SHA is required");
   const existing=listSmokeIssues(state.control_repository,state.installation_id)
     .find(x=>String(x.title||"").startsWith("[CODE-REVIEW]")&&String(x.body||"").includes(commit));
-  if(existing){
-    registerKnownIssueOrigin(state,existing,state.sandbox_project_key);
-    return {created:false,issue:existing};
-  }
+  if(existing) return {created:false,issue:existing};
 
   const title="[CODE-REVIEW] "+issueMarker(state.installation_id)+" "+commit.slice(0,12);
   const body=JSON.stringify({
     project:state.sandbox_project_key,
     source_branch:smokeBranch(state.installation_id),
     reviewed_commit:commit,
-    review_route:state.sandbox_project_key,
+    review_route:reviewRoute,
     installation_smoke:{installation_id:state.installation_id,marker:issueMarker(state.installation_id)}
   },null,2);
   const r=run("gh",["issue","create","--repo",state.control_repository,"--title",title,"--body",body]);
   const url=r.stdout.split(/\s+/).find(x=>/^https:\/\/github\.com\//.test(x))||r.stdout;
-  const issue={title,url};
-  registerKnownIssueOrigin(state,issue,state.sandbox_project_key);
-  return {created:true,issue};
+  return {created:true,issue:{title,url}};
 }
 
 export function createSandboxMergeApproval(state,{commit}){
+  const reviewRoute=requireSandboxRoute(state);
   if(!/^[0-9a-f]{40}$/.test(String(commit||""))) throw new Error("Full approved commit SHA is required");
   const existing=listSmokeIssues(state.control_repository,state.installation_id)
     .find(x=>String(x.title||"").startsWith("[MERGE-APPROVE]")&&String(x.body||"").includes(commit));
-  if(existing){
-    registerKnownIssueOrigin(state,existing,state.sandbox_project_key);
-    return {created:false,issue:existing};
-  }
+  if(existing) return {created:false,issue:existing};
 
   const title="[MERGE-APPROVE] "+issueMarker(state.installation_id)+" "+commit.slice(0,12);
   const body=JSON.stringify({
     project:state.sandbox_project_key,
     source_branch:smokeBranch(state.installation_id),
     approved_commit:commit,
-    review_route:state.sandbox_project_key,
+    review_route:reviewRoute,
     installation_smoke:{installation_id:state.installation_id,marker:issueMarker(state.installation_id)}
   },null,2);
   const r=run("gh",["issue","create","--repo",state.control_repository,"--title",title,"--body",body]);
   const url=r.stdout.split(/\s+/).find(x=>/^https:\/\/github\.com\//.test(x))||r.stdout;
-  const issue={title,url};
-  registerKnownIssueOrigin(state,issue,state.sandbox_project_key);
-  return {created:true,issue};
+  return {created:true,issue:{title,url}};
 }
