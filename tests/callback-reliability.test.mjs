@@ -76,6 +76,19 @@ test("receipt recognition fails closed for changed navigation, late drafts, and 
   }
 });
 
+test("wake-chat receipt and send destination guards use normalized conversation identity", () => {
+  const wake = fs.readFileSync(new URL("../runtime/scripts/wake-chat.mjs", import.meta.url), "utf8");
+  const normalizeConversationUrl = value => { const url = new URL(value); return url.origin + url.pathname; };
+  const expected = "https://chatgpt.com/c/chat-27";
+  const receiptGuard = wake.match(/if \(\(location\.origin \+ location\.pathname\) !== (.+?)\) return false;/)?.[1];
+  const sendGuard = wake.match(/if \(\(location\.origin \+ location\.pathname\) !== (.+?)\) return \{ok:false, reason:'destination-changed'\};/)?.[1];
+  assert.match(receiptGuard, /normalizeConversationUrl\(expected\)/);
+  assert.match(sendGuard, /normalizeConversationUrl\(expected\)/);
+  const accepts = href => normalizeConversationUrl(href) === normalizeConversationUrl(expected);
+  for (const href of [expected, `${expected}?query=1`, `${expected}#hash`]) assert.equal(accepts(href), true);
+  for (const href of ["https://chatgpt.com/c/other", "https://chat.openai.com/c/chat-27"]) assert.equal(accepts(href), false);
+});
+
 test("shipped sender helpers keep mutation and send gates fail closed", () => {
   const expected={callbackId:"x",chatUrl:"https://chatgpt.com/c/chat-27",message:"payload"};
   const persisted={routing_version:"explicit-route-v1",delivery_state:"PENDING",callback_id:expected.callbackId,chat_url:expected.chatUrl,message:expected.message};

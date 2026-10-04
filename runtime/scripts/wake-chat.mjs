@@ -271,7 +271,7 @@ async function userMessageState(send) {
 
 async function hasReceipt(send, callbackId, payload) {
   const result = await evaluate(send, `(() => {
-    if (location.href !== ${JSON.stringify(expected)}) return false;
+    if ((location.origin + location.pathname) !== ${JSON.stringify(normalizeConversationUrl(expected))}) return false;
     const normalizeReceiptText = ${normalizeReceiptText.toString()};
     const callbackReceiptMatches = ${callbackReceiptMatches.toString()};
     return ${receiptDomExpression}(document).some(x => callbackReceiptMatches(x.text, ${JSON.stringify(callbackId)}, ${JSON.stringify(payload)}));
@@ -305,7 +305,7 @@ async function sendMessage(send) {
   // Never submit a form or synthesize Enter while a Stop/generating control is active.
   for (let i = 0; i < 120; i++) {
     const clicked = await evaluate(send, `(() => {
-      if (location.href !== ${JSON.stringify(expected)}) return {ok:false, reason:'destination-changed'};
+      if ((location.origin + location.pathname) !== ${JSON.stringify(normalizeConversationUrl(expected))}) return {ok:false, reason:'destination-changed'};
       const composer = document.querySelector('[data-orchestrator-composer="true"]');
       if (!composer) return {ok:false, reason:'composer missing'};
       const actual = composer instanceof HTMLInputElement || composer instanceof HTMLTextAreaElement ? composer.value : (composer.innerText ?? composer.textContent ?? '');
