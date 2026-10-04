@@ -2,7 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import vm from "node:vm";
 import { callbackReceiptMatches, receiptDomSource } from "../runtime/scripts/callback-receipt.mjs";
-import { validateCallbackState, assertSafeMutation, nextDeliveryState, sendGate, reconcileReceipt } from "../runtime/scripts/callback-delivery.mjs";
+import { validateCallbackState, assertSafeMutation, nextDeliveryState, sendGate, reconcileReceipt, createCallbackStateStore, deliverCallback } from "../runtime/scripts/callback-delivery.mjs";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import crypto from "node:crypto";
 
 const extract = root => vm.runInNewContext(`(${receiptDomSource()})`, {}).call(null, root);
 class Element {
@@ -87,4 +91,28 @@ test("shipped sender helpers keep mutation and send gates fail closed", () => {
   assert.equal(reconcileReceipt({state:"SUBMISSION_ATTEMPTED",receiptMatches:true}),"DELIVERED");
   assert.equal(reconcileReceipt({state:"DRAFT_INSERTED",receiptMatches:false}),"DRAFT_INSERTED");
   assert.throws(()=>reconcileReceipt({state:"BROKEN",receiptMatches:true}));
+});
+
+test("production callback state store persists legal transitions and rejects identity/state drift", () => {
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),"callback-store-"));
+  const file=path.join(dir,"state.json");
+  const expected={callbackId:"x",chatUrl:"https://chatgpt.com/c/chat-27",message:"payload"};
+  fs.writeFileSync(file,JSON.stringify({routing_version:"explicit-route-v1",delivery_state:"PENDING",callback_id:"x",chat_url:expected.chatUrl,message:"payload"}));
+  const store=createCallbackStateStore({file,expected:expected.chatUrl,callbackId:expected.callbackId,message:expected.message,fsModule:fs,pathModule:path,now:()=>"2026-01-01T00:00:00.000Z"});
+  for (const state of ["PENDING","DRAFT_INSERTED","SUBMISSION_ATTEMPTED","DELIVERED"]) { if (state !== "PENDING") store.update(nextDeliveryState(store.read().delivery_state,state)); assert.equal(store.read().delivery_state,state); assert.equal(store.read().callback_id,"x"); }
+  for (const bad of [{delivery_state:"BROKEN"},{callback_id:"other"},{chat_url:"https://chatgpt.com/c/other"}]) { fs.writeFileSync(file,JSON.stringify({...JSON.parse(fs.readFileSync(file)),...bad})); assert.throws(()=>store.read(),/Invalid callback state/); fs.writeFileSync(file,JSON.stringify({routing_version:"explicit-route-v1",delivery_state:"PENDING",callback_id:"x",chat_url:expected.chatUrl,message:"payload"})); }
+});
+
+test("production callback state store fails closed on disappearance, conflicts, writes, renames, and returns bound fingerprints", () => {
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),"callback-store-")); const file=path.join(dir,"state.json"); const record={routing_version:"explicit-route-v1",delivery_state:"PENDING",callback_id:"x",chat_url:"https://chatgpt.com/c/chat-27",message:"payload"}; const expected={callbackId:"x",chatUrl:record.chat_url,message:record.message}; const write=()=>fs.writeFileSync(file,JSON.stringify(record)); write();
+  const make=(overrides={}, expectedFingerprint="")=>createCallbackStateStore({file,expected:record.chat_url,callbackId:"x",message:"payload",expectedFingerprint,fsModule:Object.assign(Object.create(fs),overrides),pathModule:path}); let store=make({},crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex")); const before=fs.readFileSync(file,"utf8"); fs.writeFileSync(file,before+" "); assert.throws(()=>store.update("DRAFT_INSERTED"),/fingerprint changed/); assert.equal(fs.readFileSync(file,"utf8"),before+" "); write();
+  for (const method of ["writeFileSync","renameSync"]) { store=make({[method](){throw new Error(method);}}); assert.throws(()=>store.update("DRAFT_INSERTED"),new RegExp(method)); assert.deepEqual(JSON.parse(fs.readFileSync(file)),record); }
+  fs.unlinkSync(file); assert.throws(()=>store.read(),/Callback state disappeared/); assert.throws(()=>store.update("DRAFT_INSERTED"),/Callback state disappeared/); assert.equal(fs.existsSync(file),false); write(); const fp=make().update("DRAFT_INSERTED"); assert.equal(fp,crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex"));
+});
+
+test("production delivery helper reconciles and retries without blind resend", async () => {
+  let state="PENDING", sends=0, updates=[]; const read=()=>({delivery_state:state}); const update=next=>{state=next; updates.push(next);};
+  await assert.rejects(()=>deliverCallback({read,hasReceipt:async()=>false,update,beforeSend:async()=>{},send:async()=>{sends++; const e=new Error("not ready"); e.code="PRE_SEND_NOT_READY"; throw e;}}),/not ready/); assert.equal(state,"PENDING");
+  const result=await deliverCallback({read,hasReceipt:async()=>false,update,beforeSend:async()=>{},send:async()=>{sends++; return "sent";}}); assert.equal(result.action,"sent"); assert.equal(sends,2);
+  for (const prior of ["DRAFT_INSERTED","SUBMISSION_ATTEMPTED","DELIVERED"]) { state=prior; let called=0; assert.equal((await deliverCallback({read,hasReceipt:async()=>false,update,send:async()=>called++})).action,"reconcile"); assert.equal(called,0); state=prior; assert.equal((await deliverCallback({read,hasReceipt:async()=>true,update,send:async()=>called++})).state,"DELIVERED"); assert.equal(called,0); }
 });

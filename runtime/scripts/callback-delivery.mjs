@@ -64,3 +64,23 @@ export function reconcileReceipt({state, receiptMatches}) {
   if (!["PENDING", "DRAFT_INSERTED", "SUBMISSION_ATTEMPTED", "DELIVERED"].includes(state)) throw new Error("Invalid callback delivery state");
   return receiptMatches ? "DELIVERED" : state;
 }
+
+export async function deliverCallback({read, hasReceipt, send, update, beforeSend = async () => {}, allowSend = true}) {
+  const stored = read();
+  if (!states.has(stored.delivery_state)) throw new Error("Invalid callback delivery state");
+  if (await hasReceipt()) {
+    if (stored.delivery_state !== "DELIVERED") update("DELIVERED", {verified_by:"existing-user-message"});
+    return {action:"reconciled", state:"DELIVERED"};
+  }
+  if (stored.delivery_state !== "PENDING" || !allowSend) return {action:"reconcile", state:stored.delivery_state};
+  await beforeSend();
+  update(nextDeliveryState("PENDING", "DRAFT_INSERTED"));
+  update(nextDeliveryState("DRAFT_INSERTED", "SUBMISSION_ATTEMPTED"));
+  try {
+    const result = await send();
+    return {action:"sent", result};
+  } catch (error) {
+    if (error.code === "PRE_SEND_NOT_READY") update("PENDING");
+    throw error;
+  }
+}

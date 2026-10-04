@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { callbackReceiptMatches, normalizeReceiptText, receiptMatcherSource, receiptDomSource } from "./callback-receipt.mjs";
-import { createCallbackStateStore, assertSafeMutation, nextDeliveryState, sendGate, reconcileReceipt } from "./callback-delivery.mjs";
+import { createCallbackStateStore, assertSafeMutation, deliverCallback, nextDeliveryState, reconcileReceipt } from "./callback-delivery.mjs";
 const message = process.argv.slice(2).join(" ").trim();
 if (!message) {
   console.error("WAKE_CHAT_FAILED: missing message");
@@ -449,6 +449,7 @@ async function main() {
     }
 
     if (callbackId) {
+      readDeliveryState();
       const alreadyDelivered = await hasReceipt(send, callbackId, message);
       if (alreadyDelivered) {
         updateDeliveryState("DELIVERED",{verified_by:"existing-user-message"});
@@ -457,41 +458,28 @@ async function main() {
       }
     }
 
-    const stored = readDeliveryState();
-    if (stored?.delivery_state === "SUBMISSION_ATTEMPTED" || stored?.delivery_state === "DRAFT_INSERTED") {
-      process.exitCode = 3;
-      console.log("CHAT_RECONCILE_PENDING:", callbackId);
+    const sendResult = await deliverCallback({
+      read: readDeliveryState,
+      hasReceipt: () => hasReceipt(send, callbackId, message),
+      update: updateDeliveryState,
+      beforeSend: async () => {
+        const composer = await waitForComposer(send);
+        console.log("CHAT_COMPOSER_FOUND:", JSON.stringify(composer));
+        const beforeInputUrl = await evaluate(send, "location.href");
+        assertSafeMutation({destination:normalizeConversationUrl(beforeInputUrl), expectedDestination:normalizeConversationUrl(expected), draft:"", message});
+        await insertText(send, message);
+        const verifyDestination = await evaluate(send, "location.href");
+        assertSafeMutation({destination:normalizeConversationUrl(verifyDestination), expectedDestination:normalizeConversationUrl(expected), draft:message, message});
+      },
+      send: () => sendMessage(send),
+      allowSend: !reconcileOnly
+    });
+    if (sendResult.action !== "sent") {
+      console.log(sendResult.action === "reconciled" ? "CHAT_WAKE_ALREADY_DELIVERED:" : "CHAT_RECONCILE_PENDING:", callbackId);
+      process.exitCode = sendResult.action === "reconciled" ? 0 : 3;
       return;
     }
-    if (stored?.delivery_state === "DELIVERED") {
-      process.exitCode = 3;
-      console.log("CHAT_RECONCILE_PENDING:", callbackId);
-      return;
-    }
-    if (stored && stored.delivery_state !== "PENDING") throw new Error("Invalid callback delivery state");
-
-    if (reconcileOnly) {
-      console.log("CHAT_RECONCILE_PENDING:", callbackId);
-      process.exitCode = 3;
-      return;
-    }
-
-    const composer = await waitForComposer(send);
-    console.log("CHAT_COMPOSER_FOUND:", JSON.stringify(composer));
-
-    const beforeInputUrl = await evaluate(send, "location.href");
-    assertSafeMutation({destination:normalizeConversationUrl(beforeInputUrl), expectedDestination:normalizeConversationUrl(expected), draft:"", message});
-    await insertText(send, message);
-    updateDeliveryState(nextDeliveryState("PENDING", "DRAFT_INSERTED"));
-    const verifyDestination = await evaluate(send, "location.href");
-    assertSafeMutation({destination:normalizeConversationUrl(verifyDestination), expectedDestination:normalizeConversationUrl(expected), draft:message, message});
-
-    updateDeliveryState(nextDeliveryState("DRAFT_INSERTED", "SUBMISSION_ATTEMPTED"));
-    sendGate({state:"SUBMISSION_ATTEMPTED", destination:normalizeConversationUrl(verifyDestination), expectedDestination:normalizeConversationUrl(expected), draft:message, message});
-    let sendResult;
-    try { sendResult = await sendMessage(send); }
-    catch (error) { if (error.code === "PRE_SEND_NOT_READY") updateDeliveryState("PENDING"); throw error; }
-    console.log("CHAT_WAKE_SENT:", JSON.stringify(sendResult));
+    console.log("CHAT_WAKE_SENT:", JSON.stringify(sendResult.result));
 
     const confirmed = await confirmSubmission(send, callbackId, message, 30000);
     updateDeliveryState(reconcileReceipt({state:"SUBMISSION_ATTEMPTED", receiptMatches:true}),{verified_by:confirmed?.verifiedBy||"submission-confirmed"});

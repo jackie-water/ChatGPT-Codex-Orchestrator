@@ -59,7 +59,7 @@ test("native callback mutexes isolate same and different instances and restore p
     const a=make("a"), b=make("b");
     const record=id=>({routing_version:"explicit-route-v1",delivery_state:"PENDING",callback_id:id,chat_url:"https://chatgpt.com/c/test",message:"payload"});
     const setup=(f,id,marker=path.join(dir,"overlap.marker"))=>{fs.writeFileSync(path.join(f.pending,id+".json"),JSON.stringify(record(id))); return {...process.env,HOME:f.home,USERPROFILE:f.home,TEST_MODE:"sleep",TEST_ID:id,MARKER:marker};};
-    const sameEnv=setup(a,"same");
+    const sameEnv=setup(a,"same",path.join(dir,"same.marker"));
     const [one,two]=await Promise.all([runAsync(a.wake,["-ReconcileOnly","-CallbackId","same"],sameEnv),runAsync(a.wake,["-ReconcileOnly","-CallbackId","same"],sameEnv)]);
     assert.deepEqual([one.status,two.status].sort((x,y)=>x-y),[0,4]); assert.equal(fs.readFileSync(sameEnv.MARKER,"utf8").trim().split(/\r?\n/).join(","),"start:same,end:same"); assert.equal(fs.existsSync(path.join(a.pending,"same.json")),false);
     fs.writeFileSync(path.join(a.pending,"err.json"),JSON.stringify(record("err"))); const errEnv={...sameEnv,TEST_MODE:"error"}; assert.notEqual(run(a.wake,["-ReconcileOnly","-CallbackId","err"],errEnv).status,0); errEnv.TEST_MODE="sleep"; assert.equal(run(a.wake,["-ReconcileOnly","-CallbackId","err"],errEnv).status,0);
