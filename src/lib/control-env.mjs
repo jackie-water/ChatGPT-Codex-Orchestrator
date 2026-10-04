@@ -212,6 +212,8 @@ export function upgradeControlEnvironment({state,sourceRoot=process.cwd(),home=o
 
   const configRoot=path.join(home,".chatgpt-codex-orchestrator");
   fs.mkdirSync(configRoot,{recursive:true});
+  const instanceId=path.basename(state.runner_path);
+  const chatRouteFile=path.join(home,".chatgpt-codex-orchestrator","routes",instanceId,"chat-routes.json");
   const configText=renderConfigPs1({
     githubLogin:state.github_login,
     projectMappings:[
@@ -220,13 +222,12 @@ export function upgradeControlEnvironment({state,sourceRoot=process.cwd(),home=o
     ],
     runnerPath:state.runner_path,
     browserPort:state.browser_port,
-    browserProfile:state.browser_profile
+    browserProfile:state.browser_profile,
+    chatRouteFile
   });
   const configPath=state.config_path||path.join(configRoot,"config.ps1");
   fs.writeFileSync(configPath,configText,{mode:0o600});
 
-  const instanceId=path.basename(state.runner_path);
-  const chatRouteFile=path.join(home,".chatgpt-codex-orchestrator","routes",instanceId,"chat-routes.json");
   const commit=commitControlRepo(state.control_clone_path);
 
   return {
@@ -328,7 +329,8 @@ export function prepareControlEnvironment({
     ],
     runnerPath:paths.runner,
     browserPort,
-    browserProfile
+    browserProfile,
+    chatRouteFile
   });
   fs.writeFileSync(path.join(configRoot,"config.ps1"),configText,{mode:0o600});
 
