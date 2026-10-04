@@ -244,6 +244,8 @@ export function prepareControlEnvironment({
     : path.join(configRoot,"browser-profile-"+short);
 
   const browserPort=9333;
+  const instanceId=path.basename(paths.runner);
+  const chatRouteFile=path.join(home,".chatgpt-codex-orchestrator","routes",instanceId,"chat-routes.json");
   const configText=renderConfigPs1({
     githubLogin:login,
     projectMappings:[
@@ -276,6 +278,7 @@ export function prepareControlEnvironment({
     config_path:path.join(configRoot,"config.ps1"),
     browser_port:browserPort,
     browser_profile:browserProfile,
+    chat_route_file:chatRouteFile,
     control_repo_changed:commit.changed
   };
 }
