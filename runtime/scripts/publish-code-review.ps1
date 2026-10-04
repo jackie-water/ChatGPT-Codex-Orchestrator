@@ -74,8 +74,10 @@ try {
       git add .codex/latest-review.md $historyRel $byCommitRel
       git -c user.name="Codex Orchestrator" -c user.email="codex-orchestrator@users.noreply.github.com" commit -m "chore(code-review): $SourceBranch@$short" | Out-Null
       if ($LASTEXITCODE -ne 0) { throw "code review checkpoint commit failed" }
+      $checkpointCommit = (git rev-parse HEAD).Trim()
       git push origin "HEAD:refs/heads/$CheckpointBranch" | Out-Null
       if ($LASTEXITCODE -ne 0) { throw "code review checkpoint push failed" }
+      Write-Output "CODE_REVIEW_PUBLISHED commit=$checkpointCommit review_file=$byCommitRel history_file=$historyRel"
     } finally {
       Pop-Location
     }
