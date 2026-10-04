@@ -46,7 +46,7 @@ The AI should read [AI_INSTALL.md](AI_INSTALL.md) and use the official installer
 
 Double-click **Install.cmd**.
 
-The setup assistant stays open and gives you **one step at a time**. It can ask for your repository name or reviewer Chat URL, open sign-in steps when needed, copy generated ChatGPT Project Instructions to your clipboard, and wait for you before continuing.
+The setup assistant stays open and gives you **one step at a time**. It can ask for your repository name or the URL of the current installation Chat, open sign-in steps when needed, copy generated ChatGPT Project Instructions to your clipboard, and wait for you before continuing.
 
 Advanced terminal knowledge should not be required.
 
@@ -66,13 +66,23 @@ Only after that test passes can the installer activate orchestration for your re
 
 
 
-## Results return to the Chat that started the work
+## Results return to the correct Chat
 
-When several ChatGPT conversations use the same project, each coding request is tracked separately. The result is routed back to the Chat that created that specific request.
+Each ChatGPT conversation registers its own callback address once before its first coding task for a project.
 
-You can therefore have more than one Chat working at the same time without intentionally sending one Chat's Codex result to another Chat.
+On first use in a new Chat:
 
-The reviewer Chat selected during setup remains available only as a fallback if the original Chat cannot be resolved for an extended period.
+1. the AI asks for the URL of **that current conversation**;
+2. it creates a one-time `[CHAT-REGISTER]` request in your private control repository;
+3. the local runner pins that Chat to a `review_route`;
+4. that same Chat receives `[CHAT-ROUTE-REGISTERED ...]`;
+5. future CODEX-RUN, Code Review and merge callbacks from that Chat use the exact registered route.
+
+A different Chat registers separately. Several Chats can submit work to the same project without sharing callback destinations.
+
+There is **no default reviewer Chat and no fallback Chat**. If the route is missing or inactive, the task stops before Codex starts instead of sending the result somewhere else.
+
+Only the one-time private registration issue contains the Chat URL. Normal coding/review/merge issues contain only the route name.
 
 ## Safe Mode
 
