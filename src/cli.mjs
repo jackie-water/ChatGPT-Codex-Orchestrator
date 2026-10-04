@@ -11,6 +11,7 @@ import { sanitizeObject } from "./lib/sanitize.mjs";
 import { submitDiagnosticReport } from "./lib/reporting.mjs";
 import { prepareControlEnvironment, activateTargetProject } from "./lib/control-env.mjs";
 import { renderProjectInstructions } from "./lib/project-instructions.mjs";
+import { ensureInstallerChatRegistration } from "./lib/chat-registration.mjs";
 import {
   sandboxSmokeStatus,
   startSandboxSmoke,
@@ -285,7 +286,8 @@ function runSetup() {
         runner_label:control.runner_label,
         config_path:control.config_path,
         browser_port:control.browser_port,
-        browser_profile:control.browser_profile
+        browser_profile:control.browser_profile,
+        chat_route_file:control.chat_route_file
       });
 
       // Installation isolation: before the sandbox passes, only the generated
@@ -389,6 +391,24 @@ function runSetup() {
         throw new Error((session.stderr||session.stdout||"Sandbox session startup failed").trim());
       }
 
+      const sandboxRegistration=ensureInstallerChatRegistration(state,{projectKey:state.sandbox_project_key});
+      if(sandboxRegistration.status!=="READY"){
+        state.current_step="sandbox_chat_registration_waiting";
+        state.sandbox_chat_registration_issue=sandboxRegistration.issue?.url||null;
+        saveState(state);
+        return emit({
+          status:"WAITING",
+          preferred_language:lang,
+          message:t(lang,"setup.chat_registration.waiting"),
+          project_key:state.sandbox_project_key,
+          registration_issue:sandboxRegistration.issue?.url||null,
+          note:t(lang,"setup.chat_registration.no_fallback")
+        });
+      }
+      state.sandbox_review_route=sandboxRegistration.route;
+      if(!state.completed.includes("sandbox_chat_registered")) state.completed.push("sandbox_chat_registered");
+      saveState(state);
+
       let smoke=sandboxSmokeStatus(state);
       if(smoke.stage==="NOT_STARTED"){
         const started=startSandboxSmoke(state);
@@ -469,6 +489,24 @@ function runSetup() {
       },1);
     }
   }
+
+  const targetRegistration=ensureInstallerChatRegistration(state,{projectKey:state.project_key});
+  if(targetRegistration.status!=="READY"){
+    state.current_step="target_chat_registration_waiting";
+    state.target_chat_registration_issue=targetRegistration.issue?.url||null;
+    saveState(state);
+    return emit({
+      status:"WAITING",
+      preferred_language:lang,
+      message:t(lang,"setup.chat_registration.waiting"),
+      project_key:state.project_key,
+      registration_issue:targetRegistration.issue?.url||null,
+      note:t(lang,"setup.chat_registration.no_fallback")
+    });
+  }
+  state.target_review_route=targetRegistration.route;
+  if(!state.completed.includes("target_chat_registered")) state.completed.push("target_chat_registered");
+  saveState(state);
 
   if(!state.codex_trust_project) {
     return emit(action(state,"codex_trust_project","setup.codex.trust_project",{
