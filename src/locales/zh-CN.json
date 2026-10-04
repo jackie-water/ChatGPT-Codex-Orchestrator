@@ -60,5 +60,6 @@
   "setup.generated_repo.connect": "安装程序已经创建了两个 private repository。现在请把这两个新 repository 加入 ChatGPT 的 GitHub 授权范围，并确认 ChatGPT 能访问它们后再继续。",
   "answer.generated_repo.invalid": "目前还没有确认 ChatGPT 可以访问新生成的 control 和 sandbox repository。",
   "setup.chat_registration.waiting": "正在把当前这个 Chat 登记为明确的 callback 返回地址。请等待这条对话收到 CHAT-ROUTE-REGISTERED callback，然后再继续安装。",
-  "setup.chat_registration.no_fallback": "登记完成前不会把 callback 改发到其他 Chat。"
+  "setup.chat_registration.no_fallback": "登记完成前不会把 callback 改发到其他 Chat。",
+  "setup.routing_upgrade.failed": "现有安装无法升级到显式 Chat route。系统不会使用 fallback Chat；请先修复这次升级再继续。"
 }
