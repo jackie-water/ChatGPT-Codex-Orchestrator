@@ -75,7 +75,7 @@ Examples:
 - GitHub sign-in / OAuth approval;
 - ChatGPT / Codex sign-in;
 - granting access to a private repository;
-- confirming a reviewer Chat URL;
+- providing the current ChatGPT conversation URL for explicit callback registration;
 - adding generated ChatGPT Project Instructions when no supported settings API exists;
 - explicit final merge approval.
 
@@ -143,20 +143,28 @@ The dry-run may inspect local command availability and existing installer state,
 Use the dry-run output to explain only the next relevant user action. Do not turn the dry-run into a long list of technical instructions.
 
 
-## Issue-origin callback routing
+## Explicit Chat callback registration
 
-Normal callbacks should return to the Chat that created the corresponding GitHub orchestration issue.
+Do not discover callback destinations by scanning Chat history or open browser tabs.
 
-After an AI Chat creates a CODEX-RUN, CODE-REVIEW or MERGE-APPROVE issue, it must emit the generated ORCHESTRATOR-ORIGIN marker in that same Chat reply, using the exact issue number and project key from the generated Project Instructions.
+Each ChatGPT conversation must explicitly register its own callback destination before it creates its first CODEX-RUN, CODE-REVIEW or MERGE-APPROVE for a project.
 
-Do not put ChatGPT conversation URLs into GitHub issues.
+For a new Chat:
+1. ask once for the full URL of the current ChatGPT conversation;
+2. create one `[CHAT-REGISTER]` issue in the private control repository with `project` and `chat_url`;
+3. stop and wait;
+4. continue only after the same Chat receives `[CHAT-ROUTE-REGISTERED ...]`;
+5. use the exact returned `review_route` for subsequent issues from that Chat and project.
 
-The configured project reviewer URL is a delayed disaster-recovery fallback only. Do not route a fresh callback to the fallback just because the issue-origin marker has not been captured yet.
+A different Chat must register separately.
 
-Multiple Chats may create independent issues concurrently. Never reuse another issue's origin marker.
+There is no default reviewer and no fallback Chat. Missing, malformed, unknown or inactive `review_route` must stop the operation before Codex or merge execution.
 
-Installer-created sandbox issues are registered locally by the installer because their reviewer Chat is already known.
+The one-time private registration issue may contain the Chat URL because the user explicitly supplied it for routing. Normal coding/review/merge issues must contain only the route name.
 
+If callback UI delivery fails after a route is resolved, retry only the exact pinned URL. Never search for another Chat.
+
+Installer-created sandbox work must use the same explicit registration system. The installer may create the `[CHAT-REGISTER]` issue automatically because it already knows the current installation Chat URL, but it must wait until the route is registered before starting Sandbox CODEX-RUN.
 
 ## Generated private repository authorization
 
