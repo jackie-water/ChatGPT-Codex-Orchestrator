@@ -22,6 +22,7 @@ $previousExpectedFingerprint = $env:CODEX_CALLBACK_EXPECTED_FINGERPRINT
 $previousReconcileOnly = $env:CODEX_RECONCILE_ONLY
 $instanceId = [string]$env:ORCHESTRATOR_INSTANCE_ID
 if ([string]::IsNullOrWhiteSpace($instanceId)) { throw "Missing orchestrator instance identity" }
+if (-not $ReconcileOnly -and [string]::IsNullOrWhiteSpace($Message)) { throw "Message is required" }
 if ($ReconcileOnly -and $CallbackId -notmatch '^[A-Za-z0-9._-]{1,160}$') { throw "Invalid CallbackId before pending-state read" }
 $mutex = $null
 $mutexOwned = $false

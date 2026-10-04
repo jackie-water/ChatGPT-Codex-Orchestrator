@@ -3,8 +3,8 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { callbackReceiptMatches, normalizeReceiptText, receiptMatcherSource, receiptDomSource } from "./callback-receipt.mjs";
 import { createCallbackStateStore, assertSafeMutation, deliverCallback, nextDeliveryState, reconcileReceipt } from "./callback-delivery.mjs";
-const message = process.argv.slice(2).join(" ").trim();
-if (!message) {
+const message = process.argv.slice(2).join(" ");
+if (!message.trim()) {
   console.error("WAKE_CHAT_FAILED: missing message");
   process.exit(2);
 }
