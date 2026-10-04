@@ -7,6 +7,8 @@ test("implementation callbacks point to immutable per-issue reports",()=>{
   const runner=fs.readFileSync(new URL("../runtime/scripts/run-codex.ps1",import.meta.url),"utf8");
   assert.match(publisher,/\.codex\/runs\/by-issue\//);
   assert.match(publisher,/CHECKPOINT_PUBLISHED/);
+  assert.match(publisher,/refs\/heads\/\$SourceBranch`:refs\/remotes\/origin\/\$SourceBranch/);
+  assert.match(publisher,/refs\/heads\/\$CheckpointBranch`:refs\/remotes\/origin\/\$CheckpointBranch/);
   assert.match(runner,/checkpoint_commit=\$checkpointCommit path=\$runReportRel/);
   assert.match(runner,/Do not substitute \.codex\/latest-run\.md/);
 });
