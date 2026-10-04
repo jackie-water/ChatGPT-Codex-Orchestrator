@@ -18,6 +18,7 @@ $pendingRoot = [IO.Path]::GetFullPath($pendingDir).TrimEnd('\') + '\'
 $previousChatUrl = $env:ORCHESTRATOR_CHAT_URL
 $previousCallbackId = $env:CODEX_CALLBACK_ID
 $previousStateFile = $env:CODEX_CALLBACK_STATE_FILE
+$previousExpectedFingerprint = $env:CODEX_CALLBACK_EXPECTED_FINGERPRINT
 $previousReconcileOnly = $env:CODEX_RECONCILE_ONLY
 $instanceId = [string]$env:ORCHESTRATOR_INSTANCE_ID
 if ([string]::IsNullOrWhiteSpace($instanceId)) { throw "Missing orchestrator instance identity" }
@@ -44,6 +45,7 @@ if ($ReconcileOnly) {
   $item = Get-Content -Raw $pendingPath | ConvertFrom-Json
   if ([string]$item.routing_version -ne "explicit-route-v1" -or [string]$item.callback_id -ne $CallbackId -or [string]::IsNullOrWhiteSpace([string]$item.chat_url) -or [string]::IsNullOrWhiteSpace([string]$item.message)) { Write-Host "ERROR callback_id=$CallbackId"; $mutex.ReleaseMutex(); $mutex.Dispose(); $mutex = $null; exit 5 }
   $ChatUrl = [string]$item.chat_url; $Message = [string]$item.message
+  $recordVersion = Get-CallbackFingerprint $pendingPath
 }
 $targetChatUrl = $ChatUrl
 if ([string]::IsNullOrWhiteSpace($targetChatUrl)) { throw "ChatUrl is required" }
@@ -105,18 +107,20 @@ try {
   $env:ORCHESTRATOR_CHAT_URL = $targetChatUrl
   $env:CODEX_CALLBACK_ID = $CallbackId
   $env:CODEX_CALLBACK_STATE_FILE = if ($QueueOnFailure -or $ReconcileOnly) { $pendingPath } else { '' }
+  $env:CODEX_CALLBACK_EXPECTED_FINGERPRINT = if ($QueueOnFailure -or $ReconcileOnly) { $recordVersion } else { '' }
   $env:CODEX_RECONCILE_ONLY = if ($ReconcileOnly) { "1" } else { Remove-Item Env:CODEX_RECONCILE_ONLY -ErrorAction SilentlyContinue; $null }
 
-  node (Join-Path $PSScriptRoot "wake-chat.mjs") $Message
+  $nodeOutput = @(node (Join-Path $PSScriptRoot "wake-chat.mjs") $Message 2>&1)
+  $nodeOutput | ForEach-Object { Write-Host $_ }
   $wakeExit = $LASTEXITCODE
+  $returnedFingerprint = ($nodeOutput | Where-Object { $_ -match '^CHAT_STATE_FINGERPRINT:([0-9a-f]{64})$' } | Select-Object -Last 1) -replace '^CHAT_STATE_FINGERPRINT:',''
 
   if ($wakeExit -eq 0) {
     if ($QueueOnFailure -or $ReconcileOnly) {
       if (-not (Test-Path $pendingPath)) { throw 'Callback record disappeared before cleanup' }
       $after = Get-Content -Raw $pendingPath | ConvertFrom-Json
       if ([string]$after.callback_id -ne $CallbackId -or [string]$after.routing_version -ne 'explicit-route-v1' -or [string]$after.chat_url -ne $targetChatUrl -or [string]$after.message -ne $Message -or [string]$after.delivery_state -ne 'DELIVERED') { throw 'Verified callback record changed or is not delivered' }
-      $recordVersion = Get-CallbackFingerprint $pendingPath
-      if (-not $recordVersion) { throw 'Callback record disappeared before cleanup' }
+      if (-not $returnedFingerprint -or (Get-CallbackFingerprint $pendingPath) -ne $returnedFingerprint) { throw 'Callback record fingerprint did not match returned final fingerprint' }
       Remove-Item $pendingPath -Force -ErrorAction Stop
       if (Test-Path $pendingPath) { throw 'Callback cleanup failed' }
     }
@@ -141,6 +145,7 @@ try {
   $env:ORCHESTRATOR_CHAT_URL = $previousChatUrl
   $env:CODEX_CALLBACK_ID = $previousCallbackId
   $env:CODEX_CALLBACK_STATE_FILE = $previousStateFile
+  if ($null -eq $previousExpectedFingerprint) { Remove-Item Env:CODEX_CALLBACK_EXPECTED_FINGERPRINT -ErrorAction SilentlyContinue } else { $env:CODEX_CALLBACK_EXPECTED_FINGERPRINT = $previousExpectedFingerprint }
   if ($null -eq $previousReconcileOnly) { Remove-Item Env:CODEX_RECONCILE_ONLY -ErrorAction SilentlyContinue } else { $env:CODEX_RECONCILE_ONLY = $previousReconcileOnly }
   if ($mutexOwned -and $mutex) { $mutex.ReleaseMutex(); $mutex.Dispose(); $mutexOwned = $false }
 }

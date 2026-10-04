@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 import { callbackReceiptMatches, normalizeReceiptText, receiptMatcherSource, receiptDomSource } from "./callback-receipt.mjs";
 const message = process.argv.slice(2).join(" ").trim();
 if (!message) {
@@ -12,6 +13,7 @@ const expected = process.env.ORCHESTRATOR_CHAT_URL || "";
 const callbackId = process.env.CODEX_CALLBACK_ID || "";
 const callbackStateFile = process.env.CODEX_CALLBACK_STATE_FILE || "";
 const reconcileOnly = process.env.CODEX_RECONCILE_ONLY === "1";
+let expectedFingerprint = process.env.CODEX_CALLBACK_EXPECTED_FINGERPRINT || "";
 if (!expected) {
   console.error("WAKE_CHAT_FAILED: exact Chat destination is required");
   process.exit(2);
@@ -20,13 +22,14 @@ if (!expected) {
 function readDeliveryState() {
   if (!callbackStateFile || !fs.existsSync(callbackStateFile)) return null;
   const current = JSON.parse(fs.readFileSync(callbackStateFile,"utf8").replace(/^\uFEFF/,""));
-  if (current.routing_version !== "explicit-route-v1" || current.callback_id !== callbackId || current.chat_url !== expected || current.message !== message) throw new Error("Invalid callback state");
+  if (current.routing_version !== "explicit-route-v1" || !["PENDING","DRAFT_INSERTED","SUBMISSION_ATTEMPTED","DELIVERED"].includes(current.delivery_state) || current.callback_id !== callbackId || current.chat_url !== expected || current.message !== message) throw new Error("Invalid callback state");
   return current;
 }
 
 function updateDeliveryState(state, extra = {}) {
   if (!callbackStateFile) return;
   if (!fs.existsSync(callbackStateFile)) throw new Error("Callback state disappeared");
+  if (expectedFingerprint && fingerprint(callbackStateFile) !== expectedFingerprint) throw new Error("Callback state fingerprint changed");
   const current = readDeliveryState();
   if (!current) throw new Error("Callback state disappeared");
     const next = {
@@ -42,7 +45,13 @@ function updateDeliveryState(state, extra = {}) {
     fs.mkdirSync(path.dirname(callbackStateFile),{recursive:true});
     fs.writeFileSync(temp,JSON.stringify(next,null,2)+"\n","utf8");
     fs.renameSync(temp,callbackStateFile);
+    const nextFingerprint = fingerprint(callbackStateFile);
+    expectedFingerprint = nextFingerprint;
+    console.log("CHAT_STATE_FINGERPRINT:" + nextFingerprint);
+    return nextFingerprint;
 }
+
+function fingerprint(file) { return crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex"); }
 
 async function connect(wsUrl) {
   if (typeof WebSocket === "undefined") throw new Error("Node.js 22+ is required for browser wake automation");
@@ -271,6 +280,8 @@ async function insertText(send, text) {
   );
 
   if (direct?.mode === "cdp") {
+    const pinned = await evaluate(send, "location.href");
+    if (normalizeConversationUrl(pinned) !== normalizeConversationUrl(expected)) throw new Error("Callback destination changed before CDP input");
     await send("Input.insertText", { text });
   }
 
@@ -403,7 +414,9 @@ async function sendMessage(send) {
     await new Promise(r => setTimeout(r, 500));
   }
 
-  throw new Error("ChatGPT did not expose a usable Send control within 60 seconds; callback will be retried later");
+  const error = new Error("ChatGPT did not expose a usable Send control within 60 seconds; callback will be retried later");
+  error.code = "PRE_SEND_NOT_READY";
+  throw error;
 }
 
 function normalizeConversationUrl(value) {
@@ -514,7 +527,7 @@ async function main() {
     updateDeliveryState("SUBMISSION_ATTEMPTED");
     let sendResult;
     try { sendResult = await sendMessage(send); }
-    catch (error) { if (String(error.message).includes('within 60 seconds')) updateDeliveryState("DRAFT_INSERTED"); throw error; }
+    catch (error) { if (error.code === "PRE_SEND_NOT_READY") updateDeliveryState("PENDING"); throw error; }
     console.log("CHAT_WAKE_SENT:", JSON.stringify(sendResult));
 
     const confirmed = await confirmSubmission(send, callbackId, message, 30000);
