@@ -223,6 +223,19 @@ function retireLegacyGlobalPending({home,instanceRoot}){
   return {retired,destination};
 }
 
+export function removeLegacyDefaultReviewRoutes(registryPath){
+  const registry=JSON.parse(fs.readFileSync(registryPath,"utf8"));
+  let changed=false;
+  for(const project of Object.values(registry.projects||{})){
+    if(Object.hasOwn(project,"default_review_route")){
+      delete project.default_review_route;
+      changed=true;
+    }
+  }
+  if(changed) fs.writeFileSync(registryPath,JSON.stringify(registry,null,2)+"\n");
+  return {changed};
+}
+
 export function upgradeControlEnvironment({state,sourceRoot=process.cwd(),home=os.homedir()}){
   if(!state?.control_clone_path||!fs.existsSync(path.join(state.control_clone_path,".git"))){
     throw new Error("Existing control clone is unavailable for upgrade");
@@ -237,6 +250,7 @@ export function upgradeControlEnvironment({state,sourceRoot=process.cwd(),home=o
   for(const name of RETIRED_ROUTING_SCRIPTS){
     fs.rmSync(path.join(scriptsDir,name),{force:true});
   }
+  removeLegacyDefaultReviewRoutes(path.join(state.control_clone_path,"projects.json"));
 
   const workflowTemplate=fs.readFileSync(path.join(sourceRoot,"templates","control-repo","orchestrator.yml.template"),"utf8");
   fs.mkdirSync(path.join(state.control_clone_path,".github","workflows"),{recursive:true});

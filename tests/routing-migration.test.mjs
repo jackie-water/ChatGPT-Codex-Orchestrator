@@ -1,6 +1,29 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import {removeLegacyDefaultReviewRoutes} from "../src/lib/control-env.mjs";
+
+test("legacy project routes are removed without changing other registry fields",()=>{
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),"routing-migration-"));
+  const file=path.join(dir,"projects.json");
+  const registry={schema_version:1,projects:{
+    first:{repository:"owner/first",enabled:false,default_review_route:"https://chatgpt.com/old-1",limits:{max_iterations:5},code_review:{required_for_code_changes:true}},
+    second:{repository:"owner/second",enabled:true,checkpoint_branch:"codex/checkpoint",validation:{required:true},default_review_route:"https://chatgpt.com/old-2"}
+  }};
+  fs.writeFileSync(file,JSON.stringify(registry,null,2)+"\n");
+
+  assert.deepEqual(removeLegacyDefaultReviewRoutes(file),{changed:true});
+  const migrated=JSON.parse(fs.readFileSync(file,"utf8"));
+  assert.deepEqual(migrated,{schema_version:1,projects:{
+    first:{repository:"owner/first",enabled:false,limits:{max_iterations:5},code_review:{required_for_code_changes:true}},
+    second:{repository:"owner/second",enabled:true,checkpoint_branch:"codex/checkpoint",validation:{required:true}}
+  }});
+  const unchanged=fs.readFileSync(file,"utf8");
+  assert.deepEqual(removeLegacyDefaultReviewRoutes(file),{changed:false});
+  assert.equal(fs.readFileSync(file,"utf8"),unchanged);
+});
 
 test("existing install upgrade retires origin discovery runtime",()=>{
   const control=fs.readFileSync(new URL("../src/lib/control-env.mjs",import.meta.url),"utf8");
