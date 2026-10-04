@@ -48,7 +48,7 @@ AI 应读取 [AI_INSTALL.md](AI_INSTALL.md)，并使用项目提供的正式 ins
 
 双击 **Install.cmd**。
 
-安装向导会一直保持打开，并且每次只让你完成**当前这一件事**。需要时，它会让你输入 repository 或 reviewer Chat 地址、打开登录步骤、把生成的 ChatGPT Project Instructions 自动复制到剪贴板，然后等你完成再继续。
+安装向导会一直保持打开，并且每次只让你完成**当前这一件事**。需要时，它会让你输入 repository 或当前安装 Chat 的地址、打开登录步骤、把生成的 ChatGPT Project Instructions 自动复制到剪贴板，然后等你完成再继续。
 
 正常情况下不需要使用 PowerShell 或理解 Git。
 
@@ -68,13 +68,23 @@ AI 应读取 [AI_INSTALL.md](AI_INSTALL.md)，并使用项目提供的正式 ins
 
 
 
-## 结果会自动回到发起任务的 Chat
+## 结果会回到正确的 Chat
 
-同一个项目可以同时有多个 ChatGPT 对话在工作。每个 coding request 都会独立记录，Codex 完成后，结果优先自动返回到**创建这个 request 的那个 Chat**。
+每一条 ChatGPT 对话在第一次为某个 project 发起 coding task 前，只需要登记一次自己的 callback 地址。
 
-因此多个 Chat 可以同时工作，不应该把 A Chat 的 Codex 结果故意发送到 B Chat。
+新 Chat 第一次使用时：
 
-安装时设置的 reviewer Chat 只作为灾备 fallback：只有系统长时间无法确定原始 Chat 时才会使用。
+1. AI 会询问**当前这条对话**的 URL；
+2. 在你的 private control repository 创建一次性的 `[CHAT-REGISTER]` 请求；
+3. 本地 runner 把这条 Chat 固定到一个 `review_route`；
+4. 当前 Chat 收到 `[CHAT-ROUTE-REGISTERED ...]`；
+5. 之后这个 Chat 的 CODEX-RUN、Code Review 和 merge callback 都使用同一个准确 route。
+
+换一个 Chat 就重新登记。多个 Chat 可以同时给同一个 project 提交工作，但不会共用 callback 地址。
+
+**没有默认 reviewer Chat，也没有 fallback Chat。** 如果 route 缺失或失效，任务会在 Codex 启动前停止，而不是把结果发到其他 Chat。
+
+只有一次性的 private 登记 issue 会包含 Chat URL；正常 coding / review / merge issue 只保存 route name。
 
 ## 安全模式
 
