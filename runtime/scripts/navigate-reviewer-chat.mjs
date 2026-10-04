@@ -52,7 +52,7 @@ async function main(){
       "http://127.0.0.1:"+port+"/json/new?"+encodeURIComponent(target),
       {method:"PUT"}
     );
-    if(!response.ok) throw new Error("Could not create fallback reviewer tab: "+response.status);
+    if(!response.ok) throw new Error("Could not create target Chat tab: "+response.status);
     const created=await response.json();
     await new Promise(r=>setTimeout(r,800));
     pages=await listPages();
@@ -60,7 +60,7 @@ async function main(){
       (created?.webSocketDebuggerUrl?created:null);
   }
 
-  if(!page?.webSocketDebuggerUrl) throw new Error("Could not prepare exact fallback reviewer Chat tab");
+  if(!page?.webSocketDebuggerUrl) throw new Error("Could not prepare exact target Chat tab");
 
   const {ws,send}=await connect(page.webSocketDebuggerUrl);
   try{
@@ -70,7 +70,7 @@ async function main(){
       returnByValue:true
     });
     const actual=href?.result?.value||"";
-    if(normalize(actual)!==wanted) throw new Error("Prepared tab does not match fallback reviewer Chat");
+    if(normalize(actual)!==wanted) throw new Error("Prepared tab does not match target Chat");
     console.log("REVIEWER_CHAT_READY");
   }finally{ws.close();}
 }
