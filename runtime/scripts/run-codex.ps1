@@ -49,14 +49,14 @@ if ([string]::IsNullOrWhiteSpace($repoPath) -or -not (Test-Path $repoPath)) {
 $repoPath = (Resolve-Path $repoPath).Path
 
 if (-not ($req.PSObject.Properties.Name -contains "review_route") -or [string]::IsNullOrWhiteSpace([string]$req.review_route)) {
-  throw "CHAT_ROUTE_REQUIRED: review_route must be supplied by the originating registered Chat"
+  throw "ROUTE-001 CHAT_ROUTE_REQUIRED: review_route must be supplied by the originating registered Chat"
 }
 $reviewRoute = [string]$req.review_route
 if ($reviewRoute -notmatch '^[a-z0-9][a-z0-9._-]{0,63}$') { throw "Invalid review_route: $reviewRoute" }
 
 $routeRecord = Resolve-RegisteredChatRoute -ProjectKey $projectKey -Route $reviewRoute
 if (-not $routeRecord) {
-  throw "CHAT_ROUTE_UNREGISTERED: route '$reviewRoute' is not an active registered Chat for project '$projectKey'"
+  throw "ROUTE-002 CHAT_ROUTE_UNREGISTERED: route '$reviewRoute' is not an active registered Chat for project '$projectKey'"
 }
 $chatUrl = [string]$routeRecord.chat_url
 
