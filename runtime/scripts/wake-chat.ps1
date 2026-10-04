@@ -37,10 +37,38 @@ $pendingPath = Join-Path $pendingDir ($CallbackId + ".json")
 
 $previousChatUrl = $env:ORCHESTRATOR_CHAT_URL
 $previousCallbackId = $env:CODEX_CALLBACK_ID
+$previousStateFile = $env:CODEX_CALLBACK_STATE_FILE
+
+if ($QueueOnFailure) {
+  New-Item -ItemType Directory -Force -Path $pendingDir | Out-Null
+  if (Test-Path $pendingPath) {
+    try {
+      $existing = Get-Content -Raw $pendingPath | ConvertFrom-Json
+      if ([string]$existing.routing_version -ne "explicit-route-v1" -or
+          [string]$existing.callback_id -ne $CallbackId -or
+          [string]$existing.chat_url -ne $targetChatUrl) {
+        throw "Existing callback state does not match this explicit route"
+      }
+    } catch {
+      throw "Pending callback state is unsafe to reuse: $pendingPath"
+    }
+  } else {
+    $pending = [pscustomobject]@{
+      routing_version = "explicit-route-v1"
+      delivery_state = "PENDING"
+      callback_id = $CallbackId
+      chat_url = $targetChatUrl
+      message = $Message
+      queued_at_utc = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+    }
+    $pending | ConvertTo-Json -Depth 4 | Set-Content -Path $pendingPath -Encoding utf8
+  }
+}
 
 try {
   $env:ORCHESTRATOR_CHAT_URL = $targetChatUrl
   $env:CODEX_CALLBACK_ID = $CallbackId
+  if ($QueueOnFailure) { $env:CODEX_CALLBACK_STATE_FILE = $pendingPath }
 
   node (Join-Path $PSScriptRoot "wake-chat.mjs") $Message
   $wakeExit = $LASTEXITCODE
@@ -55,20 +83,10 @@ try {
     throw "Normal Chat wake failed with exit code $wakeExit"
   }
 
-  New-Item -ItemType Directory -Force -Path $pendingDir | Out-Null
-  $pending = [pscustomobject]@{
-    routing_version = "explicit-route-v1"
-    delivery_state = "PENDING"
-    callback_id = $CallbackId
-    chat_url = $targetChatUrl
-    message = $Message
-    queued_at_utc = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
-  }
-  $pending | ConvertTo-Json -Depth 4 | Set-Content -Path $pendingPath -Encoding utf8
-
   Write-Warning "CHAT_WAKE_QUEUED callback_id=$CallbackId path=$pendingPath"
   Write-Host "Implementation/checkpoint work is complete; callback delivery will be retried later."
 } finally {
   $env:ORCHESTRATOR_CHAT_URL = $previousChatUrl
   $env:CODEX_CALLBACK_ID = $previousCallbackId
+  $env:CODEX_CALLBACK_STATE_FILE = $previousStateFile
 }
