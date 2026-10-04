@@ -9,7 +9,7 @@ import { t, normalizeLanguage } from "./lib/i18n.mjs";
 import { ERROR_CATALOG } from "./lib/errors.mjs";
 import { sanitizeObject } from "./lib/sanitize.mjs";
 import { submitDiagnosticReport } from "./lib/reporting.mjs";
-import { prepareControlEnvironment, activateTargetProject } from "./lib/control-env.mjs";
+import { prepareControlEnvironment, activateTargetProject, upgradeControlEnvironment } from "./lib/control-env.mjs";
 import { renderProjectInstructions } from "./lib/project-instructions.mjs";
 import { ensureInstallerChatRegistration } from "./lib/chat-registration.mjs";
 import {
@@ -287,7 +287,8 @@ function runSetup() {
         config_path:control.config_path,
         browser_port:control.browser_port,
         browser_profile:control.browser_profile,
-        chat_route_file:control.chat_route_file
+        chat_route_file:control.chat_route_file,
+        routing_architecture:"explicit-route-v1"
       });
 
       // Installation isolation: before the sandbox passes, only the generated
@@ -317,6 +318,41 @@ function runSetup() {
       state.last_error={error_id:"SETUP-011",message:String(error.message||error),at:new Date().toISOString()};
       saveState(state);
       return emit({status:"ERROR",error_id:"SETUP-011",recoverable:true,preferred_language:lang,message:t(lang,"setup.control.failed"),details:String(error.message||error)},1);
+    }
+  }
+
+  if(state.control_environment_ready && state.routing_architecture!=="explicit-route-v1") {
+    try{
+      const upgrade=upgradeControlEnvironment({state,sourceRoot:process.cwd(),home:os.homedir()});
+      state.chat_route_file=upgrade.chat_route_file;
+      state.config_path=upgrade.config_path;
+      state.routing_architecture="explicit-route-v1";
+      state.routing_upgrade={
+        changed:Boolean(upgrade.changed),
+        stopped_retired_router_processes:upgrade.stopped_retired_router_processes,
+        retired_scripts:upgrade.retired_scripts,
+        upgraded_at:new Date().toISOString()
+      };
+      if(!state.completed.includes("explicit_route_upgrade")) state.completed.push("explicit_route_upgrade");
+      saveState(state);
+
+      const retirePending=spawnSafeSync("powershell.exe",[
+        "-NoProfile","-ExecutionPolicy","Bypass","-File",
+        path.join(state.control_clone_path,"scripts","retry-pending-callbacks.ps1")
+      ],{encoding:"utf8"});
+      state.routing_upgrade.pending_migration_output=(retirePending.stdout||retirePending.stderr||"").trim()||null;
+      saveState(state);
+    }catch(error){
+      state.last_error={error_id:"SETUP-014",message:String(error.message||error),at:new Date().toISOString()};
+      saveState(state);
+      return emit({
+        status:"ERROR",
+        error_id:"SETUP-014",
+        recoverable:true,
+        preferred_language:lang,
+        message:t(lang,"setup.routing_upgrade.failed"),
+        details:String(error.message||error)
+      },1);
     }
   }
 
