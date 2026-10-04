@@ -9,10 +9,6 @@ if(-not (Test-Path $RegistryPath)){throw "Missing project registry: $RegistryPat
 $registry=Get-Content -Raw $RegistryPath|ConvertFrom-Json
 $key=$Project.ToLowerInvariant()
 if(-not $registry.projects.PSObject.Properties[$key]){throw "Unknown project: $key"}
-$routeVar=Get-Variable -Name "PROJECT_REVIEW_ROUTES" -ErrorAction SilentlyContinue
-$reviewUrl=$null
-if($routeVar -and $routeVar.Value -is [System.Collections.IDictionary] -and $routeVar.Value.Contains($key)){$reviewUrl=[string]$routeVar.Value[$key]}
-if([string]::IsNullOrWhiteSpace($reviewUrl)){throw "Project reviewer Chat URL missing for '$key'"}
 if([string]::IsNullOrWhiteSpace($RunnerPath)){$RunnerPath=if($env:CODEX_ORCHESTRATOR_RUNNER_PATH){$env:CODEX_ORCHESTRATOR_RUNNER_PATH}else{"C:\actions-runner-codex-orchestrator"}}
 if(-not (Test-Path $RunnerPath)){throw "GitHub runner directory not found: $RunnerPath"}
 $RunnerPath=(Resolve-Path $RunnerPath).Path
@@ -32,10 +28,7 @@ if($runnerProcesses.Count -eq 0){
   do{Start-Sleep -Milliseconds 500;$runnerProcesses=@(Get-OrchestratorRunnerProcess)}while($runnerProcesses.Count -eq 0 -and (Get-Date)-lt $deadline)
   if($runnerProcesses.Count -eq 0){throw "Runner.Listener.exe was not detected within 15 seconds"}
 }
-& (Join-Path $PSScriptRoot "start-reviewer-browser.ps1") -ChatUrl $reviewUrl
-$originRouter=Join-Path $PSScriptRoot "origin-router-loop.ps1"
-Start-Process -FilePath "powershell.exe" -WindowStyle Hidden -ArgumentList @("-NoProfile","-ExecutionPolicy","Bypass","-File",$originRouter)|Out-Null
-Start-Sleep -Milliseconds 500
+& (Join-Path $PSScriptRoot "start-reviewer-browser.ps1")
 & (Join-Path $PSScriptRoot "retry-pending-callbacks.ps1")
 & (Join-Path $PSScriptRoot "preflight.ps1") -Project $Project
 Write-Host "ORCHESTRATOR SESSION READY project=$Project" -ForegroundColor Green
