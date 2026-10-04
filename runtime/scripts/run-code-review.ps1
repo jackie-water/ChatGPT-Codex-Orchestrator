@@ -9,6 +9,7 @@ if (-not (Test-Path $ConfigPath)) { throw "Missing local config: $ConfigPath" }
 if (-not (Test-Path $RegistryPath)) { throw "Missing project registry: $RegistryPath" }
 
 . $ConfigPath
+. (Join-Path $PSScriptRoot "chat-route-registry.ps1")
 $registry = Get-Content -Raw $RegistryPath | ConvertFrom-Json
 $event = Get-Content -Raw $EventPath | ConvertFrom-Json
 
@@ -43,24 +44,17 @@ if ([string]::IsNullOrWhiteSpace($repoPath) -or -not (Test-Path $repoPath)) {
 }
 $repoPath = (Resolve-Path $repoPath).Path
 
-$reviewRoute = if ($req.PSObject.Properties.Name -contains "review_route" -and -not [string]::IsNullOrWhiteSpace([string]$req.review_route)) {
-  [string]$req.review_route
-} else {
-  [string]$project.default_review_route
+if (-not ($req.PSObject.Properties.Name -contains "review_route") -or [string]::IsNullOrWhiteSpace([string]$req.review_route)) {
+  throw "CHAT_ROUTE_REQUIRED: review_route must be supplied by the originating registered Chat"
 }
+$reviewRoute = [string]$req.review_route
+if ($reviewRoute -notmatch '^[a-z0-9][a-z0-9._-]{0,63}$') { throw "Invalid review_route: $reviewRoute" }
 
-$chatUrl = $null
-$chatVar = Get-Variable -Name "CHAT_ROUTES" -ErrorAction SilentlyContinue
-if ($chatVar -and $chatVar.Value -is [System.Collections.IDictionary] -and $chatVar.Value.Contains($reviewRoute)) {
-  $chatUrl = [string]$chatVar.Value[$reviewRoute]
+$routeRecord = Resolve-RegisteredChatRoute -ProjectKey $projectKey -Route $reviewRoute
+if (-not $routeRecord) {
+  throw "CHAT_ROUTE_UNREGISTERED: route '$reviewRoute' is not an active registered Chat for project '$projectKey'"
 }
-if ([string]::IsNullOrWhiteSpace($chatUrl)) {
-  $projectRouteVar = Get-Variable -Name "PROJECT_REVIEW_ROUTES" -ErrorAction SilentlyContinue
-  if ($projectRouteVar -and $projectRouteVar.Value -is [System.Collections.IDictionary] -and $projectRouteVar.Value.Contains($projectKey)) {
-    $chatUrl = [string]$projectRouteVar.Value[$projectKey]
-  }
-}
-if ([string]::IsNullOrWhiteSpace($chatUrl)) { throw "No reviewer Chat configured for '$projectKey'" }
+$chatUrl = [string]$routeRecord.chat_url
 
 $sourceBranch = [string]$req.source_branch
 if ([string]::IsNullOrWhiteSpace($sourceBranch) -or $sourceBranch -in @($defaultBranch,"main","master")) {
@@ -124,7 +118,7 @@ try {
     if ($reviewEvidenceExists) {
       $callbackId = "code-review-existing-$projectKey-$reviewedCommit"
       $message = "[CODE-REVIEW-AUTO callback_id=$callbackId] Independent Codex code review evidence already exists for project '$projectKey', branch $sourceBranch, commit $reviewedCommit. Read $($checkpointBranch):.codex/reviews/by-commit/$reviewedCommit.md and adjudicate the findings. Do not rerun Code Review for this exact commit."
-      & (Join-Path $PSScriptRoot "dispatch-chat-callback.ps1") -ProjectKey $projectKey -IssueNumber ([int]$event.issue.number) -ReviewRoute $reviewRoute -Message $message -CallbackId $callbackId
+      & (Join-Path $PSScriptRoot "wake-chat.ps1") -ChatUrl $chatUrl -Message $message -CallbackId $callbackId -QueueOnFailure
       Write-Host "CODE_REVIEW_ALREADY_EXISTS commit=$reviewedCommit"
       return
     }
@@ -174,7 +168,7 @@ try {
 
     $callbackId = "code-review-docs-$projectKey-$reviewedCommit"
     $message = "[CODE-REVIEW-AUTO callback_id=$callbackId] Code Review was skipped as docs-only for project '$projectKey', branch $sourceBranch, commit $reviewedCommit. Read $($checkpointBranch):.codex/reviews/by-commit/$reviewedCommit.md and continue final Chat review."
-    & (Join-Path $PSScriptRoot "dispatch-chat-callback.ps1") -ProjectKey $projectKey -IssueNumber ([int]$event.issue.number) -ReviewRoute $reviewRoute -Message $message -CallbackId $callbackId
+    & (Join-Path $PSScriptRoot "wake-chat.ps1") -ChatUrl $chatUrl -Message $message -CallbackId $callbackId -QueueOnFailure
     return
   }
 
@@ -254,7 +248,7 @@ try {
 
   $callbackId = "code-review-$projectKey-$($event.issue.number)-$reviewedCommit"
   $message = "[CODE-REVIEW-AUTO callback_id=$callbackId] Independent Codex code review finished for project '$projectKey', branch $sourceBranch, commit $reviewedCommit. Review exit=$reviewExit, tokens=$reviewTokens. Read $($checkpointBranch):.codex/reviews/by-commit/$reviewedCommit.md and independently adjudicate every finding before final PASS/REVISE/NEEDS_HUMAN. Treat this review as valid only for commit $reviewedCommit."
-  & (Join-Path $PSScriptRoot "dispatch-chat-callback.ps1") -ProjectKey $projectKey -IssueNumber ([int]$event.issue.number) -ReviewRoute $reviewRoute -Message $message -CallbackId $callbackId
+  & (Join-Path $PSScriptRoot "wake-chat.ps1") -ChatUrl $chatUrl -Message $message -CallbackId $callbackId -QueueOnFailure
 
   if ($reviewExit -ne 0) { throw "Codex code review failed with exit code $reviewExit; review evidence and Chat callback were published." }
 } finally {
