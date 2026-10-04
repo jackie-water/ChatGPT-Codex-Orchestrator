@@ -434,10 +434,21 @@ try {
   )
   Set-Content -Path $reportFile -Value ($reportLines -join [Environment]::NewLine) -Encoding utf8
 
-  & (Join-Path $PSScriptRoot "publish-checkpoint.ps1") -RepoPath $repoPath -ProjectKey $projectKey -Repository $repository -CheckpointBranch $checkpointBranch -SourceBranch $branch -SourceCommit $commit -ReportPath $reportFile
+  $publishOutput = @(& (Join-Path $PSScriptRoot "publish-checkpoint.ps1") -RepoPath $repoPath -ProjectKey $projectKey -Repository $repository -CheckpointBranch $checkpointBranch -SourceBranch $branch -SourceCommit $commit -OrchestratorIssue ([int]$event.issue.number) -Iteration $iteration -ReportPath $reportFile)
+  foreach ($line in $publishOutput) { Write-Host $line }
+  $publishLine = @($publishOutput | Where-Object { [string]$_ -match '^CHECKPOINT_PUBLISHED ' } | Select-Object -Last 1)
+  if ($publishLine.Count -eq 0) { throw "Checkpoint publication did not return immutable report coordinates" }
+  $publishText = [string]$publishLine[0]
+  $checkpointCommitMatch = [regex]::Match($publishText,'commit=([0-9a-fA-F]{40})')
+  $runFileMatch = [regex]::Match($publishText,'run_file=([^\s]+)')
+  if (-not $checkpointCommitMatch.Success -or -not $runFileMatch.Success) {
+    throw "Checkpoint publication coordinates are malformed: $publishText"
+  }
+  $checkpointCommit = $checkpointCommitMatch.Groups[1].Value.ToLowerInvariant()
+  $runReportRel = $runFileMatch.Groups[1].Value
 
   $callbackId = "codex-$projectKey-$($event.issue.number)-$iteration-$commit"
-  $wakeMessage = "[CODEX-AUTO callback_id=$callbackId] Project '$projectKey' Codex completed. Orchestrator issue #$($event.issue.number), iteration $iteration/$effectiveMax, repository $repository, branch $branch, commit $commit. Read ${checkpointBranch}:.codex/latest-run.md, inspect the exact recorded commit/diff and wrapper validation evidence, and return PASS, REVISE, or NEEDS_HUMAN. Treat callback_id as idempotent: do not create a duplicate successor CODEX-RUN for the same reviewed commit. PASS is review-only and must not merge. Merge requires the user's explicit approval for commit $commit."
+  $wakeMessage = "[CODEX-AUTO callback_id=$callbackId] Project '$projectKey' Codex completed. Orchestrator issue #$($event.issue.number), iteration $iteration/$effectiveMax, repository $repository, branch $branch, commit $commit. Authoritative report: checkpoint_commit=$checkpointCommit path=$runReportRel. Read that exact report from the checkpoint commit, inspect the recorded source commit/diff and wrapper validation evidence, and return PASS, REVISE, or NEEDS_HUMAN. Do not substitute .codex/latest-run.md. Treat callback_id as idempotent: do not create a duplicate successor CODEX-RUN for the same reviewed commit. PASS is review-only and must not merge. Merge requires the user's explicit approval for commit $commit."
   & (Join-Path $PSScriptRoot "wake-chat.ps1") -ChatUrl $chatUrl -Message $wakeMessage -CallbackId $callbackId -QueueOnFailure
 
   if ($codexExit -ne 0) {
