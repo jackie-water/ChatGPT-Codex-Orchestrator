@@ -1,6 +1,6 @@
 param(
   [Parameter(Mandatory=$true)][string]$Message,
-  [string]$ChatUrl,
+  [Parameter(Mandatory=$true)][string]$ChatUrl,
   [string]$CallbackId,
   [switch]$QueueOnFailure
 )
@@ -11,8 +11,8 @@ $Config = Join-Path $HOME ".chatgpt-codex-orchestrator\config.ps1"
 if (-not (Test-Path $Config)) { throw "Missing local config: $Config" }
 . $Config
 
-$targetChatUrl = if (-not [string]::IsNullOrWhiteSpace($ChatUrl)) { $ChatUrl } else { $env:ORCHESTRATOR_CHAT_URL }
-if ([string]::IsNullOrWhiteSpace($targetChatUrl)) { throw "No Chat URL supplied or configured" }
+$targetChatUrl = $ChatUrl
+if ([string]::IsNullOrWhiteSpace($targetChatUrl)) { throw "ChatUrl is required" }
 if ($targetChatUrl -notmatch '^https://chatgpt\.com/(?:g/[^/]+/)?c/[A-Za-z0-9-]+(?:[/?#].*)?$') {
   throw "Target is not a normal ChatGPT conversation URL"
 }
@@ -57,6 +57,8 @@ try {
 
   New-Item -ItemType Directory -Force -Path $pendingDir | Out-Null
   $pending = [pscustomobject]@{
+    routing_version = "explicit-route-v1"
+    delivery_state = "PENDING"
     callback_id = $CallbackId
     chat_url = $targetChatUrl
     message = $Message
