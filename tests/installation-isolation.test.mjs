@@ -50,3 +50,25 @@ test("setup requires ChatGPT access to generated private repos before Codex trus
   assert.ok(codexTrust>authGate,"generated repository authorization must occur before sandbox Codex trust");
   assert.match(cli,/repositories:\[state\.control_repository,state\.sandbox_repository\]/);
 });
+
+
+test("sandbox Chat registration happens before sandbox CODEX-RUN",()=>{
+  const cli=fs.readFileSync(new URL("../src/cli.mjs",import.meta.url),"utf8");
+  const registration=cli.indexOf('ensureInstallerChatRegistration(state,{projectKey:state.sandbox_project_key})');
+  const smoke=cli.indexOf("startSandboxSmoke(state)");
+  assert.ok(registration>=0,"sandbox registration must exist");
+  assert.ok(smoke>registration,"sandbox CODEX-RUN must wait for explicit Chat registration");
+  assert.match(cli,/state\.sandbox_review_route=sandboxRegistration\.route/);
+});
+
+test("real project Chat registration happens only after sandbox activation and before READY",()=>{
+  const cli=fs.readFileSync(new URL("../src/cli.mjs",import.meta.url),"utf8");
+  const sandboxGate=cli.indexOf("if (!state.sandbox_verified)");
+  const targetActivation=cli.indexOf("activateTargetProject({");
+  const targetRegistration=cli.indexOf('ensureInstallerChatRegistration(state,{projectKey:state.project_key})');
+  const ready=cli.indexOf('state.current_step="ready"');
+  assert.ok(targetActivation>sandboxGate,"target activation must remain after sandbox gate");
+  assert.ok(targetRegistration>targetActivation,"target Chat registers only after sandbox completion/activation");
+  assert.ok(ready>targetRegistration,"READY requires target Chat registration");
+  assert.match(cli,/state\.target_review_route=targetRegistration\.route/);
+});
