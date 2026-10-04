@@ -23,7 +23,7 @@ test("Chat registration workflow exists and stores routes locally",()=>{
   assert.match(workflow,/register-chat\.ps1/);
   assert.match(register,/Register-ChatRoute/);
   assert.match(register,/CHAT-ROUTE-REGISTERED/);
-  assert.match(registry,/chat-routes\.json/);
+  assert.match(registry,/Get-OrchestratorChatRoutePath/);
   assert.match(registry,/Resolve-RegisteredChatRoute/);
 });
 
