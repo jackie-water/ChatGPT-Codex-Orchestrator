@@ -1,3 +1,4 @@
+import fs from "node:fs";
 const message = process.argv.slice(2).join(" ").trim();
 if (!message) {
   console.error("WAKE_CHAT_FAILED: missing message");
@@ -7,6 +8,35 @@ if (!message) {
 const port = process.env.ORCHESTRATOR_BROWSER_DEBUG_PORT || "9333";
 const expected = process.env.ORCHESTRATOR_CHAT_URL || "";
 const callbackId = process.env.CODEX_CALLBACK_ID || "";
+const callbackStateFile = process.env.CODEX_CALLBACK_STATE_FILE || "";
+if (!expected) {
+  console.error("WAKE_CHAT_FAILED: exact Chat destination is required");
+  process.exit(2);
+}
+
+function updateDeliveryState(state, extra = {}) {
+  if (!callbackStateFile) return;
+  try {
+    const current = fs.existsSync(callbackStateFile)
+      ? JSON.parse(fs.readFileSync(callbackStateFile,"utf8").replace(/^\uFEFF/,""))
+      : {};
+    const next = {
+      ...current,
+      ...extra,
+      routing_version:"explicit-route-v1",
+      callback_id:callbackId || current.callback_id,
+      chat_url:expected || current.chat_url,
+      delivery_state:state,
+      delivery_updated_at_utc:new Date().toISOString()
+    };
+    const temp=callbackStateFile+"."+process.pid+".tmp";
+    fs.mkdirSync(new URL(".", "file:///"+callbackStateFile.replaceAll("\\","/")).pathname,{recursive:true});
+    fs.writeFileSync(temp,JSON.stringify(next,null,2)+"\n","utf8");
+    fs.renameSync(temp,callbackStateFile);
+  } catch (err) {
+    console.warn("CALLBACK_STATE_UPDATE_FAILED:",err.message);
+  }
+}
 
 async function connect(wsUrl) {
   if (typeof WebSocket === "undefined") throw new Error("Node.js 22+ is required for browser wake automation");
@@ -431,40 +461,33 @@ async function createChatTab(url) {
 
 async function resolveTargetPage() {
   let pages = await listPages();
+  const wanted = normalizeConversationUrl(expected);
 
-  if (expected) {
-    const wanted = normalizeConversationUrl(expected);
-    let exact = pages.find(p =>
+  let exact = pages.find(p =>
+    p.type === "page" &&
+    p.webSocketDebuggerUrl &&
+    normalizeConversationUrl(p.url || "") === wanted
+  );
+
+  if (!exact) {
+    console.log("CHAT_TARGET_TAB_MISSING: creating exact target tab");
+    const created = await createChatTab(expected);
+    await new Promise(r => setTimeout(r, 1200));
+
+    pages = await listPages();
+    exact = pages.find(p =>
       p.type === "page" &&
       p.webSocketDebuggerUrl &&
       normalizeConversationUrl(p.url || "") === wanted
     );
 
-    if (!exact) {
-      console.log("CHAT_TARGET_TAB_MISSING: creating a new tab instead of navigating another conversation");
-      const created = await createChatTab(expected);
-      await new Promise(r => setTimeout(r, 1200));
-      pages = await listPages();
-      exact = pages.find(p =>
-        p.type === "page" &&
-        p.webSocketDebuggerUrl &&
-        normalizeConversationUrl(p.url || "") === wanted
-      );
-      if (!exact && created?.webSocketDebuggerUrl) exact = created;
-    }
-
-    if (!exact?.webSocketDebuggerUrl) {
-      throw new Error("Could not open the exact target Chat without reusing another conversation tab");
-    }
-    return exact;
+    if (!exact && created?.webSocketDebuggerUrl) exact = created;
   }
 
-  const page = pages
-    .filter(p => p.type === "page" && p.webSocketDebuggerUrl)
-    .sort((a,b) => score(b) - score(a))[0];
-
-  if (!page || score(page) < 10) throw new Error("No normal ChatGPT tab found");
-  return page;
+  if (!exact?.webSocketDebuggerUrl) {
+    throw new Error("Could not open the exact target Chat");
+  }
+  return exact;
 }
 
 async function main() {
@@ -484,10 +507,11 @@ async function main() {
     console.log("CHAT_COMPOSER_FOUND:", JSON.stringify(composer));
 
     if (callbackId) {
-      const alreadyRendered = await evaluate(send,
-        "(() => (document.body.innerText || '').includes(" + JSON.stringify(callbackId) + "))()"
+      const alreadyDelivered = await evaluate(send,
+        "(() => [...document.querySelectorAll('[data-message-author-role=\"user\"]')].some(n => ((n.innerText || n.textContent || '')).includes(" + JSON.stringify(callbackId) + ")))()"
       );
-      if (alreadyRendered) {
+      if (alreadyDelivered) {
+        updateDeliveryState("DELIVERED",{verified_by:"existing-user-message"});
         console.log("CHAT_WAKE_ALREADY_DELIVERED:", callbackId);
         return;
       }
@@ -500,11 +524,13 @@ async function main() {
     } else {
       console.log("PENDING_CALLBACK_DRAFT_REUSED:", callbackId);
     }
+    updateDeliveryState("DRAFT_INSERTED");
 
     const sendResult = await sendMessage(send);
     console.log("CHAT_WAKE_SENT:", JSON.stringify(sendResult));
 
     const confirmed = await confirmSubmission(send, beforeMessages?.count || 0, message, 30000);
+    updateDeliveryState("DELIVERED",{verified_by:confirmed?.verifiedBy||"submission-confirmed"});
     console.log("CHAT_WAKE_CONFIRMED:", JSON.stringify(confirmed));
   } finally {
     ws.close();
