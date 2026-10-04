@@ -317,11 +317,16 @@ async function insertText(send, text) {
   }
   throw new Error("Text reached the browser but the ChatGPT composer state did not register it");
 }
+
+const committedUserTurnSelector = [
+  '[data-testid^="conversation-turn-"][data-turn="user"]',
+  '[data-message-author-role="user"]',
+  '[data-turn-key]:has([data-user-message-bubble])'
+].join(',');
+
 async function userMessageState(send) {
   return evaluate(send, `(() => {
-    const roleNodes = [...new Set(document.querySelectorAll(
-      '[data-testid^="conversation-turn-"][data-turn="user"], [data-message-author-role="user"]'
-    ))];
+    const roleNodes = [...new Set(document.querySelectorAll(${JSON.stringify(committedUserTurnSelector)}))];
     return {
       count: roleNodes.length,
       last: roleNodes.length ? (roleNodes[roleNodes.length - 1].innerText || roleNodes[roleNodes.length - 1].textContent || '').trim() : '',
@@ -508,7 +513,7 @@ async function main() {
 
     if (callbackId) {
       const alreadyDelivered = await evaluate(send,
-        "(() => [...document.querySelectorAll('[data-message-author-role=\"user\"],article[data-testid^=\"conversation-turn-\"][data-turn=\"user\"],[data-testid^=\"conversation-turn-\"][data-turn=\"user\"]')].some(n => ((n.innerText || n.textContent || '')).includes(" + JSON.stringify(callbackId) + ")))()"
+        "(() => [...new Set(document.querySelectorAll(" + JSON.stringify(committedUserTurnSelector) + "))].some(n => ((n.innerText || n.textContent || '')).includes(" + JSON.stringify(callbackId) + ")))()"
       );
       if (alreadyDelivered) {
         updateDeliveryState("DELIVERED",{verified_by:"existing-user-message"});
