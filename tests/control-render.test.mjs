@@ -30,10 +30,12 @@ test("PowerShell config quotes user-derived values and has no reviewer fallback"
     projectClonePath:"C:\\A B\\demo",
     runnerPath:"C:\\runner-demo",
     browserPort:9333,
-    browserProfile:"C:\\profile"
+    browserProfile:"C:\\profile",
+    chatRouteFile:"C:\\Users\\Example\\.chatgpt-codex-orchestrator\\routes\\runner-demo\\chat-routes.json"
   });
   assert.match(c,/user''name/);
   assert.match(c,/CODEX_CHAT_ROUTE_FILE/);
+  assert.match(c,/chat-routes\.json/);
   assert.match(c,/ORCHESTRATOR_INSTANCE_ID = 'runner-demo'/);
   assert.doesNotMatch(c,/PROJECT_REVIEW_ROUTES|CHAT_ROUTES|ORCHESTRATOR_ORIGIN_FALLBACK_MINUTES/);
   assert.doesNotMatch(c,/PRICEUP/i);
