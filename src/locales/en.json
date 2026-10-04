@@ -58,5 +58,7 @@
   "sandbox.approval.failed": "The sandbox merge approval could not be created.",
   "setup.target.activate_failed": "The sandbox passed, but activation of your real project did not finish. The real project main branch was not changed; I can repair this activation step.",
   "setup.generated_repo.connect": "Two private repositories were created for this installation. Add both generated repositories to the ChatGPT GitHub connection, then verify that ChatGPT can access both before continuing.",
-  "answer.generated_repo.invalid": "ChatGPT access to the generated control and sandbox repositories has not been verified yet."
+  "answer.generated_repo.invalid": "ChatGPT access to the generated control and sandbox repositories has not been verified yet.",
+  "setup.chat_registration.waiting": "This Chat is being registered as an explicit callback destination. Wait for the CHAT-ROUTE-REGISTERED callback in this exact conversation, then resume setup.",
+  "setup.chat_registration.no_fallback": "No other Chat will be used while registration is pending."
 }
