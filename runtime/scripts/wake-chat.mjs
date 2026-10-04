@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import path from "node:path";
 const message = process.argv.slice(2).join(" ").trim();
 if (!message) {
   console.error("WAKE_CHAT_FAILED: missing message");
@@ -30,7 +31,7 @@ function updateDeliveryState(state, extra = {}) {
       delivery_updated_at_utc:new Date().toISOString()
     };
     const temp=callbackStateFile+"."+process.pid+".tmp";
-    fs.mkdirSync(new URL(".", "file:///"+callbackStateFile.replaceAll("\\","/")).pathname,{recursive:true});
+    fs.mkdirSync(path.dirname(callbackStateFile),{recursive:true});
     fs.writeFileSync(temp,JSON.stringify(next,null,2)+"\n","utf8");
     fs.renameSync(temp,callbackStateFile);
   } catch (err) {
