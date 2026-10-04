@@ -7,10 +7,9 @@ const wake=()=>fs.readFileSync(new URL("../runtime/scripts/wake-chat.mjs",import
 
 test("callback delivery requires a committed user-role message",()=>{
   const text=wake();
-  assert.match(text,/data-message-author-role=\\"user\\"/);
-  assert.match(text,/\[data-testid\^=\\"conversation-turn-\\"\]\[data-turn=\\"user\\"\]/);
+  assert.match(text,/data-message-author-role="user"/);
+  assert.match(text,/\[data-testid\^="conversation-turn-"\]\[data-turn="user"\]/);
   assert.match(text,/\[data-turn-key\]:has\(\[data-user-message-bubble\]\)/);
-  assert.match(text,/new Set\(document\.querySelectorAll\([\s\S]*data-message-author-role=\\"user\\"/);
   assert.doesNotMatch(text,/const roleNodes = \[\s*\.\.\.structuredNodes/);
   assert.match(text,/verifiedBy:\"committed-user-turn\"/);
   assert.match(text,/Only a newly committed user-role/);
@@ -19,9 +18,11 @@ test("callback delivery requires a committed user-role message",()=>{
 
 test("existing callback id is considered delivered only in a user message",()=>{
   const text=wake();
-  assert.match(text,/alreadyDelivered[\s\S]*data-message-author-role=\\\"user\\\"/);
+  assert.match(text,/const committedUserTurnSelector = \[[\s\S]*data-message-author-role="user"/);
+  assert.match(text,/const committedUserTurnSelector = \[[\s\S]*data-testid\^="conversation-turn-"\]\[data-turn="user"\]/);
   assert.match(text,/const committedUserTurnSelector = \[[\s\S]*data-turn-key\]:has\(\[data-user-message-bubble\]\)/);
-  assert.equal((text.match(/JSON\.stringify\(committedUserTurnSelector\)/g) || []).length, 2);
+  assert.match(text,/async function userMessageState[\s\S]*JSON\.stringify\(committedUserTurnSelector\)/);
+  assert.match(text,/const alreadyDelivered = await evaluate\([\s\S]*JSON\.stringify\(committedUserTurnSelector\)/);
   assert.doesNotMatch(text,/document\.body\.innerText[^\n]*callbackId/);
 });
 
