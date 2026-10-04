@@ -77,6 +77,8 @@ The test environment must be isolated. Existing production orchestrators, runner
 - [ ] Sleep/wake does not require rerunning Codex.
 - [ ] Session recovery checks runner, browser, exact-destination pending callbacks and preflight.
 
+DEV-only callback reconciliation: `retry-pending-callbacks.ps1 -CallbackId <id> -ReconcileOnly` inspects only that instance's selected pending record and its pinned Chat. It never edits or submits composer text. Outcomes are `DELIVERED`, `PENDING`, `NOT_FOUND`, or `ERROR`; only an exact committed receipt clears the unchanged record. Synthetic regression tests do not claim live reconciliation, queue cleanup, E2E completion, or release readiness; live browser verification remains outstanding.
+
 
 ## F. Iteration and token controls
 

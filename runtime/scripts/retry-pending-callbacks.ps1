@@ -1,9 +1,15 @@
-param([int]$MaxCallbacks = 20)
+param([int]$MaxCallbacks = 20, [string]$CallbackId, [switch]$ReconcileOnly)
 
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "runtime-context.ps1")
 
 $pendingDir = Get-OrchestratorPendingWakeDir
+
+if ($ReconcileOnly) {
+  if ([string]::IsNullOrWhiteSpace($CallbackId)) { throw "ReconcileOnly requires CallbackId" }
+  & (Join-Path $PSScriptRoot "wake-chat.ps1") -CallbackId $CallbackId -ReconcileOnly
+  exit $LASTEXITCODE
+}
 
 if (-not (Test-Path $pendingDir)) {
   Write-Host "No pending Chat callbacks."

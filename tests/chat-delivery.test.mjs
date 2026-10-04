@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { callbackReceiptMatches } from "../runtime/scripts/callback-receipt.mjs";
 
 const wake=()=>fs.readFileSync(new URL("../runtime/scripts/wake-chat.mjs",import.meta.url),"utf8");
 
@@ -22,8 +23,16 @@ test("existing callback id is considered delivered only in a user message",()=>{
   assert.match(text,/const committedUserTurnSelector = \[[\s\S]*data-testid\^="conversation-turn-"\]\[data-turn="user"\]/);
   assert.match(text,/const committedUserTurnSelector = \[[\s\S]*data-turn-key\]:has\(\[data-user-message-bubble\]\)/);
   assert.match(text,/async function userMessageState[\s\S]*JSON\.stringify\(committedUserTurnSelector\)/);
-  assert.match(text,/const alreadyDelivered = await evaluate\([\s\S]*JSON\.stringify\(committedUserTurnSelector\)/);
+  assert.match(text,/const alreadyDelivered = await hasReceipt\(send, callbackId, message\)/);
   assert.doesNotMatch(text,/document\.body\.innerText[^\n]*callbackId/);
+});
+
+test("receipt matcher is exact and whitespace tolerant",()=>{
+  const payload="[CODEX-AUTO callback_id=abc] line one\nline two";
+  assert.equal(callbackReceiptMatches("[CODEX-AUTO callback_id=abc] line   one\nline two","abc",payload),true);
+  assert.equal(callbackReceiptMatches("[CODEX-AUTO callback_id=abc2] line one line two","abc",payload),false);
+  assert.equal(callbackReceiptMatches("reference abc [CODEX-AUTO callback_id=abc] line one line two","abc",payload),false);
+  assert.equal(callbackReceiptMatches("[CODEX-AUTO callback_id=abc] other","abc",payload),false);
 });
 
 test("queued callback delivery clears the native failure exit code",()=>{

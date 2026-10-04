@@ -1,8 +1,9 @@
 param(
-  [Parameter(Mandatory=$true)][string]$Message,
-  [Parameter(Mandatory=$true)][string]$ChatUrl,
+  [string]$Message,
+  [string]$ChatUrl,
   [string]$CallbackId,
-  [switch]$QueueOnFailure
+  [switch]$QueueOnFailure,
+  [switch]$ReconcileOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -12,13 +13,23 @@ $Config = Get-OrchestratorConfigPath
 if (-not (Test-Path $Config)) { throw "Missing local config: $Config" }
 . $Config
 
+$pendingDir = Get-OrchestratorPendingWakeDir
+if ($ReconcileOnly) {
+  if ([string]::IsNullOrWhiteSpace($CallbackId)) { throw "ReconcileOnly requires CallbackId" }
+  $pendingPath = Join-Path $pendingDir ($CallbackId + ".json")
+  if (-not (Test-Path $pendingPath)) { Write-Host "NOT_FOUND callback_id=$CallbackId"; exit 4 }
+  $item = Get-Content -Raw $pendingPath | ConvertFrom-Json
+  if ([string]$item.routing_version -ne "explicit-route-v1" -or [string]$item.callback_id -ne $CallbackId -or [string]::IsNullOrWhiteSpace([string]$item.chat_url) -or [string]::IsNullOrWhiteSpace([string]$item.message)) { Write-Host "ERROR callback_id=$CallbackId"; exit 5 }
+  $ChatUrl = [string]$item.chat_url; $Message = [string]$item.message
+  $env:CODEX_RECONCILE_ONLY = "1"
+}
 $targetChatUrl = $ChatUrl
 if ([string]::IsNullOrWhiteSpace($targetChatUrl)) { throw "ChatUrl is required" }
 if ($targetChatUrl -notmatch '^https://chatgpt\.com/(?:g/[^/]+/)?c/[A-Za-z0-9-]+(?:[/?#].*)?$') {
   throw "Target is not a normal ChatGPT conversation URL"
 }
 
-if ([string]::IsNullOrWhiteSpace($CallbackId)) {
+if (-not $ReconcileOnly -and [string]::IsNullOrWhiteSpace($CallbackId)) {
   $sha = [System.Security.Cryptography.SHA256]::Create()
   try {
     $bytes = [System.Text.Encoding]::UTF8.GetBytes($targetChatUrl + [Environment]::NewLine + $Message)
@@ -33,7 +44,6 @@ if ($CallbackId -notmatch '^[A-Za-z0-9._-]{1,160}$') { throw "CallbackId contain
 
 if (-not $env:ORCHESTRATOR_BROWSER_DEBUG_PORT) { $env:ORCHESTRATOR_BROWSER_DEBUG_PORT = "9333" }
 
-$pendingDir = Get-OrchestratorPendingWakeDir
 $pendingPath = Join-Path $pendingDir ($CallbackId + ".json")
 
 $previousChatUrl = $env:ORCHESTRATOR_CHAT_URL
@@ -80,6 +90,8 @@ try {
     return
   }
 
+  if ($ReconcileOnly) { Write-Host "PENDING callback_id=$CallbackId"; return }
+
   if (-not $QueueOnFailure) {
     throw "Normal Chat wake failed with exit code $wakeExit"
   }
@@ -91,4 +103,5 @@ try {
   $env:ORCHESTRATOR_CHAT_URL = $previousChatUrl
   $env:CODEX_CALLBACK_ID = $previousCallbackId
   $env:CODEX_CALLBACK_STATE_FILE = $previousStateFile
+  Remove-Item Env:CODEX_RECONCILE_ONLY -ErrorAction SilentlyContinue
 }

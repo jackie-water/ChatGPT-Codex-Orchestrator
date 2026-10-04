@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { callbackReceiptMatches } from "./callback-receipt.mjs";
 const message = process.argv.slice(2).join(" ").trim();
 if (!message) {
   console.error("WAKE_CHAT_FAILED: missing message");
@@ -10,6 +11,7 @@ const port = process.env.ORCHESTRATOR_BROWSER_DEBUG_PORT || "9333";
 const expected = process.env.ORCHESTRATOR_CHAT_URL || "";
 const callbackId = process.env.CODEX_CALLBACK_ID || "";
 const callbackStateFile = process.env.CODEX_CALLBACK_STATE_FILE || "";
+const reconcileOnly = process.env.CODEX_RECONCILE_ONLY === "1";
 if (!expected) {
   console.error("WAKE_CHAT_FAILED: exact Chat destination is required");
   process.exit(2);
@@ -324,28 +326,34 @@ const committedUserTurnSelector = [
   '[data-turn-key]:has([data-user-message-bubble])'
 ].join(',');
 
+const receiptExpression = `((${callbackReceiptMatches.toString()}));`;
+
 async function userMessageState(send) {
   return evaluate(send, `(() => {
-    const roleNodes = [...new Set(document.querySelectorAll(${JSON.stringify(committedUserTurnSelector)}))];
+    const roleNodes = [...new Set(document.querySelectorAll(${JSON.stringify(committedUserTurnSelector)}))].filter(n => !n.closest('[data-message-author-role="assistant"], [data-orchestrator-composer="true"]'));
+    const textOf = n => { const clone=n.cloneNode(true); clone.querySelectorAll('[data-message-author-role="assistant"],[data-orchestrator-composer="true"],[contenteditable="true"],textarea,input').forEach(x=>x.remove()); return (clone.innerText || clone.textContent || '').trim(); };
     return {
       count: roleNodes.length,
-      last: roleNodes.length ? (roleNodes[roleNodes.length - 1].innerText || roleNodes[roleNodes.length - 1].textContent || '').trim() : '',
-      bodyText: (document.body.innerText || '').slice(-30000)
+      texts: roleNodes.map(textOf)
     };
   })()`);
 }
 
-async function confirmSubmission(send, beforeCount, text, timeoutMs = 15000) {
-  const normalized = text.replace(/\\s+/g, ' ').trim();
-  const prefix = normalized.slice(0, Math.min(100, normalized.length));
+async function hasReceipt(send, callbackId, payload) {
+  const result = await evaluate(send, `(() => {
+    const match = ${receiptExpression};
+    const nodes = [...new Set(document.querySelectorAll(${JSON.stringify(committedUserTurnSelector)}))].filter(n => !n.closest('[data-message-author-role="assistant"], [data-orchestrator-composer="true"]'));
+    return nodes.some(n => { const c=n.cloneNode(true); c.querySelectorAll('[data-message-author-role="assistant"],[data-orchestrator-composer="true"],[contenteditable="true"],textarea,input').forEach(x=>x.remove()); return match((c.innerText||c.textContent||''), ${JSON.stringify(callbackId)}, ${JSON.stringify(payload)}); });
+  })()`);
+  return result === true;
+}
+
+async function confirmSubmission(send, callbackId, text, timeoutMs = 15000) {
   const start = Date.now();
 
   while (Date.now() - start < timeoutMs) {
-    const state = await userMessageState(send);
-    const last = (state?.last || '').replace(/\\s+/g, ' ').trim();
-    const composer = await composerState(send);
-    if ((state?.count || 0) > beforeCount && (last === normalized || last.includes(prefix))) {
-      return {ok:true, verifiedBy:"committed-user-turn", userMessageCount:state.count, last};
+    if (await hasReceipt(send, callbackId, text)) {
+      return {ok:true, verifiedBy:"committed-user-turn"};
     }
 
     // A cleared composer or matching text elsewhere in the page is not
@@ -355,12 +363,9 @@ async function confirmSubmission(send, beforeCount, text, timeoutMs = 15000) {
   }
 
   const state = await userMessageState(send);
-  const composer = await composerState(send);
   throw new Error("Send action was issued but ChatGPT did not confirm a new user message. State: " + JSON.stringify({
     userRoleCount:state?.count || 0,
-    lastUserRoleText:state?.last || '',
-    composer,
-    renderedTextFound:(state?.bodyText || '').replace(/\\s+/g,' ').includes(prefix)
+    userRoleTexts:state?.texts || []
   }));
 }
 
@@ -508,13 +513,8 @@ async function main() {
       throw new Error("Resolved Chat tab URL does not match the requested callback destination");
     }
 
-    const composer = await waitForComposer(send);
-    console.log("CHAT_COMPOSER_FOUND:", JSON.stringify(composer));
-
     if (callbackId) {
-      const alreadyDelivered = await evaluate(send,
-        "(() => [...new Set(document.querySelectorAll(" + JSON.stringify(committedUserTurnSelector) + "))].some(n => ((n.innerText || n.textContent || '')).includes(" + JSON.stringify(callbackId) + ")))()"
-      );
+      const alreadyDelivered = await hasReceipt(send, callbackId, message);
       if (alreadyDelivered) {
         updateDeliveryState("DELIVERED",{verified_by:"existing-user-message"});
         console.log("CHAT_WAKE_ALREADY_DELIVERED:", callbackId);
@@ -522,19 +522,32 @@ async function main() {
       }
     }
 
-    const beforeMessages = await userMessageState(send);
+    if (reconcileOnly) {
+      console.log("CHAT_RECONCILE_PENDING:", callbackId);
+      process.exitCode = 3;
+      return;
+    }
+
+    const composer = await waitForComposer(send);
+    console.log("CHAT_COMPOSER_FOUND:", JSON.stringify(composer));
+
     const existingComposer = await composerState(send);
     if (!(callbackId && existingComposer?.text?.includes(callbackId))) {
+      const beforeInputUrl = await evaluate(send, "location.href");
+      if (normalizeConversationUrl(beforeInputUrl) !== normalizeConversationUrl(expected)) throw new Error("Callback destination changed before input");
       await insertText(send, message);
     } else {
       console.log("PENDING_CALLBACK_DRAFT_REUSED:", callbackId);
     }
     updateDeliveryState("DRAFT_INSERTED");
+    updateDeliveryState("SUBMISSION_ATTEMPTED");
+    const verifyDestination = await evaluate(send, "location.href");
+    if (normalizeConversationUrl(verifyDestination) !== normalizeConversationUrl(expected)) throw new Error("Callback destination changed before submission");
 
     const sendResult = await sendMessage(send);
     console.log("CHAT_WAKE_SENT:", JSON.stringify(sendResult));
 
-    const confirmed = await confirmSubmission(send, beforeMessages?.count || 0, message, 30000);
+    const confirmed = await confirmSubmission(send, callbackId, message, 30000);
     updateDeliveryState("DELIVERED",{verified_by:confirmed?.verifiedBy||"submission-confirmed"});
     console.log("CHAT_WAKE_CONFIRMED:", JSON.stringify(confirmed));
   } finally {
