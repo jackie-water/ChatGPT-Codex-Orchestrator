@@ -1,8 +1,9 @@
 param([int]$MaxCallbacks = 20)
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "runtime-context.ps1")
 
-$pendingDir = Join-Path $HOME ".chatgpt-codex-orchestrator\pending-wakes"
+$pendingDir = Get-OrchestratorPendingWakeDir
 
 if (-not (Test-Path $pendingDir)) {
   Write-Host "No pending Chat callbacks."
@@ -25,7 +26,7 @@ foreach ($file in $files) {
     $item = Get-Content -Raw $file.FullName | ConvertFrom-Json
 
     if ([string]$item.routing_version -ne "explicit-route-v1") {
-      $retiredDir = Join-Path $HOME ".chatgpt-codex-orchestrator\retired-pending-wakes"
+      $retiredDir = Get-OrchestratorRetiredPendingWakeDir
       New-Item -ItemType Directory -Force -Path $retiredDir | Out-Null
       $retiredPath = Join-Path $retiredDir $file.Name
       Move-Item -Force $file.FullName $retiredPath
