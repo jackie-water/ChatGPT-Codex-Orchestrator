@@ -343,10 +343,9 @@ async function confirmSubmission(send, beforeCount, text, timeoutMs = 15000) {
       return {ok:true, verifiedBy:"user-message-role", userMessageCount:state.count, last};
     }
 
-    if (!composer?.text && body.includes(prefix)) {
-      return {ok:true, verifiedBy:"cleared-composer-and-rendered-text", userMessageCount:state?.count || 0};
-    }
-
+    // A cleared composer or matching text elsewhere in the page is not
+    // sufficient proof of delivery. Only a newly committed user-role
+    // message can mark the callback DELIVERED.
     await new Promise(r => setTimeout(r, 250));
   }
 
