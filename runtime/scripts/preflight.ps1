@@ -7,6 +7,7 @@ $RegistryPath = Join-Path $Root "projects.json"
 if (-not (Test-Path $ConfigPath)) { throw "Missing local config: $ConfigPath" }
 
 . $ConfigPath
+. (Join-Path $PSScriptRoot "chat-route-registry.ps1")
 $registry = Get-Content -Raw $RegistryPath | ConvertFrom-Json
 $key = $Project.ToLowerInvariant()
 $projectProp = $registry.projects.PSObject.Properties[$key]
@@ -53,10 +54,9 @@ foreach ($scriptName in @(
   "merge-approved.ps1",
   "publish-checkpoint.ps1",
   "publish-code-review.ps1",
+  "chat-route-registry.ps1",
+  "register-chat.ps1",
   "wake-chat.ps1",
-  "chat-routing.ps1",
-  "dispatch-chat-callback.ps1",
-  "origin-router-loop.ps1",
   "setup-project-clone.ps1",
   "start-orchestrator-session.ps1",
   "retry-pending-callbacks.ps1",
@@ -95,9 +95,6 @@ node --check (Join-Path $PSScriptRoot "wake-chat.mjs")
 if ($LASTEXITCODE -ne 0) { throw "wake-chat.mjs syntax validation failed" }
 node --check (Join-Path $PSScriptRoot "navigate-reviewer-chat.mjs")
 if ($LASTEXITCODE -ne 0) { throw "navigate-reviewer-chat.mjs syntax validation failed" }
-node --check (Join-Path $PSScriptRoot "capture-chat-origins.mjs")
-if ($LASTEXITCODE -ne 0) { throw "capture-chat-origins.mjs syntax validation failed" }
-
 $pathVar = Get-Variable -Name "PROJECT_LOCAL_PATHS" -ErrorAction SilentlyContinue
 $repoPath = $null
 if ($pathVar -and $pathVar.Value -is [System.Collections.IDictionary] -and $pathVar.Value.Contains([string]$p.local_path_key)) {
@@ -105,13 +102,38 @@ if ($pathVar -and $pathVar.Value -is [System.Collections.IDictionary] -and $path
 }
 if ([string]::IsNullOrWhiteSpace($repoPath) -or -not (Test-Path $repoPath)) { throw "Automation clone missing for project '$key'" }
 
-$routeVar = Get-Variable -Name "PROJECT_REVIEW_ROUTES" -ErrorAction SilentlyContinue
-$reviewUrl = $null
-if ($routeVar -and $routeVar.Value -is [System.Collections.IDictionary] -and $routeVar.Value.Contains($key)) {
-  $reviewUrl = [string]$routeVar.Value[$key]
+$chatRouteFile = Get-ChatRouteRegistryPath
+if (Test-Path $chatRouteFile) {
+  $chatRouteRegistry = Read-ChatRouteRegistry
+  foreach ($route in @($chatRouteRegistry.routes)) {
+    if ([string]$route.status -eq "active") {
+      if ([string]::IsNullOrWhiteSpace([string]$route.route)) { throw "Active Chat route missing route name" }
+      if (-not (Test-ChatConversationUrl ([string]$route.chat_url))) { throw "Active Chat route has invalid URL: $($route.route)" }
+    }
+  }
 }
-if ([string]::IsNullOrWhiteSpace($reviewUrl) -or $reviewUrl -notmatch '^https://chatgpt\.com/') {
-  throw "Project reviewer Chat URL missing for '$key'"
+
+$previousChatRouteFile = $env:CODEX_CHAT_ROUTE_FILE
+$routeSmokeFile = Join-Path $env:TEMP ("orchestrator-chat-route-smoke-" + [guid]::NewGuid().ToString("N") + ".json")
+try {
+  $env:CODEX_CHAT_ROUTE_FILE = $routeSmokeFile
+  $urlA = "https://chatgpt.com/c/00000000-0000-0000-0000-000000000001"
+  $urlB = "https://chatgpt.com/c/00000000-0000-0000-0000-000000000002"
+
+  $a1 = Register-ChatRoute -ProjectKey $key -ChatUrl $urlA -RegistrationIssue 900001
+  $a2 = Register-ChatRoute -ProjectKey $key -ChatUrl $urlA -RegistrationIssue 900002
+  $b1 = Register-ChatRoute -ProjectKey $key -ChatUrl $urlB -RegistrationIssue 900003
+
+  if ([string]$a1.route -ne [string]$a2.route) { throw "Chat route registration is not idempotent for the same URL" }
+  if ([string]$a1.route -eq [string]$b1.route) { throw "Different Chat URLs received the same route" }
+
+  $resolvedA = Resolve-RegisteredChatRoute -ProjectKey $key -Route ([string]$a1.route)
+  $resolvedB = Resolve-RegisteredChatRoute -ProjectKey $key -Route ([string]$b1.route)
+  if (-not $resolvedA -or [string]$resolvedA.chat_url -ne $urlA) { throw "Chat route A did not resolve to its registered URL" }
+  if (-not $resolvedB -or [string]$resolvedB.chat_url -ne $urlB) { throw "Chat route B did not resolve to its registered URL" }
+} finally {
+  $env:CODEX_CHAT_ROUTE_FILE = $previousChatRouteFile
+  Remove-Item -Force $routeSmokeFile -ErrorAction SilentlyContinue
 }
 
 gh auth status
