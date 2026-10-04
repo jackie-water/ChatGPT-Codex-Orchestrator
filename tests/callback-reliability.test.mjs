@@ -26,7 +26,7 @@ test("extractor accepts message id and bubble-only user turns, deduplicates one 
   const message = node({ "data-message-id": "m1", "data-message-author-role": "user" }, "[CODEX-AUTO callback_id=x] ok");
   const bubble = node({ bubble: "1", "data-user-message-bubble": "", "data-turn-key": "turn-1" }, "[CODEX-AUTO callback_id=x] ok");
   const duplicate = node({ bubble: "1", "data-user-message-bubble": "", "data-turn-key": "turn-1" }, "[CODEX-AUTO callback_id=x] ok");
-  assert.deepEqual(extract(root), [
+  assert.deepEqual(JSON.parse(JSON.stringify(extract(root))), [
     { text: "[CODEX-AUTO callback_id=x] ok", key: "m1" },
     { text: "[CODEX-AUTO callback_id=x] ok", key: "turn-1" }
   ]);

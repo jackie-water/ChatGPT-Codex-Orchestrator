@@ -243,31 +243,19 @@ async function composerState(send) {
   })()`);
 }
 
-async function clearKnownAutomationDraft(send, draftText) {
-  throw new Error("Composer already contains a non-empty draft; refusing to overwrite it: " + JSON.stringify(draftText.slice(0,120)));
-}
-
 async function insertText(send, text) {
-  const before = await composerState(send);
-  if (!before?.ok) throw new Error("Composer disappeared before input");
-
-  if (before.text) {
-    if (before.text === text) {
-      console.log("PENDING_CALLBACK_DRAFT_REUSED:", callbackId);
-      return before;
-    }
-    await clearKnownAutomationDraft(send, before.text);
-  }
-
-  // React-controlled textarea/input needs its native value setter + input event.
-  // ProseMirror/contenteditable is more reliable through CDP Input.insertText.
   const direct = await evaluate(send,
     "(() => {" +
+    "if(" + JSON.stringify(normalizeConversationUrl(expected)) + ".toString()!==" +
+      "(location.origin+location.pathname).toString()) return {ok:false,reason:'destination-changed'};" +
     "const el=document.querySelector('[data-orchestrator-composer=\"true\"]');" +
-    "if(!el) return {ok:false,reason:'composer missing'};" +
-    "el.focus();" +
+    "if(!el) return {ok:false,reason:'composer-missing'};" +
+    "const current=(el instanceof HTMLInputElement||el instanceof HTMLTextAreaElement?el.value:(el.innerText??el.textContent??'')).trim();" +
     "const text=" + JSON.stringify(text) + ";" +
-    "if(el instanceof HTMLTextAreaElement || el instanceof HTMLInputElement){" +
+    "if(current===text) return {ok:true,reused:true,text:current};" +
+    "if(current) return {ok:false,reason:'draft-changed',text:current};" +
+    "el.focus();" +
+    "if(el instanceof HTMLTextAreaElement||el instanceof HTMLInputElement){" +
       "const proto=el instanceof HTMLTextAreaElement?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;" +
       "const setter=Object.getOwnPropertyDescriptor(proto,'value')?.set;" +
       "if(setter) setter.call(el,text); else el.value=text;" +
@@ -275,14 +263,15 @@ async function insertText(send, text) {
       "el.dispatchEvent(new Event('change',{bubbles:true}));" +
       "return {ok:true,mode:'native-value'};" +
     "}" +
-    "return {ok:true,mode:'cdp'};" +
+    "if(!document.execCommand?.('insertText',false,text)) return {ok:false,reason:'contenteditable-insert-failed'};" +
+    "return {ok:true,mode:'page-insert'};" +
     "})()"
   );
 
-  if (direct?.mode === "cdp") {
-    const pinned = await evaluate(send, "location.href");
-    if (normalizeConversationUrl(pinned) !== normalizeConversationUrl(expected)) throw new Error("Callback destination changed before CDP input");
-    await send("Input.insertText", { text });
+  if (!direct?.ok) throw new Error("No mutation performed: " + (direct?.reason || "composer unavailable"));
+  if (direct.reused) {
+    console.log("PENDING_CALLBACK_DRAFT_REUSED:", callbackId);
+    return direct;
   }
 
   const deadline = Date.now() + 7000;
