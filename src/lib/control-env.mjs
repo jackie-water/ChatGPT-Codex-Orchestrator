@@ -188,6 +188,41 @@ function stopRetiredOriginRouter(controlPath){
   return {stopped:r.status===0?Number((r.stdout||"0").trim())||0:0};
 }
 
+function installationShortId(value){
+  return String(value||"").replace(/[^A-Za-z0-9]/g,"").slice(0,8).toLowerCase()||"default";
+}
+
+function browserPortForInstallation(shortId){
+  const hex=String(shortId||"").replace(/[^0-9a-f]/gi,"").slice(0,6);
+  const n=Number.parseInt(hex||"0",16);
+  return 10000+(Number.isFinite(n)?n%40000:0);
+}
+
+function writeInstanceMetadata(controlPath,{instanceId}){
+  if(!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(instanceId)) throw new Error("Invalid instance id");
+  fs.writeFileSync(path.join(controlPath,"instance.json"),JSON.stringify({
+    schema_version:1,
+    instance_id:instanceId
+  },null,2)+"\n");
+}
+
+function retireLegacyGlobalPending({home,instanceRoot}){
+  const legacy=path.join(home,".chatgpt-codex-orchestrator","pending-wakes");
+  if(!fs.existsSync(legacy)) return {retired:0,destination:null};
+  const files=fs.readdirSync(legacy,{withFileTypes:true}).filter(x=>x.isFile()&&x.name.endsWith(".json"));
+  if(!files.length) return {retired:0,destination:null};
+
+  const stamp=new Date().toISOString().replace(/[:.]/g,"-");
+  const destination=path.join(instanceRoot,"retired-pending-wakes","legacy-global-"+stamp);
+  fs.mkdirSync(destination,{recursive:true});
+  let retired=0;
+  for(const file of files){
+    fs.renameSync(path.join(legacy,file.name),path.join(destination,file.name));
+    retired++;
+  }
+  return {retired,destination};
+}
+
 export function upgradeControlEnvironment({state,sourceRoot=process.cwd(),home=os.homedir()}){
   if(!state?.control_clone_path||!fs.existsSync(path.join(state.control_clone_path,".git"))){
     throw new Error("Existing control clone is unavailable for upgrade");
@@ -210,10 +245,14 @@ export function upgradeControlEnvironment({state,sourceRoot=process.cwd(),home=o
     renderWorkflow(workflowTemplate,{runnerLabel:state.runner_label})
   );
 
+  const instanceId=installationShortId(state.installation_id)||path.basename(state.runner_path);
+  writeInstanceMetadata(state.control_clone_path,{instanceId});
+
   const configRoot=path.join(home,".chatgpt-codex-orchestrator");
-  fs.mkdirSync(configRoot,{recursive:true});
-  const instanceId=path.basename(state.runner_path);
-  const chatRouteFile=path.join(home,".chatgpt-codex-orchestrator","routes",instanceId,"chat-routes.json");
+  const instanceRoot=path.join(configRoot,"instances",instanceId);
+  fs.mkdirSync(instanceRoot,{recursive:true});
+  const chatRouteFile=path.join(instanceRoot,"chat-routes.json");
+  const configPath=path.join(instanceRoot,"config.ps1");
   const configText=renderConfigPs1({
     githubLogin:state.github_login,
     projectMappings:[
@@ -225,16 +264,20 @@ export function upgradeControlEnvironment({state,sourceRoot=process.cwd(),home=o
     browserProfile:state.browser_profile,
     chatRouteFile
   });
-  const configPath=state.config_path||path.join(configRoot,"config.ps1");
   fs.writeFileSync(configPath,configText,{mode:0o600});
 
+  const pendingMigration=retireLegacyGlobalPending({home,instanceRoot});
   const commit=commitControlRepo(state.control_clone_path);
 
   return {
     changed:commit.changed,
+    instance_id:instanceId,
+    instance_root:instanceRoot,
     stopped_retired_router_processes:stopped.stopped,
     chat_route_file:chatRouteFile,
     config_path:configPath,
+    retired_legacy_pending:pendingMigration.retired,
+    retired_legacy_pending_destination:pendingMigration.destination,
     retired_scripts:RETIRED_ROUTING_SCRIPTS
   };
 }
@@ -253,7 +296,7 @@ export function prepareControlEnvironment({
   const target=repositoryInfo(targetRepository);
   const projectKey=safeKey(String(targetRepository).split("/").pop());
   const paths=defaultLocalPaths({home,installationId,projectKey});
-  const short=String(installationId).replace(/[^A-Za-z0-9]/g,"").slice(0,8).toLowerCase()||"default";
+  const short=installationShortId(installationId);
 
   ensureClone(targetRepository,paths.project);
   const validationProfile=detectProjectProfile(paths.project);
@@ -269,6 +312,7 @@ export function prepareControlEnvironment({
   const controlRepository=login+"/chatgpt-codex-orchestrator-control-"+short;
   ensureOwnedPrivateRepo({fullName:controlRepository,installationId,purpose:"control"});
   ensureClone(controlRepository,paths.control);
+  writeInstanceMetadata(paths.control,{instanceId:short});
 
   const scriptsSource=path.join(sourceRoot,"runtime","scripts");
   const workflowTemplate=fs.readFileSync(path.join(sourceRoot,"templates","control-repo","orchestrator.yml.template"),"utf8");
@@ -313,26 +357,26 @@ export function prepareControlEnvironment({
   ].join("\n"));
 
   const configRoot=path.join(home,".chatgpt-codex-orchestrator");
-  fs.mkdirSync(configRoot,{recursive:true});
+  const instanceRoot=path.join(configRoot,"instances",short);
+  fs.mkdirSync(instanceRoot,{recursive:true});
   const browserProfile=process.platform==="win32"
     ? path.join(process.env.LOCALAPPDATA||path.join(home,"AppData","Local"),"ChatGPTCodexOrchestratorReviewer-"+short)
-    : path.join(configRoot,"browser-profile-"+short);
-
-  const browserPort=9333;
-  const instanceId=path.basename(paths.runner);
-  const chatRouteFile=path.join(home,".chatgpt-codex-orchestrator","routes",instanceId,"chat-routes.json");
+    : path.join(instanceRoot,"browser-profile");
+  const browserPort=browserPortForInstallation(short);
+  const chatRouteFile=path.join(instanceRoot,"chat-routes.json");
+  const configPath=path.join(instanceRoot,"config.ps1");
   const configText=renderConfigPs1({
     githubLogin:login,
     projectMappings:[
-      {projectKey,projectClonePath:paths.project,reviewerChatUrl},
-      {projectKey:sandboxProjectKey,projectClonePath:sandboxClonePath,reviewerChatUrl}
+      {projectKey,projectClonePath:paths.project},
+      {projectKey:sandboxProjectKey,projectClonePath:sandboxClonePath}
     ],
     runnerPath:paths.runner,
     browserPort,
     browserProfile,
     chatRouteFile
   });
-  fs.writeFileSync(path.join(configRoot,"config.ps1"),configText,{mode:0o600});
+  fs.writeFileSync(configPath,configText,{mode:0o600});
 
   const commit=commitControlRepo(paths.control);
 
@@ -351,7 +395,9 @@ export function prepareControlEnvironment({
     sandbox_validation_profile:sandboxValidationProfile,
     runner_path:paths.runner,
     runner_label:paths.runnerLabel,
-    config_path:path.join(configRoot,"config.ps1"),
+    instance_id:short,
+    instance_root:instanceRoot,
+    config_path:configPath,
     browser_port:browserPort,
     browser_profile:browserProfile,
     chat_route_file:chatRouteFile,
