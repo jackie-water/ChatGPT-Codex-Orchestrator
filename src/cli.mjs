@@ -284,6 +284,8 @@ function runSetup() {
         sandbox_validation_profile:control.sandbox_validation_profile,
         runner_path:control.runner_path,
         runner_label:control.runner_label,
+        instance_id:control.instance_id,
+        instance_root:control.instance_root,
         config_path:control.config_path,
         browser_port:control.browser_port,
         browser_profile:control.browser_profile,
@@ -324,12 +326,16 @@ function runSetup() {
   if(state.control_environment_ready && state.routing_architecture!=="explicit-route-v1") {
     try{
       const upgrade=upgradeControlEnvironment({state,sourceRoot:process.cwd(),home:os.homedir()});
+      state.instance_id=upgrade.instance_id;
+      state.instance_root=upgrade.instance_root;
       state.chat_route_file=upgrade.chat_route_file;
       state.config_path=upgrade.config_path;
       state.routing_architecture="explicit-route-v1";
       state.routing_upgrade={
         changed:Boolean(upgrade.changed),
         stopped_retired_router_processes:upgrade.stopped_retired_router_processes,
+        retired_legacy_pending:upgrade.retired_legacy_pending,
+        retired_legacy_pending_destination:upgrade.retired_legacy_pending_destination,
         retired_scripts:upgrade.retired_scripts,
         upgraded_at:new Date().toISOString()
       };
@@ -384,7 +390,9 @@ function runSetup() {
     const browserScript=path.join(state.control_clone_path,"scripts","start-reviewer-browser.ps1");
     const openBrowser=spawnSafeSync("powershell.exe",[
       "-NoProfile","-ExecutionPolicy","Bypass","-File",browserScript,
-      "-ChatUrl",state.reviewer_chat_url
+      "-ChatUrl",state.reviewer_chat_url,
+      "-Port",String(state.browser_port),
+      "-ProfilePath",state.browser_profile
     ],{encoding:"utf8"});
     if(openBrowser.status!==0){
       state.last_error={error_id:"CALLBACK-001",message:(openBrowser.stderr||openBrowser.stdout||"Reviewer browser launch failed").trim(),at:new Date().toISOString()};
