@@ -110,9 +110,19 @@ test("production callback state store fails closed on disappearance, conflicts, 
   fs.unlinkSync(file); assert.throws(()=>store.read(),/Callback state disappeared/); assert.throws(()=>store.update("DRAFT_INSERTED"),/Callback state disappeared/); assert.equal(fs.existsSync(file),false); write(); const fp=make().update("DRAFT_INSERTED"); assert.equal(fp,crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex"));
 });
 
-test("production delivery helper reconciles and retries without blind resend", async () => {
-  let state="PENDING", sends=0, updates=[]; const read=()=>({delivery_state:state}); const update=next=>{state=next; updates.push(next);};
-  await assert.rejects(()=>deliverCallback({read,hasReceipt:async()=>false,update,beforeSend:async()=>{},send:async()=>{sends++; const e=new Error("not ready"); e.code="PRE_SEND_NOT_READY"; throw e;}}),/not ready/); assert.equal(state,"PENDING");
-  const result=await deliverCallback({read,hasReceipt:async()=>false,update,beforeSend:async()=>{},send:async()=>{sends++; return "sent";}}); assert.equal(result.action,"sent"); assert.equal(sends,2);
+test("production delivery helper retries without blind resend and counts only irreversible submission", async () => {
+  let state="PENDING", submissions=0, updates=[]; const read=()=>({delivery_state:state}); const update=next=>{state=next; updates.push(next);};
+  await assert.rejects(()=>deliverCallback({read,hasReceipt:async()=>false,update,beforeSend:async()=>{},send:async()=>{const e=new Error("not ready"); e.code="PRE_SEND_NOT_READY"; throw e;}}),/not ready/); assert.equal(state,"PENDING"); assert.equal(submissions,0);
+  const result=await deliverCallback({read,hasReceipt:async()=>false,update,beforeSend:async()=>{},send:async()=>{submissions++; return "sent";}}); assert.equal(result.action,"sent"); assert.equal(submissions,1); assert.deepEqual(updates.slice(-2),["DRAFT_INSERTED","SUBMISSION_ATTEMPTED"]);
   for (const prior of ["DRAFT_INSERTED","SUBMISSION_ATTEMPTED","DELIVERED"]) { state=prior; let called=0; assert.equal((await deliverCallback({read,hasReceipt:async()=>false,update,send:async()=>called++})).action,"reconcile"); assert.equal(called,0); state=prior; assert.equal((await deliverCallback({read,hasReceipt:async()=>true,update,send:async()=>called++})).state,"DELIVERED"); assert.equal(called,0); }
+});
+
+test("deliverCallback blocks send on production state-store faults", async () => {
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),"callback-delivery-store-")); const file=path.join(dir,"state.json");
+  const record={routing_version:"explicit-route-v1",delivery_state:"PENDING",callback_id:"x",chat_url:"https://chatgpt.com/c/chat-27",message:"payload"};
+  const write=()=>fs.writeFileSync(file,JSON.stringify(record)); const make=(overrides={}, expectedFingerprint="")=>createCallbackStateStore({file,expected:record.chat_url,callbackId:"x",message:record.message,expectedFingerprint,fsModule:Object.assign(Object.create(fs),overrides),pathModule:path});
+  const attempt=async (store, receipt=async()=>false) => { let sends=0, receipts=0; await assert.rejects(()=>deliverCallback({read:store.read,hasReceipt:async()=>{receipts++; return receipt();},update:store.update,send:async()=>{sends++;}})); assert.equal(sends,0); return receipts; };
+  write(); const fp=crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex"); fs.appendFileSync(file," "); assert.equal(await attempt(make({},fp)),0); write(); fs.unlinkSync(file); assert.equal(await attempt(make()),0); assert.equal(fs.existsSync(file),false);
+  for (const method of ["writeFileSync","renameSync"]) { write(); const before=fs.readFileSync(file); await attempt(make({[method](){throw new Error(method);}})); assert.deepEqual(fs.readFileSync(file),before); }
+  for (const bad of [{delivery_state:"BROKEN"},{callback_id:"other"}]) { write(); fs.writeFileSync(file,JSON.stringify({...record,...bad})); let receipts=0; await assert.rejects(()=>deliverCallback({read:make().read,hasReceipt:async()=>{receipts++; return true;},update:make().update,send:async()=>{}})); assert.equal(receipts,0); }
 });
