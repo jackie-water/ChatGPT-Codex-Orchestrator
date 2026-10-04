@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import vm from "node:vm";
 import { callbackReceiptMatches, receiptDomSource } from "../runtime/scripts/callback-receipt.mjs";
 
@@ -69,4 +70,19 @@ test("receipt recognition fails closed for changed navigation, late drafts, and 
   for (const value of ["", "not-json", "{\"delivery_state\":\"DELIVERED\"}"]) {
     assert.equal(callbackReceiptMatches(value, "x", payload), false);
   }
+});
+
+test("shipped sender state machine keeps the mutation and send gates fail closed", () => {
+  const source=fs.readFileSync(new URL("../runtime/scripts/wake-chat.mjs", import.meta.url),"utf8");
+  assert.match(source,/beforeInputUrl[\s\S]*destination changed before input[\s\S]*insertText/);
+  assert.match(source,/verifyDestination[\s\S]*destination changed before submission[\s\S]*updateDeliveryState\("SUBMISSION_ATTEMPTED"\)/);
+  assert.match(source,/error\.code === "PRE_SEND_NOT_READY"\) updateDeliveryState\("PENDING"\)/);
+  assert.match(source,/stored\?\.delivery_state === "SUBMISSION_ATTEMPTED" \|\| stored\?\.delivery_state === "DRAFT_INSERTED"/);
+  assert.match(source,/stored\?\.delivery_state === "DELIVERED"/);
+  assert.match(source,/if \(stored && stored\.delivery_state !== "PENDING"\) throw new Error\("Invalid callback delivery state"\)/);
+  assert.match(source,/Callback state disappeared/);
+  assert.match(source,/Callback state fingerprint changed/);
+  assert.match(source,/fs\.renameSync\(temp,callbackStateFile\)/);
+  assert.match(source,/const alreadyDelivered = await hasReceipt\(send, callbackId, message\)/);
+  assert.match(source,/callbackReceiptMatches\(x\.text, \$\{JSON\.stringify\(callbackId\)\}, \$\{JSON\.stringify\(payload\)\}\)/);
 });
