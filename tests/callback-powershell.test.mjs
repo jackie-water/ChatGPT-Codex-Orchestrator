@@ -24,11 +24,11 @@ test("native callback lifecycle uses isolated shipped PowerShell entrypoints", {
     fs.writeFileSync(path.join(instance,"config.ps1"),"$env:ORCHESTRATOR_INSTANCE_ID = 'fixture'\n");
     const shim=path.join(scripts,"wake-chat.mjs");
     fs.writeFileSync(shim,`import fs from 'node:fs';
+if(process.env.TEST_MODE==='error'){console.error('SYNTHETIC_WAKE_FAILURE');process.exitCode=1;process.exit();}
 const file=process.env.CODEX_CALLBACK_STATE_FILE;
 const item=JSON.parse(fs.readFileSync(file,'utf8').replace(/^\\uFEFF/,''));
 if(process.env.ARGV_MARKER) fs.writeFileSync(process.env.ARGV_MARKER,process.argv.slice(2).join(' ')+'\\n'+item.message);
 if(process.env.TEST_MODE==='pending'){process.exitCode=3;process.exit();}
-if(process.env.TEST_MODE==='error'){console.error('SYNTHETIC_WAKE_FAILURE');process.exitCode=1;process.exit();}
 item.delivery_state='DELIVERED'; fs.writeFileSync(file,JSON.stringify(item)+'\\n');
 const crypto=await import('node:crypto'); console.log('CHAT_STATE_FINGERPRINT:'+crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex'));`);
     const env={...process.env,HOME:home,USERPROFILE:home,TEST_MODE:"pending"};
