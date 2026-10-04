@@ -1,12 +1,9 @@
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "runtime-context.ps1")
 
 function Get-ChatRouteRegistryPath {
   if ($env:CODEX_CHAT_ROUTE_FILE) { return [string]$env:CODEX_CHAT_ROUTE_FILE }
-
-  $root = Join-Path $HOME ".chatgpt-codex-orchestrator"
-  $instance = if ($env:ORCHESTRATOR_INSTANCE_ID) { [string]$env:ORCHESTRATOR_INSTANCE_ID } else { "default" }
-  $safeInstance = ($instance -replace '[^A-Za-z0-9._-]','-')
-  return (Join-Path (Join-Path $root "routes") (Join-Path $safeInstance "chat-routes.json"))
+  return (Get-OrchestratorChatRoutePath)
 }
 
 function Test-ChatConversationUrl {
