@@ -86,6 +86,7 @@ try {
 
   Write-Warning "CHAT_WAKE_QUEUED callback_id=$CallbackId path=$pendingPath"
   Write-Host "Implementation/checkpoint work is complete; callback delivery will be retried later."
+  $global:LASTEXITCODE = 0
 } finally {
   $env:ORCHESTRATOR_CHAT_URL = $previousChatUrl
   $env:CODEX_CALLBACK_ID = $previousCallbackId

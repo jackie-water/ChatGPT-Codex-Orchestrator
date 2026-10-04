@@ -319,7 +319,12 @@ async function insertText(send, text) {
 }
 async function userMessageState(send) {
   return evaluate(send, `(() => {
-    const roleNodes = [...document.querySelectorAll('[data-message-author-role="user"]')];
+    const structuredNodes = [...document.querySelectorAll('[data-testid^="conversation-turn-"][data-turn="user"]')];
+    const roleNodes = [
+      ...structuredNodes,
+      ...[...document.querySelectorAll('[data-message-author-role="user"]')]
+        .filter(node => !structuredNodes.some(turn => turn.contains(node)))
+    ];
     return {
       count: roleNodes.length,
       last: roleNodes.length ? (roleNodes[roleNodes.length - 1].innerText || roleNodes[roleNodes.length - 1].textContent || '').trim() : '',
@@ -337,10 +342,8 @@ async function confirmSubmission(send, beforeCount, text, timeoutMs = 15000) {
     const state = await userMessageState(send);
     const last = (state?.last || '').replace(/\\s+/g, ' ').trim();
     const composer = await composerState(send);
-    const body = (state?.bodyText || '').replace(/\\s+/g, ' ');
-
     if ((state?.count || 0) > beforeCount && (last === normalized || last.includes(prefix))) {
-      return {ok:true, verifiedBy:"user-message-role", userMessageCount:state.count, last};
+      return {ok:true, verifiedBy:"committed-user-turn", userMessageCount:state.count, last};
     }
 
     // A cleared composer or matching text elsewhere in the page is not
@@ -508,7 +511,7 @@ async function main() {
 
     if (callbackId) {
       const alreadyDelivered = await evaluate(send,
-        "(() => [...document.querySelectorAll('[data-message-author-role=\"user\"]')].some(n => ((n.innerText || n.textContent || '')).includes(" + JSON.stringify(callbackId) + ")))()"
+        "(() => [...document.querySelectorAll('[data-message-author-role=\"user\"],article[data-testid^=\"conversation-turn-\"][data-turn=\"user\"],[data-testid^=\"conversation-turn-\"][data-turn=\"user\"]')].some(n => ((n.innerText || n.textContent || '')).includes(" + JSON.stringify(callbackId) + ")))()"
       );
       if (alreadyDelivered) {
         updateDeliveryState("DELIVERED",{verified_by:"existing-user-message"});
