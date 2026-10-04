@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { callbackReceiptMatches, normalizeReceiptText, receiptMatcherSource, receiptDomSource } from "./callback-receipt.mjs";
-import { validateCallbackState, assertSafeMutation, nextDeliveryState, sendGate, reconcileReceipt } from "./callback-delivery.mjs";
+import { createCallbackStateStore, assertSafeMutation, nextDeliveryState, sendGate, reconcileReceipt } from "./callback-delivery.mjs";
 const message = process.argv.slice(2).join(" ").trim();
 if (!message) {
   console.error("WAKE_CHAT_FAILED: missing message");
@@ -20,38 +20,9 @@ if (!expected) {
   process.exit(2);
 }
 
-function readDeliveryState() {
-  if (!callbackStateFile) return null;
-  if (!fs.existsSync(callbackStateFile)) throw new Error("Callback state disappeared");
-  const current = JSON.parse(fs.readFileSync(callbackStateFile,"utf8").replace(/^\uFEFF/,""));
-  validateCallbackState(current, {callbackId, chatUrl:expected, message});
-  return current;
-}
-
-function updateDeliveryState(state, extra = {}) {
-  if (!callbackStateFile) return;
-  if (!fs.existsSync(callbackStateFile)) throw new Error("Callback state disappeared");
-  if (expectedFingerprint && fingerprint(callbackStateFile) !== expectedFingerprint) throw new Error("Callback state fingerprint changed");
-  const current = readDeliveryState();
-  if (!current) throw new Error("Callback state disappeared");
-    const next = {
-      ...current,
-      ...extra,
-      routing_version:"explicit-route-v1",
-      callback_id:callbackId || current.callback_id,
-      chat_url:expected || current.chat_url,
-      delivery_state:state,
-      delivery_updated_at_utc:new Date().toISOString()
-    };
-    const temp=callbackStateFile+"."+process.pid+".tmp";
-    fs.mkdirSync(path.dirname(callbackStateFile),{recursive:true});
-    fs.writeFileSync(temp,JSON.stringify(next,null,2)+"\n","utf8");
-    fs.renameSync(temp,callbackStateFile);
-    const nextFingerprint = fingerprint(callbackStateFile);
-    expectedFingerprint = nextFingerprint;
-    console.log("CHAT_STATE_FINGERPRINT:" + nextFingerprint);
-    return nextFingerprint;
-}
+const stateStore = createCallbackStateStore({file:callbackStateFile, expected, callbackId, message, fsModule:fs, pathModule:path, expectedFingerprint});
+const readDeliveryState = stateStore.read;
+function updateDeliveryState(state, extra = {}) { const nextFingerprint = stateStore.update(state, extra); if (nextFingerprint) { expectedFingerprint = nextFingerprint; console.log("CHAT_STATE_FINGERPRINT:" + nextFingerprint); } return nextFingerprint; }
 
 function fingerprint(file) { return crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex"); }
 

@@ -1,4 +1,33 @@
+import crypto from "node:crypto";
 const states = new Set(["PENDING", "DRAFT_INSERTED", "SUBMISSION_ATTEMPTED", "DELIVERED"]);
+
+export function createCallbackStateStore({file, expected, callbackId, message, fsModule, pathModule, expectedFingerprint = "", now = () => new Date().toISOString()}) {
+  const fs = fsModule;
+  const path = pathModule;
+  let currentFingerprint = expectedFingerprint;
+  const fingerprint = () => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+  const read = () => {
+    if (!file) return null;
+    if (!fs.existsSync(file)) throw new Error("Callback state disappeared");
+    const current = JSON.parse(fs.readFileSync(file, "utf8").replace(/^\uFEFF/, ""));
+    validateCallbackState(current, {callbackId, chatUrl:expected, message});
+    return current;
+  };
+  const update = (state, extra = {}) => {
+    if (!file) return;
+    if (!fs.existsSync(file)) throw new Error("Callback state disappeared");
+    if (currentFingerprint && fingerprint() !== currentFingerprint) throw new Error("Callback state fingerprint changed");
+    const current = read();
+    const next = {...current, ...extra, routing_version:"explicit-route-v1", callback_id:callbackId || current.callback_id, chat_url:expected || current.chat_url, delivery_state:state, delivery_updated_at_utc:now()};
+    const temp = file + "." + process.pid + ".tmp";
+    fs.mkdirSync(path.dirname(file), {recursive:true});
+    fs.writeFileSync(temp, JSON.stringify(next, null, 2) + "\n", "utf8");
+    fs.renameSync(temp, file);
+    currentFingerprint = fingerprint();
+    return currentFingerprint;
+  };
+  return {read, update};
+}
 
 export function validateCallbackState(current, expected) {
   if (!current || current.routing_version !== "explicit-route-v1" || !states.has(current.delivery_state) ||

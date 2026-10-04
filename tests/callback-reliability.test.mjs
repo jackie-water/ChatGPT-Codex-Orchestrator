@@ -74,7 +74,10 @@ test("receipt recognition fails closed for changed navigation, late drafts, and 
 
 test("shipped sender helpers keep mutation and send gates fail closed", () => {
   const expected={callbackId:"x",chatUrl:"https://chatgpt.com/c/chat-27",message:"payload"};
-  assert.equal(validateCallbackState({...expected,routing_version:"explicit-route-v1",delivery_state:"PENDING"},expected).delivery_state,"PENDING");
+  const persisted={routing_version:"explicit-route-v1",delivery_state:"PENDING",callback_id:expected.callbackId,chat_url:expected.chatUrl,message:expected.message};
+  assert.equal(validateCallbackState(persisted,expected).delivery_state,"PENDING");
+  assert.throws(()=>validateCallbackState({...persisted,callback_id:"other"},expected));
+  assert.throws(()=>validateCallbackState({...persisted,chat_url:"https://chatgpt.com/c/other"},expected));
   assert.throws(()=>assertSafeMutation({destination:"https://chatgpt.com/c/other",expectedDestination:expected.chatUrl,draft:"",message:expected.message}));
   assert.throws(()=>assertSafeMutation({destination:expected.chatUrl,expectedDestination:expected.chatUrl,draft:"late draft",message:expected.message}));
   assert.equal(nextDeliveryState("PENDING","DRAFT_INSERTED"),"DRAFT_INSERTED");
