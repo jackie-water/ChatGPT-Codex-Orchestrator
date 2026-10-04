@@ -58,5 +58,7 @@
   "sandbox.approval.failed": "无法创建 Sandbox merge approval。",
   "setup.target.activate_failed": "Sandbox 已通过，但真实项目的启用步骤没有完成。真实项目的 main 分支没有被修改；我可以只修复这一步。",
   "setup.generated_repo.connect": "安装程序已经创建了两个 private repository。现在请把这两个新 repository 加入 ChatGPT 的 GitHub 授权范围，并确认 ChatGPT 能访问它们后再继续。",
-  "answer.generated_repo.invalid": "目前还没有确认 ChatGPT 可以访问新生成的 control 和 sandbox repository。"
+  "answer.generated_repo.invalid": "目前还没有确认 ChatGPT 可以访问新生成的 control 和 sandbox repository。",
+  "setup.chat_registration.waiting": "正在把当前这个 Chat 登记为明确的 callback 返回地址。请等待这条对话收到 CHAT-ROUTE-REGISTERED callback，然后再继续安装。",
+  "setup.chat_registration.no_fallback": "登记完成前不会把 callback 改发到其他 Chat。"
 }
