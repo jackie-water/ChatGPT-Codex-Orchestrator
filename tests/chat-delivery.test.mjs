@@ -23,7 +23,7 @@ test("existing callback id is considered delivered only in a user message",()=>{
   assert.match(text,/const committedUserTurnSelector = \[[\s\S]*data-message-author-role="user"/);
   assert.match(text,/const committedUserTurnSelector = \[[\s\S]*data-testid\^="conversation-turn-"\]\[data-turn="user"\]/);
   assert.match(text,/const committedUserTurnSelector = \[[\s\S]*data-turn-key\]:has\(\[data-user-message-bubble\]\)/);
-  assert.match(text,/async function userMessageState[\s\S]*JSON\.stringify\(committedUserTurnSelector\)/);
+  assert.match(text,/async function userMessageState[\s\S]*const roleNodes = \$\{receiptDomExpression\}\(document\)/);
   assert.match(text,/const alreadyDelivered = await hasReceipt\(send, callbackId, message\)/);
   assert.doesNotMatch(text,/document\.body\.innerText[^\n]*callbackId/);
 });
@@ -40,7 +40,7 @@ test("receipt matcher is exact and whitespace tolerant",()=>{
 test("shipped serialized matcher runs in a separate browser-like realm", async ()=>{
   const {receiptMatcherSource}=await import("../runtime/scripts/callback-receipt.mjs");
   const context={}; vm.createContext(context);
-  const matcher=vm.runInContext(`${receiptMatcherSource()}; callbackReceiptMatches`,context);
+  const matcher=vm.runInContext(receiptMatcherSource(),context);
   assert.equal(matcher("[CODEX-AUTO callback_id=a.b] line one line two","a.b","[CODEX-AUTO callback_id=a.b] line one line two"),true);
   assert.equal(matcher("[CODEX-AUTO callback_id=aXb] line one line two","a.b","[CODEX-AUTO callback_id=a.b] line one line two"),false);
 });
@@ -50,7 +50,7 @@ test("receipt and state paths are fail-closed and exact",()=>{
   const ps=fs.readFileSync(new URL("../runtime/scripts/wake-chat.ps1",import.meta.url),"utf8");
   assert.match(js,/const receiptDomExpression/);
   assert.match(js,/blockquote,pre,code/);
-  assert.match(js,/existingComposer\?\.text === message/);
+  assert.match(js,/before\.text === text/);
   assert.match(js,/delivery_state === "SUBMISSION_ATTEMPTED"/);
   assert.match(js,/location\.href !==/);
   assert.match(ps,/delivery_state -ne 'DELIVERED'/);

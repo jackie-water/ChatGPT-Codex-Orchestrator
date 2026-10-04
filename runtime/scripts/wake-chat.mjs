@@ -233,45 +233,7 @@ async function composerState(send) {
 }
 
 async function clearKnownAutomationDraft(send, draftText) {
-  const knownAutomationDraft =
-    draftText.startsWith("[ORCHESTRATOR-AUTO") ||
-    draftText.startsWith("[CODEX-AUTO") ||
-    draftText.startsWith("[CODE-REVIEW-AUTO") ||
-    draftText.startsWith("[MERGE-AUTO") ||
-    draftText.startsWith("Orchestrator wake test") ||
-    draftText.startsWith("Orchestrator Codex completed.");
-
-  if (!knownAutomationDraft) {
-    throw new Error("Composer already contains a non-automation draft; refusing to overwrite it: " + JSON.stringify(draftText.slice(0,120)));
-  }
-
-  // Composer is already focused. Clear only known stale automation text.
-  await send("Input.dispatchKeyEvent", {
-    type:"keyDown", key:"a", code:"KeyA",
-    modifiers:2,
-    windowsVirtualKeyCode:65, nativeVirtualKeyCode:65
-  });
-  await send("Input.dispatchKeyEvent", {
-    type:"keyUp", key:"a", code:"KeyA",
-    modifiers:2,
-    windowsVirtualKeyCode:65, nativeVirtualKeyCode:65
-  });
-  await send("Input.dispatchKeyEvent", {
-    type:"keyDown", key:"Backspace", code:"Backspace",
-    windowsVirtualKeyCode:8, nativeVirtualKeyCode:8
-  });
-  await send("Input.dispatchKeyEvent", {
-    type:"keyUp", key:"Backspace", code:"Backspace",
-    windowsVirtualKeyCode:8, nativeVirtualKeyCode:8
-  });
-
-  const deadline = Date.now() + 3000;
-  while (Date.now() < deadline) {
-    const state = await composerState(send);
-    if (state?.ok && !state.text) return;
-    await new Promise(r => setTimeout(r, 100));
-  }
-  throw new Error("Could not clear stale orchestrator automation draft safely");
+  throw new Error("Composer already contains a non-empty draft; refusing to overwrite it: " + JSON.stringify(draftText.slice(0,120)));
 }
 
 async function insertText(send, text) {
@@ -279,13 +241,11 @@ async function insertText(send, text) {
   if (!before?.ok) throw new Error("Composer disappeared before input");
 
   if (before.text) {
-    if (callbackId && before.text.includes(callbackId)) {
+    if (before.text === text) {
       console.log("PENDING_CALLBACK_DRAFT_REUSED:", callbackId);
       return before;
     }
-    console.log("STALE_AUTOMATION_DRAFT_FOUND:", JSON.stringify(before.text.slice(0,120)));
     await clearKnownAutomationDraft(send, before.text);
-    console.log("STALE_AUTOMATION_DRAFT_CLEARED");
   }
 
   // React-controlled textarea/input needs its native value setter + input event.
@@ -329,9 +289,10 @@ const committedUserTurnSelector = [
 
 const receiptExpression = receiptMatcherSource();
 const receiptDomExpression = `(root => {
-  const nodes=[...root.querySelectorAll(${JSON.stringify(committedUserTurnSelector)})].filter(n => (n.getAttribute('data-message-author-role') || n.getAttribute('data-turn')) === 'user' && !n.closest('[data-message-author-role="assistant"],[data-turn="assistant"],[data-orchestrator-composer="true"]'));
+  const normalizeReceiptText=${normalizeReceiptText.toString()};
+  const candidates=[...root.querySelectorAll(${JSON.stringify(committedUserTurnSelector)})];
   const clean=n=>{const c=n.cloneNode(true);c.querySelectorAll('blockquote,pre,code,[data-message-author-role="assistant"],[data-turn="assistant"],[data-orchestrator-composer="true"],[contenteditable="true"],textarea,input').forEach(x=>x.remove());return normalizeReceiptText(c.innerText||c.textContent||'');};
-  const seen=new Set();return nodes.map(n=>({text:clean(n),key:n.getAttribute('data-turn-key')||n.getAttribute('data-testid')||clean(n)})).filter(x=>x.text&&!seen.has(x.key)&&seen.add(x.key));
+  const seen=new Set();return candidates.map(n=>{const bubble=n.matches('[data-user-message-bubble]')?n:n.querySelector('[data-user-message-bubble]');const owner=n.getAttribute('data-message-author-role')||n.getAttribute('data-turn');if(owner&&owner!=='user'&&!bubble)return null;const key=n.getAttribute('data-turn-key')||n.getAttribute('data-testid');return {text:clean(bubble||n),key};}).filter(x=>x&&x.text&&x.key&&!seen.has(x.key)&&seen.add(x.key));
 })`;
 
 async function userMessageState(send) {
@@ -535,6 +496,12 @@ async function main() {
       console.log("CHAT_RECONCILE_PENDING:", callbackId);
       return;
     }
+    if (stored?.delivery_state === "DELIVERED") {
+      process.exitCode = 3;
+      console.log("CHAT_RECONCILE_PENDING:", callbackId);
+      return;
+    }
+    if (stored && stored.delivery_state !== "PENDING") throw new Error("Invalid callback delivery state");
 
     if (reconcileOnly) {
       console.log("CHAT_RECONCILE_PENDING:", callbackId);
@@ -545,14 +512,9 @@ async function main() {
     const composer = await waitForComposer(send);
     console.log("CHAT_COMPOSER_FOUND:", JSON.stringify(composer));
 
-    const existingComposer = await composerState(send);
-    if (!(callbackId && existingComposer?.text === message)) {
-      const beforeInputUrl = await evaluate(send, "location.href");
-      if (normalizeConversationUrl(beforeInputUrl) !== normalizeConversationUrl(expected)) throw new Error("Callback destination changed before input");
-      await insertText(send, message);
-    } else {
-      console.log("PENDING_CALLBACK_DRAFT_REUSED:", callbackId);
-    }
+    const beforeInputUrl = await evaluate(send, "location.href");
+    if (normalizeConversationUrl(beforeInputUrl) !== normalizeConversationUrl(expected)) throw new Error("Callback destination changed before input");
+    await insertText(send, message);
     updateDeliveryState("DRAFT_INSERTED");
     updateDeliveryState("SUBMISSION_ATTEMPTED");
     const verifyDestination = await evaluate(send, "location.href");
