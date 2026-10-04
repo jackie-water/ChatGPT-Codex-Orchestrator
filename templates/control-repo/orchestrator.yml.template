@@ -13,6 +13,18 @@ permissions:
   issues: read
 
 jobs:
+  register-chat:
+    if: startsWith(github.event.issue.title, '[CHAT-REGISTER]')
+    runs-on: [self-hosted, Windows, X64, {{RUNNER_LABEL}}]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Register explicit Chat callback route
+        shell: powershell
+        env:
+          ORCHESTRATOR_EVENT_PATH: ${{ github.event_path }}
+        run: ./scripts/register-chat.ps1 -EventPath $env:ORCHESTRATOR_EVENT_PATH
+
   run-codex:
     if: startsWith(github.event.issue.title, '[CODEX-RUN]')
     runs-on: [self-hosted, Windows, X64, {{RUNNER_LABEL}}]
