@@ -9,6 +9,7 @@ if (-not (Test-Path $ConfigPath)) { throw "Missing local config: $ConfigPath" }
 if (-not (Test-Path $RegistryPath)) { throw "Missing project registry: $RegistryPath" }
 
 . $ConfigPath
+. (Join-Path $PSScriptRoot "chat-route-registry.ps1")
 $registry = Get-Content -Raw $RegistryPath | ConvertFrom-Json
 $event = Get-Content -Raw $EventPath | ConvertFrom-Json
 
@@ -46,28 +47,17 @@ if ([string]::IsNullOrWhiteSpace($repoPath) -or -not (Test-Path $repoPath)) {
 }
 $repoPath = (Resolve-Path $repoPath).Path
 
-$reviewRoute = if ($req.PSObject.Properties.Name -contains "review_route" -and -not [string]::IsNullOrWhiteSpace([string]$req.review_route)) {
-  [string]$req.review_route
-} else {
-  [string]$project.default_review_route
+if (-not ($req.PSObject.Properties.Name -contains "review_route") -or [string]::IsNullOrWhiteSpace([string]$req.review_route)) {
+  throw "CHAT_ROUTE_REQUIRED: review_route must be supplied by the originating registered Chat"
 }
+$reviewRoute = [string]$req.review_route
 if ($reviewRoute -notmatch '^[a-z0-9][a-z0-9._-]{0,63}$') { throw "Invalid review_route: $reviewRoute" }
 
-$chatUrl = $null
-$chatVar = Get-Variable -Name "CHAT_ROUTES" -ErrorAction SilentlyContinue
-if ($chatVar -and $chatVar.Value -is [System.Collections.IDictionary] -and $chatVar.Value.Contains($reviewRoute)) {
-  $chatUrl = [string]$chatVar.Value[$reviewRoute]
+$routeRecord = Resolve-RegisteredChatRoute -ProjectKey $projectKey -Route $reviewRoute
+if (-not $routeRecord) {
+  throw "CHAT_ROUTE_UNREGISTERED: route '$reviewRoute' is not an active registered Chat for project '$projectKey'"
 }
-if ([string]::IsNullOrWhiteSpace($chatUrl)) {
-  $projectRouteVar = Get-Variable -Name "PROJECT_REVIEW_ROUTES" -ErrorAction SilentlyContinue
-  if ($projectRouteVar -and $projectRouteVar.Value -is [System.Collections.IDictionary] -and $projectRouteVar.Value.Contains($projectKey)) {
-    $chatUrl = [string]$projectRouteVar.Value[$projectKey]
-  }
-}
-if ([string]::IsNullOrWhiteSpace($chatUrl)) { throw "No reviewer Chat configured for project '$projectKey' route '$reviewRoute'" }
-if ($chatUrl -notmatch '^https://chatgpt\.com/(?:g/[^/]+/)?c/[A-Za-z0-9-]+(?:[/?#].*)?$') {
-  throw "Configured reviewer URL is not a normal ChatGPT conversation URL"
-}
+$chatUrl = [string]$routeRecord.chat_url
 
 $branch = [string]$req.target_branch
 if ([string]::IsNullOrWhiteSpace($branch) -or $branch -in @($defaultBranch,"main","master")) {
@@ -110,7 +100,7 @@ function Notify-PreCodexRejection([string]$Reason, [string]$RepairAction) {
   }
   $rejectionMessage = "[ORCHESTRATOR-AUTO callback_id=$rejectionCallbackId] CODEX-RUN issue #$($event.issue.number) was rejected BEFORE Codex started, so no Codex tokens were consumed. Reason: $Reason ACTION REQUIRED FOR THIS CHAT: $RepairAction Fetch rejected issue #$($event.issue.number). Preserve project, target branch, objective, review route, and every implementation requirement that is still valid. Correct only the prompt-policy defect. Before creating anything, check that no replacement CODEX-RUN already exists for this rejected issue. Then create a replacement CODEX-RUN using the SAME logical iteration $iteration/$effectiveMax. Do not ask the user because this is a deterministic prompt-format correction. Do not increment the implementation iteration."
   try {
-    & (Join-Path $PSScriptRoot "dispatch-chat-callback.ps1") -ProjectKey $projectKey -IssueNumber ([int]$event.issue.number) -ReviewRoute $reviewRoute -Message $rejectionMessage -CallbackId $rejectionCallbackId
+    & (Join-Path $PSScriptRoot "wake-chat.ps1") -ChatUrl $chatUrl -Message $rejectionMessage -CallbackId $rejectionCallbackId -QueueOnFailure
   } catch {
     Write-Warning "Could not notify reviewer Chat about pre-Codex rejection: $($_.Exception.Message)"
   }
@@ -448,7 +438,7 @@ try {
 
   $callbackId = "codex-$projectKey-$($event.issue.number)-$iteration-$commit"
   $wakeMessage = "[CODEX-AUTO callback_id=$callbackId] Project '$projectKey' Codex completed. Orchestrator issue #$($event.issue.number), iteration $iteration/$effectiveMax, repository $repository, branch $branch, commit $commit. Read ${checkpointBranch}:.codex/latest-run.md, inspect the exact recorded commit/diff and wrapper validation evidence, and return PASS, REVISE, or NEEDS_HUMAN. Treat callback_id as idempotent: do not create a duplicate successor CODEX-RUN for the same reviewed commit. PASS is review-only and must not merge. Merge requires the user's explicit approval for commit $commit."
-  & (Join-Path $PSScriptRoot "dispatch-chat-callback.ps1") -ProjectKey $projectKey -IssueNumber ([int]$event.issue.number) -ReviewRoute $reviewRoute -Message $wakeMessage -CallbackId $callbackId
+  & (Join-Path $PSScriptRoot "wake-chat.ps1") -ChatUrl $chatUrl -Message $wakeMessage -CallbackId $callbackId -QueueOnFailure
 
   if ($codexExit -ne 0) {
     throw "Codex execution failed with exit code $codexExit. Checkpoint was published and reviewer Chat was notified."
