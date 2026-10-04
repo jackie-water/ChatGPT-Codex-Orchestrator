@@ -55,6 +55,7 @@ foreach ($scriptName in @(
   "merge-approved.ps1",
   "publish-checkpoint.ps1",
   "publish-code-review.ps1",
+  "runtime-context.ps1",
   "chat-route-registry.ps1",
   "register-chat.ps1",
   "wake-chat.ps1",
