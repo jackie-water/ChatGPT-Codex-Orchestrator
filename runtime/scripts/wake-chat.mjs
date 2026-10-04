@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { callbackReceiptMatches } from "./callback-receipt.mjs";
+import { callbackReceiptMatches, normalizeReceiptText, receiptMatcherSource } from "./callback-receipt.mjs";
 const message = process.argv.slice(2).join(" ").trim();
 if (!message) {
   console.error("WAKE_CHAT_FAILED: missing message");
@@ -17,12 +17,16 @@ if (!expected) {
   process.exit(2);
 }
 
+function readDeliveryState() {
+  if (!callbackStateFile || !fs.existsSync(callbackStateFile)) return null;
+  const current = JSON.parse(fs.readFileSync(callbackStateFile,"utf8").replace(/^\uFEFF/,""));
+  if (current.routing_version !== "explicit-route-v1" || current.callback_id !== callbackId || current.chat_url !== expected || current.message !== message) throw new Error("Invalid callback state");
+  return current;
+}
+
 function updateDeliveryState(state, extra = {}) {
   if (!callbackStateFile) return;
-  try {
-    const current = fs.existsSync(callbackStateFile)
-      ? JSON.parse(fs.readFileSync(callbackStateFile,"utf8").replace(/^\uFEFF/,""))
-      : {};
+  const current = readDeliveryState() || {};
     const next = {
       ...current,
       ...extra,
@@ -36,9 +40,6 @@ function updateDeliveryState(state, extra = {}) {
     fs.mkdirSync(path.dirname(callbackStateFile),{recursive:true});
     fs.writeFileSync(temp,JSON.stringify(next,null,2)+"\n","utf8");
     fs.renameSync(temp,callbackStateFile);
-  } catch (err) {
-    console.warn("CALLBACK_STATE_UPDATE_FAILED:",err.message);
-  }
 }
 
 async function connect(wsUrl) {
@@ -326,24 +327,29 @@ const committedUserTurnSelector = [
   '[data-turn-key]:has([data-user-message-bubble])'
 ].join(',');
 
-const receiptExpression = `((${callbackReceiptMatches.toString()}));`;
+const receiptExpression = receiptMatcherSource();
+const receiptDomExpression = `(root => {
+  const nodes=[...root.querySelectorAll(${JSON.stringify(committedUserTurnSelector)})].filter(n => (n.getAttribute('data-message-author-role') || n.getAttribute('data-turn')) === 'user' && !n.closest('[data-message-author-role="assistant"],[data-turn="assistant"],[data-orchestrator-composer="true"]'));
+  const clean=n=>{const c=n.cloneNode(true);c.querySelectorAll('blockquote,pre,code,[data-message-author-role="assistant"],[data-turn="assistant"],[data-orchestrator-composer="true"],[contenteditable="true"],textarea,input').forEach(x=>x.remove());return normalizeReceiptText(c.innerText||c.textContent||'');};
+  const seen=new Set();return nodes.map(n=>({text:clean(n),key:n.getAttribute('data-turn-key')||n.getAttribute('data-testid')||clean(n)})).filter(x=>x.text&&!seen.has(x.key)&&seen.add(x.key));
+})`;
 
 async function userMessageState(send) {
   return evaluate(send, `(() => {
-    const roleNodes = [...new Set(document.querySelectorAll(${JSON.stringify(committedUserTurnSelector)}))].filter(n => !n.closest('[data-message-author-role="assistant"], [data-orchestrator-composer="true"]'));
-    const textOf = n => { const clone=n.cloneNode(true); clone.querySelectorAll('[data-message-author-role="assistant"],[data-orchestrator-composer="true"],[contenteditable="true"],textarea,input').forEach(x=>x.remove()); return (clone.innerText || clone.textContent || '').trim(); };
+    const roleNodes = ${receiptDomExpression}(document);
     return {
       count: roleNodes.length,
-      texts: roleNodes.map(textOf)
+      texts: roleNodes.map(x=>x.text)
     };
   })()`);
 }
 
 async function hasReceipt(send, callbackId, payload) {
   const result = await evaluate(send, `(() => {
-    const match = ${receiptExpression};
-    const nodes = [...new Set(document.querySelectorAll(${JSON.stringify(committedUserTurnSelector)}))].filter(n => !n.closest('[data-message-author-role="assistant"], [data-orchestrator-composer="true"]'));
-    return nodes.some(n => { const c=n.cloneNode(true); c.querySelectorAll('[data-message-author-role="assistant"],[data-orchestrator-composer="true"],[contenteditable="true"],textarea,input').forEach(x=>x.remove()); return match((c.innerText||c.textContent||''), ${JSON.stringify(callbackId)}, ${JSON.stringify(payload)}); });
+    if (location.href !== ${JSON.stringify(expected)}) return false;
+    const normalizeReceiptText = ${normalizeReceiptText.toString()};
+    const callbackReceiptMatches = ${callbackReceiptMatches.toString()};
+    return ${receiptDomExpression}(document).some(x => callbackReceiptMatches(x.text, ${JSON.stringify(callbackId)}, ${JSON.stringify(payload)}));
   })()`);
   return result === true;
 }
@@ -374,6 +380,7 @@ async function sendMessage(send) {
   // Never submit a form or synthesize Enter while a Stop/generating control is active.
   for (let i = 0; i < 120; i++) {
     const clicked = await evaluate(send, `(() => {
+      if (location.href !== ${JSON.stringify(expected)}) return {ok:false, reason:'destination-changed'};
       const composer = document.querySelector('[data-orchestrator-composer="true"]');
       if (!composer) return {ok:false, reason:'composer missing'};
 
@@ -522,6 +529,13 @@ async function main() {
       }
     }
 
+    const stored = readDeliveryState();
+    if (stored?.delivery_state === "SUBMISSION_ATTEMPTED" || stored?.delivery_state === "DRAFT_INSERTED") {
+      process.exitCode = 3;
+      console.log("CHAT_RECONCILE_PENDING:", callbackId);
+      return;
+    }
+
     if (reconcileOnly) {
       console.log("CHAT_RECONCILE_PENDING:", callbackId);
       process.exitCode = 3;
@@ -532,7 +546,7 @@ async function main() {
     console.log("CHAT_COMPOSER_FOUND:", JSON.stringify(composer));
 
     const existingComposer = await composerState(send);
-    if (!(callbackId && existingComposer?.text?.includes(callbackId))) {
+    if (!(callbackId && existingComposer?.text === message)) {
       const beforeInputUrl = await evaluate(send, "location.href");
       if (normalizeConversationUrl(beforeInputUrl) !== normalizeConversationUrl(expected)) throw new Error("Callback destination changed before input");
       await insertText(send, message);

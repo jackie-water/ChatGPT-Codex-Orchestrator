@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import vm from "node:vm";
 import { callbackReceiptMatches } from "../runtime/scripts/callback-receipt.mjs";
 
 const wake=()=>fs.readFileSync(new URL("../runtime/scripts/wake-chat.mjs",import.meta.url),"utf8");
@@ -33,6 +34,30 @@ test("receipt matcher is exact and whitespace tolerant",()=>{
   assert.equal(callbackReceiptMatches("[CODEX-AUTO callback_id=abc2] line one line two","abc",payload),false);
   assert.equal(callbackReceiptMatches("reference abc [CODEX-AUTO callback_id=abc] line one line two","abc",payload),false);
   assert.equal(callbackReceiptMatches("[CODEX-AUTO callback_id=abc] other","abc",payload),false);
+  assert.equal(callbackReceiptMatches("[CODEX-AUTO callback_id=aXb] line one line two","a.b",payload.replace("abc","a.b")),false);
+});
+
+test("shipped serialized matcher runs in a separate browser-like realm", async ()=>{
+  const {receiptMatcherSource}=await import("../runtime/scripts/callback-receipt.mjs");
+  const context={}; vm.createContext(context);
+  const matcher=vm.runInContext(`${receiptMatcherSource()}; callbackReceiptMatches`,context);
+  assert.equal(matcher("[CODEX-AUTO callback_id=a.b] line one line two","a.b","[CODEX-AUTO callback_id=a.b] line one line two"),true);
+  assert.equal(matcher("[CODEX-AUTO callback_id=aXb] line one line two","a.b","[CODEX-AUTO callback_id=a.b] line one line two"),false);
+});
+
+test("receipt and state paths are fail-closed and exact",()=>{
+  const js=wake();
+  const ps=fs.readFileSync(new URL("../runtime/scripts/wake-chat.ps1",import.meta.url),"utf8");
+  assert.match(js,/const receiptDomExpression/);
+  assert.match(js,/blockquote,pre,code/);
+  assert.match(js,/existingComposer\?\.text === message/);
+  assert.match(js,/delivery_state === "SUBMISSION_ATTEMPTED"/);
+  assert.match(js,/location\.href !==/);
+  assert.match(ps,/delivery_state -ne 'DELIVERED'/);
+  assert.match(ps,/WaitOne/);
+  assert.match(ps,/existing\.message -ne \$Message/);
+  assert.match(ps,/ERROR callback_id=/);
+  assert.match(ps,/previousReconcileOnly/);
 });
 
 test("queued callback delivery clears the native failure exit code",()=>{
