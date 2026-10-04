@@ -26,8 +26,7 @@ test("instructions renderer rejects unresolved configuration",()=>{
   }));
 });
 
-
-test("generated instructions teach Chats to publish issue-origin markers",()=>{
+test("generated instructions require one-time explicit Chat registration",()=>{
   const template=fs.readFileSync(new URL("../templates/chatgpt-project-instructions.md",import.meta.url),"utf8");
   const text=renderProjectInstructions(template,{
     projectKey:"demo",
@@ -35,7 +34,9 @@ test("generated instructions teach Chats to publish issue-origin markers",()=>{
     controlRepository:"owner/control",
     sandboxProjectKey:"sandbox-abcd1234"
   });
-  assert.match(text,/\[ORCHESTRATOR-ORIGIN issue=<ISSUE_NUMBER> project=demo\]/);
-  assert.match(text,/Multiple Chats may work concurrently/);
-  assert.match(text,/Never put a ChatGPT conversation URL in the GitHub issue/);
+  assert.match(text,/\[CHAT-REGISTER\]/);
+  assert.match(text,/\[CHAT-ROUTE-REGISTERED/);
+  assert.match(text,/must include the exact registered `review_route`/);
+  assert.match(text,/no default reviewer Chat and no fallback Chat/i);
+  assert.doesNotMatch(text,/ORCHESTRATOR-ORIGIN/);
 });
