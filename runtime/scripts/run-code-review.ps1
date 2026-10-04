@@ -116,10 +116,11 @@ try {
       $ErrorActionPreference = $previousProbePreference
     }
     if ($reviewEvidenceExists) {
+      $checkpointCommit = (git rev-parse "origin/$checkpointBranch").Trim().ToLowerInvariant()
       $callbackId = "code-review-existing-$projectKey-$reviewedCommit"
-      $message = "[CODE-REVIEW-AUTO callback_id=$callbackId] Independent Codex code review evidence already exists for project '$projectKey', branch $sourceBranch, commit $reviewedCommit. Read $($checkpointBranch):.codex/reviews/by-commit/$reviewedCommit.md and adjudicate the findings. Do not rerun Code Review for this exact commit."
+      $message = "[CODE-REVIEW-AUTO callback_id=$callbackId] Independent Codex code review evidence already exists for project '$projectKey', branch $sourceBranch, commit $reviewedCommit. Authoritative review: checkpoint_commit=$checkpointCommit path=$reviewEvidencePath. Read that exact file from the checkpoint commit and adjudicate the findings. Do not rerun Code Review for this exact commit."
       & (Join-Path $PSScriptRoot "wake-chat.ps1") -ChatUrl $chatUrl -Message $message -CallbackId $callbackId -QueueOnFailure
-      Write-Host "CODE_REVIEW_ALREADY_EXISTS commit=$reviewedCommit"
+      Write-Host "CODE_REVIEW_ALREADY_EXISTS commit=$reviewedCommit checkpoint=$checkpointCommit"
       return
     }
   }
@@ -164,10 +165,18 @@ try {
       "All changed files are documentation-only under the project policy, so independent Codex code review was skipped. Chat may continue its final review for this exact commit."
     )
     Set-Content -Path $reportFile -Value ($reportLines -join [Environment]::NewLine) -Encoding utf8
-    & (Join-Path $PSScriptRoot "publish-code-review.ps1") -RepoPath $repoPath -ProjectKey $projectKey -Repository $repository -CheckpointBranch $checkpointBranch -SourceBranch $sourceBranch -SourceCommit $reviewedCommit -ReportPath $reportFile
+    $publishOutput = @(& (Join-Path $PSScriptRoot "publish-code-review.ps1") -RepoPath $repoPath -ProjectKey $projectKey -Repository $repository -CheckpointBranch $checkpointBranch -SourceBranch $sourceBranch -SourceCommit $reviewedCommit -ReportPath $reportFile)
+    foreach ($line in $publishOutput) { Write-Host $line }
+    $publishLine = @($publishOutput | Where-Object { [string]$_ -match '^CODE_REVIEW_PUBLISHED ' } | Select-Object -Last 1)
+    if ($publishLine.Count -eq 0) { throw "Code review publication did not return immutable coordinates" }
+    $checkpointCommitMatch = [regex]::Match([string]$publishLine[0],'commit=([0-9a-fA-F]{40})')
+    $reviewFileMatch = [regex]::Match([string]$publishLine[0],'review_file=([^\s]+)')
+    if (-not $checkpointCommitMatch.Success -or -not $reviewFileMatch.Success) { throw "Code review publication coordinates are malformed" }
+    $checkpointCommit = $checkpointCommitMatch.Groups[1].Value.ToLowerInvariant()
+    $reviewEvidencePath = $reviewFileMatch.Groups[1].Value
 
     $callbackId = "code-review-docs-$projectKey-$reviewedCommit"
-    $message = "[CODE-REVIEW-AUTO callback_id=$callbackId] Code Review was skipped as docs-only for project '$projectKey', branch $sourceBranch, commit $reviewedCommit. Read $($checkpointBranch):.codex/reviews/by-commit/$reviewedCommit.md and continue final Chat review."
+    $message = "[CODE-REVIEW-AUTO callback_id=$callbackId] Code Review was skipped as docs-only for project '$projectKey', branch $sourceBranch, commit $reviewedCommit. Authoritative review: checkpoint_commit=$checkpointCommit path=$reviewEvidencePath. Read that exact file and continue final Chat review."
     & (Join-Path $PSScriptRoot "wake-chat.ps1") -ChatUrl $chatUrl -Message $message -CallbackId $callbackId -QueueOnFailure
     return
   }
@@ -244,10 +253,18 @@ try {
   )
   Set-Content -Path $reportFile -Value ($reportLines -join [Environment]::NewLine) -Encoding utf8
 
-  & (Join-Path $PSScriptRoot "publish-code-review.ps1") -RepoPath $repoPath -ProjectKey $projectKey -Repository $repository -CheckpointBranch $checkpointBranch -SourceBranch $sourceBranch -SourceCommit $reviewedCommit -ReportPath $reportFile
+  $publishOutput = @(& (Join-Path $PSScriptRoot "publish-code-review.ps1") -RepoPath $repoPath -ProjectKey $projectKey -Repository $repository -CheckpointBranch $checkpointBranch -SourceBranch $sourceBranch -SourceCommit $reviewedCommit -ReportPath $reportFile)
+  foreach ($line in $publishOutput) { Write-Host $line }
+  $publishLine = @($publishOutput | Where-Object { [string]$_ -match '^CODE_REVIEW_PUBLISHED ' } | Select-Object -Last 1)
+  if ($publishLine.Count -eq 0) { throw "Code review publication did not return immutable coordinates" }
+  $checkpointCommitMatch = [regex]::Match([string]$publishLine[0],'commit=([0-9a-fA-F]{40})')
+  $reviewFileMatch = [regex]::Match([string]$publishLine[0],'review_file=([^\s]+)')
+  if (-not $checkpointCommitMatch.Success -or -not $reviewFileMatch.Success) { throw "Code review publication coordinates are malformed" }
+  $checkpointCommit = $checkpointCommitMatch.Groups[1].Value.ToLowerInvariant()
+  $reviewEvidencePath = $reviewFileMatch.Groups[1].Value
 
   $callbackId = "code-review-$projectKey-$($event.issue.number)-$reviewedCommit"
-  $message = "[CODE-REVIEW-AUTO callback_id=$callbackId] Independent Codex code review finished for project '$projectKey', branch $sourceBranch, commit $reviewedCommit. Review exit=$reviewExit, tokens=$reviewTokens. Read $($checkpointBranch):.codex/reviews/by-commit/$reviewedCommit.md and independently adjudicate every finding before final PASS/REVISE/NEEDS_HUMAN. Treat this review as valid only for commit $reviewedCommit."
+  $message = "[CODE-REVIEW-AUTO callback_id=$callbackId] Independent Codex code review finished for project '$projectKey', branch $sourceBranch, commit $reviewedCommit. Review exit=$reviewExit, tokens=$reviewTokens. Authoritative review: checkpoint_commit=$checkpointCommit path=$reviewEvidencePath. Read that exact file from the checkpoint commit and independently adjudicate every finding before final PASS/REVISE/NEEDS_HUMAN. Treat this review as valid only for commit $reviewedCommit."
   & (Join-Path $PSScriptRoot "wake-chat.ps1") -ChatUrl $chatUrl -Message $message -CallbackId $callbackId -QueueOnFailure
 
   if ($reviewExit -ne 0) { throw "Codex code review failed with exit code $reviewExit; review evidence and Chat callback were published." }
