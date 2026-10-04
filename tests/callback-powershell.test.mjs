@@ -25,9 +25,11 @@ test("native callback lifecycle uses isolated shipped PowerShell entrypoints", {
     const shim=path.join(scripts,"wake-chat.mjs");
     fs.writeFileSync(shim,`import fs from 'node:fs';
 const file=process.env.CODEX_CALLBACK_STATE_FILE;
+const item=JSON.parse(fs.readFileSync(file,'utf8'));
+if(process.env.ARGV_MARKER) fs.writeFileSync(process.env.ARGV_MARKER,process.argv.slice(2).join(' ')+'\\n'+item.message);
 if(process.env.TEST_MODE==='pending'){process.exitCode=3;process.exit();}
 if(process.env.TEST_MODE==='error'){process.exitCode=1;process.exit();}
-const item=JSON.parse(fs.readFileSync(file,'utf8')); item.delivery_state='DELIVERED'; fs.writeFileSync(file,JSON.stringify(item)+'\\n');
+item.delivery_state='DELIVERED'; fs.writeFileSync(file,JSON.stringify(item)+'\\n');
 const crypto=await import('node:crypto'); console.log('CHAT_STATE_FINGERPRINT:'+crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex'));`);
     const env={...process.env,HOME:home,USERPROFILE:home,TEST_MODE:"pending"};
     const pending=path.join(instance,"pending-wakes"); fs.mkdirSync(pending,{recursive:true});
@@ -42,6 +44,25 @@ const crypto=await import('node:crypto'); console.log('CHAT_STATE_FINGERPRINT:'+
     fs.writeFileSync(path.join(pending,"bad.json"),JSON.stringify({...record("bad"),routing_version:"legacy"})); result=run(wake,["-ReconcileOnly","-CallbackId","bad"],env); assert.notEqual(result.status,0); assert.equal(fs.existsSync(path.join(pending,"bad.json")),true);
     result=run(wake,["-ReconcileOnly","-CallbackId","bad/id"],env); assert.notEqual(result.status,0); assert.equal(fs.existsSync(path.join(pending,"bad_id.json")),false);
     const other=path.join(home,".chatgpt-codex-orchestrator","instances","other","pending-wakes"); fs.mkdirSync(other,{recursive:true}); fs.writeFileSync(path.join(other,"done.json"),JSON.stringify(record("done"))); assert.equal(fs.existsSync(path.join(other,"done.json")),true);
+
+    for (const [id,messageArgs] of [["missing",[]],["blank",["-Message","   "]]]) {
+      const sentinel=path.join(pending,id+"-unrelated.json"), sentinelBytes=Buffer.from("sentinel\\n"), marker=path.join(dir,id+".marker");
+      fs.writeFileSync(sentinel,sentinelBytes); const before=fs.readdirSync(pending);
+      const missingResult=run(wake,["-ChatUrl","https://chatgpt.com/c/test","-CallbackId",id,"-QueueOnFailure",...messageArgs],{...env,TEST_MODE:"success",ARGV_MARKER:marker});
+      assert.notEqual(missingResult.status,0); assert.match(missingResult.stderr+missingResult.stdout,/Message is required/); assert.equal(fs.existsSync(marker),false);
+      assert.equal(fs.existsSync(path.join(pending,id+".json")),false); assert.deepEqual(fs.readdirSync(pending),before); assert.deepEqual(fs.readFileSync(sentinel),sentinelBytes);
+    }
+
+    const reconcileId="spaces-reconcile", reconcileMessage="  payload  ", reconcileMarker=path.join(dir,"reconcile.marker");
+    fs.writeFileSync(path.join(pending,reconcileId+".json"),JSON.stringify({...record(reconcileId),message:reconcileMessage}));
+    result=run(wake,["-ReconcileOnly","-CallbackId",reconcileId],{...env,TEST_MODE:"success",ARGV_MARKER:reconcileMarker});
+    assert.equal(result.status,0); assert.equal(fs.readFileSync(reconcileMarker,"utf8"),reconcileMessage+"\\n"+reconcileMessage); assert.equal(fs.existsSync(path.join(pending,reconcileId+".json")),false);
+
+    const retryId="spaces-retry", retryMessage="  payload  ", retryMarker=path.join(dir,"retry.marker");
+    result=run(wake,["-ChatUrl","https://chatgpt.com/c/test","-CallbackId",retryId,"-Message",retryMessage,"-QueueOnFailure"],{...env,TEST_MODE:"error"});
+    assert.equal(result.status,0); const retryPath=path.join(pending,retryId+".json"); assert.equal(JSON.parse(fs.readFileSync(retryPath,"utf8")).message,retryMessage);
+    result=run(wake,["-ReconcileOnly","-CallbackId",retryId],{...env,TEST_MODE:"success",ARGV_MARKER:retryMarker});
+    assert.equal(result.status,0); assert.equal(fs.readFileSync(retryMarker,"utf8"),retryMessage+"\\n"+retryMessage); assert.equal(fs.existsSync(retryPath),false);
   } finally { fs.rmSync(dir,{recursive:true,force:true}); }
 });
 
