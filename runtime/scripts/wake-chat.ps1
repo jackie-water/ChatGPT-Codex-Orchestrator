@@ -24,9 +24,17 @@ if ([string]::IsNullOrWhiteSpace($instanceId)) { throw "Missing orchestrator ins
 if ($ReconcileOnly -and $CallbackId -notmatch '^[A-Za-z0-9._-]{1,160}$') { throw "Invalid CallbackId before pending-state read" }
 $mutex = $null
 $mutexOwned = $false
+$mutexIdentity = $null
+function Get-CallbackFingerprint([string]$Path) {
+  if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
+  return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+try {
+  $sha = [System.Security.Cryptography.SHA256]::Create()
+  try { $mutexIdentity = ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes(([IO.Path]::GetFullPath($pendingDir).TrimEnd('\') + '|' + $instanceId + '|' + $CallbackId)))).Replace('-','').ToLowerInvariant()).Substring(0,32) } finally { $sha.Dispose() }
 if ($ReconcileOnly) {
   if ([string]::IsNullOrWhiteSpace($CallbackId)) { throw "ReconcileOnly requires CallbackId" }
-  $mutex = [Threading.Mutex]::new($false, "Local\CodexCallback-$instanceId-$pendingRoot-$CallbackId")
+  $mutex = [Threading.Mutex]::new($false, "Local\CodexCallback-$mutexIdentity")
   if (-not $mutex.WaitOne(30000)) { throw "Callback is already being processed: $CallbackId" }
   $mutexOwned = $true
   trap { if ($mutex) { $mutex.ReleaseMutex(); $mutex.Dispose(); $mutex = $null }; break }
@@ -56,11 +64,14 @@ if (-not $ReconcileOnly -and [string]::IsNullOrWhiteSpace($CallbackId)) {
 
 if ($CallbackId -notmatch '^[A-Za-z0-9._-]{1,160}$') { throw "CallbackId contains unsupported characters" }
 
+$sha = [System.Security.Cryptography.SHA256]::Create()
+try { $mutexIdentity = ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes(([IO.Path]::GetFullPath($pendingDir).TrimEnd('\') + '|' + $instanceId + '|' + $CallbackId)))).Replace('-','').ToLowerInvariant()).Substring(0,32) } finally { $sha.Dispose() }
+
 if (-not $env:ORCHESTRATOR_BROWSER_DEBUG_PORT) { $env:ORCHESTRATOR_BROWSER_DEBUG_PORT = "9333" }
 
 $pendingPath = Join-Path $pendingDir ($CallbackId + ".json")
 if ([IO.Path]::GetFullPath($pendingPath) -ne ($pendingRoot + $CallbackId + '.json')) { throw "Unsafe callback path" }
-if (-not $mutex) { $mutex = [Threading.Mutex]::new($false, "Local\CodexCallback-$instanceId-$pendingRoot-$CallbackId"); if (-not $mutex.WaitOne(30000)) { throw "Callback is already being processed: $CallbackId" }; $mutexOwned = $true }
+if (-not $mutex) { $mutex = [Threading.Mutex]::new($false, "Local\CodexCallback-$mutexIdentity"); if (-not $mutex.WaitOne(30000)) { throw "Callback is already being processed: $CallbackId" }; $mutexOwned = $true }
 
 if ($QueueOnFailure) {
   New-Item -ItemType Directory -Force -Path $pendingDir | Out-Null
@@ -87,7 +98,7 @@ if ($QueueOnFailure) {
     }
     $pending | ConvertTo-Json -Depth 4 | Set-Content -Path $pendingPath -Encoding utf8
   }
-  $recordVersion = [string]((Get-Content -Raw $pendingPath | ConvertFrom-Json).queued_at_utc)
+  $recordVersion = Get-CallbackFingerprint $pendingPath
 }
 
 try {
@@ -103,7 +114,9 @@ try {
     if ($QueueOnFailure -or $ReconcileOnly) {
       if (-not (Test-Path $pendingPath)) { throw 'Callback record disappeared before cleanup' }
       $after = Get-Content -Raw $pendingPath | ConvertFrom-Json
-      if ([string]$after.callback_id -ne $CallbackId -or [string]$after.routing_version -ne 'explicit-route-v1' -or [string]$after.chat_url -ne $targetChatUrl -or [string]$after.message -ne $Message -or [string]$after.delivery_state -ne 'DELIVERED' -or ($recordVersion -and [string]$after.queued_at_utc -ne $recordVersion)) { throw 'Verified callback record changed or is not delivered' }
+      if ([string]$after.callback_id -ne $CallbackId -or [string]$after.routing_version -ne 'explicit-route-v1' -or [string]$after.chat_url -ne $targetChatUrl -or [string]$after.message -ne $Message -or [string]$after.delivery_state -ne 'DELIVERED') { throw 'Verified callback record changed or is not delivered' }
+      $recordVersion = Get-CallbackFingerprint $pendingPath
+      if (-not $recordVersion) { throw 'Callback record disappeared before cleanup' }
       Remove-Item $pendingPath -Force -ErrorAction Stop
       if (Test-Path $pendingPath) { throw 'Callback cleanup failed' }
     }
@@ -129,5 +142,8 @@ try {
   $env:CODEX_CALLBACK_ID = $previousCallbackId
   $env:CODEX_CALLBACK_STATE_FILE = $previousStateFile
   if ($null -eq $previousReconcileOnly) { Remove-Item Env:CODEX_RECONCILE_ONLY -ErrorAction SilentlyContinue } else { $env:CODEX_RECONCILE_ONLY = $previousReconcileOnly }
-  if ($mutexOwned -and $mutex) { $mutex.ReleaseMutex(); $mutex.Dispose() }
+  if ($mutexOwned -and $mutex) { $mutex.ReleaseMutex(); $mutex.Dispose(); $mutexOwned = $false }
+}
+} finally {
+  if ($mutexOwned -and $mutex) { try { $mutex.ReleaseMutex() } catch {} ; $mutex.Dispose() }
 }

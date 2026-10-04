@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
-import { callbackReceiptMatches } from "../runtime/scripts/callback-receipt.mjs";
+import { callbackReceiptMatches, receiptDomSource } from "../runtime/scripts/callback-receipt.mjs";
 
 const wake=()=>fs.readFileSync(new URL("../runtime/scripts/wake-chat.mjs",import.meta.url),"utf8");
 
@@ -64,4 +64,35 @@ test("queued callback delivery clears the native failure exit code",()=>{
   const text=fs.readFileSync(new URL("../runtime/scripts/wake-chat.ps1",import.meta.url),"utf8");
   assert.match(text,/if \(-not \$QueueOnFailure\)[\s\S]*?throw "Normal Chat wake failed with exit code \$wakeExit"/);
   assert.match(text,/CHAT_WAKE_QUEUED[\s\S]*?\$global:LASTEXITCODE = 0/);
+});
+
+test("shipped receipt extractor accepts only canonical user-owned turns",()=>{
+  const make=(attrs,text,parent=null)=>({parentElement:parent,innerText:text,textContent:text,getAttribute:k=>attrs[k]||null,matches:s=>s.includes('[data-user-message-bubble]')&&attrs.bubble==='1',querySelector:s=>null,cloneNode:()=>({innerText:text,textContent:text,querySelectorAll:()=>[]})});
+  const root={};
+  const userParent=make({'data-testid':'conversation-turn-a','data-turn':'user'},'');
+  const user=make({bubble:'1'},'[CODEX-AUTO callback_id=a] ok',userParent);
+  const assistantParent=make({'data-testid':'conversation-turn-b','data-turn':'assistant'},'');
+  const assistantBubble=make({bubble:'1'},'[CODEX-AUTO callback_id=a] ok',assistantParent);
+  const noCanonical=make({'data-message-author-role':'user','data-message-id':'m'},'[CODEX-AUTO callback_id=a] ok');
+  root.querySelectorAll=()=>[user,assistantBubble,noCanonical];
+  const context={}; vm.createContext(context);
+  const extract=vm.runInContext(`(${receiptDomSource()})`,context);
+  assert.deepEqual(extract(root),[{text:'[CODEX-AUTO callback_id=a] ok',key:'conversation-turn-a'}]);
+});
+
+test("shipped wake path guards the mutation and state transitions",()=>{
+  const js=wake();
+  assert.match(js,/actual !== \$\{JSON\.stringify\(message\)\}/);
+  assert.match(js,/if \(busy\) return \{ok:false, reason:'chat-busy-generating'\}/);
+  assert.match(js,/updateDeliveryState\("SUBMISSION_ATTEMPTED"\);[\s\S]*?sendMessage/);
+  assert.match(js,/state\.text === text/);
+  assert.match(js,/Callback state disappeared/);
+});
+
+test("PowerShell lifecycle uses separator-safe identity and full-file protection",()=>{
+  const ps=fs.readFileSync(new URL("../runtime/scripts/wake-chat.ps1",import.meta.url),"utf8");
+  assert.match(ps,/CodexCallback-\$mutexIdentity/);
+  assert.doesNotMatch(ps,/CodexCallback-\$instanceId-\$pendingRoot/);
+  assert.match(ps,/Get-FileHash -LiteralPath \$Path -Algorithm SHA256/);
+  assert.match(ps,/try \{[\s\S]*?finally \{[\s\S]*?mutexOwned/);
 });

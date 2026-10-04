@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { callbackReceiptMatches, normalizeReceiptText, receiptMatcherSource } from "./callback-receipt.mjs";
+import { callbackReceiptMatches, normalizeReceiptText, receiptMatcherSource, receiptDomSource } from "./callback-receipt.mjs";
 const message = process.argv.slice(2).join(" ").trim();
 if (!message) {
   console.error("WAKE_CHAT_FAILED: missing message");
@@ -26,7 +26,9 @@ function readDeliveryState() {
 
 function updateDeliveryState(state, extra = {}) {
   if (!callbackStateFile) return;
-  const current = readDeliveryState() || {};
+  if (!fs.existsSync(callbackStateFile)) throw new Error("Callback state disappeared");
+  const current = readDeliveryState();
+  if (!current) throw new Error("Callback state disappeared");
     const next = {
       ...current,
       ...extra,
@@ -227,7 +229,7 @@ async function composerState(send) {
   return evaluate(send, `(() => {
     const el = document.querySelector('[data-orchestrator-composer="true"]');
     if (!el) return {ok:false, text:null};
-    const text = (el.innerText ?? el.value ?? el.textContent ?? '').trim();
+    const text = (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement ? el.value : (el.innerText ?? el.textContent ?? '')).trim();
     return {ok:true, text};
   })()`);
 }
@@ -275,25 +277,14 @@ async function insertText(send, text) {
   const deadline = Date.now() + 7000;
   while (Date.now() < deadline) {
     const state = await composerState(send);
-    if (state?.text && (callbackId ? state.text.includes(callbackId) : state.text.includes(text.slice(0, Math.min(60, text.length))))) return state;
+    if (state?.text === text) return state;
     await new Promise(r => setTimeout(r, 100));
   }
   throw new Error("Text reached the browser but the ChatGPT composer state did not register it");
 }
 
-const committedUserTurnSelector = [
-  '[data-testid^="conversation-turn-"][data-turn="user"]',
-  '[data-message-author-role="user"]',
-  '[data-turn-key]:has([data-user-message-bubble])'
-].join(',');
-
 const receiptExpression = receiptMatcherSource();
-const receiptDomExpression = `(root => {
-  const normalizeReceiptText=${normalizeReceiptText.toString()};
-  const candidates=[...root.querySelectorAll(${JSON.stringify(committedUserTurnSelector)})];
-  const clean=n=>{const c=n.cloneNode(true);c.querySelectorAll('blockquote,pre,code,[data-message-author-role="assistant"],[data-turn="assistant"],[data-orchestrator-composer="true"],[contenteditable="true"],textarea,input').forEach(x=>x.remove());return normalizeReceiptText(c.innerText||c.textContent||'');};
-  const seen=new Set();return candidates.map(n=>{const bubble=n.matches('[data-user-message-bubble]')?n:n.querySelector('[data-user-message-bubble]');const owner=n.getAttribute('data-message-author-role')||n.getAttribute('data-turn');if(owner&&owner!=='user'&&!bubble)return null;const key=n.getAttribute('data-turn-key')||n.getAttribute('data-testid');return {text:clean(bubble||n),key};}).filter(x=>x&&x.text&&x.key&&!seen.has(x.key)&&seen.add(x.key));
-})`;
+const receiptDomExpression = `(${receiptDomSource()})`;
 
 async function userMessageState(send) {
   return evaluate(send, `(() => {
@@ -344,6 +335,8 @@ async function sendMessage(send) {
       if (location.href !== ${JSON.stringify(expected)}) return {ok:false, reason:'destination-changed'};
       const composer = document.querySelector('[data-orchestrator-composer="true"]');
       if (!composer) return {ok:false, reason:'composer missing'};
+      const actual = composer instanceof HTMLInputElement || composer instanceof HTMLTextAreaElement ? composer.value : (composer.innerText ?? composer.textContent ?? '');
+      if (actual !== ${JSON.stringify(message)}) return {ok:false, reason:'draft-changed'};
 
       const roots = [];
       let node = composer;
@@ -374,6 +367,7 @@ async function sendMessage(send) {
       const busy = buttons.some(b => !b.disabled && /(^|\\s)(stop|cancel)(\\s|$)|stop generating|cancel generation/.test(label(b)));
       const sendButton = buttons.find(b => !b.disabled && /send/.test(label(b)));
 
+      if (busy) return {ok:false, reason:'chat-busy-generating'};
       if (sendButton) {
         sendButton.el.click();
         return {
@@ -382,8 +376,6 @@ async function sendMessage(send) {
           button:{aria:sendButton.aria,testid:sendButton.testid,title:sendButton.title,type:sendButton.type,text:sendButton.text}
         };
       }
-
-      if (busy) return {ok:false, reason:'chat-busy-generating'};
 
       const submitButton = buttons.find(b => !b.disabled && b.type === 'submit' && !/(stop|cancel)/.test(label(b)));
       if (submitButton) {
@@ -516,11 +508,13 @@ async function main() {
     if (normalizeConversationUrl(beforeInputUrl) !== normalizeConversationUrl(expected)) throw new Error("Callback destination changed before input");
     await insertText(send, message);
     updateDeliveryState("DRAFT_INSERTED");
-    updateDeliveryState("SUBMISSION_ATTEMPTED");
     const verifyDestination = await evaluate(send, "location.href");
     if (normalizeConversationUrl(verifyDestination) !== normalizeConversationUrl(expected)) throw new Error("Callback destination changed before submission");
 
-    const sendResult = await sendMessage(send);
+    updateDeliveryState("SUBMISSION_ATTEMPTED");
+    let sendResult;
+    try { sendResult = await sendMessage(send); }
+    catch (error) { if (String(error.message).includes('within 60 seconds')) updateDeliveryState("DRAFT_INSERTED"); throw error; }
     console.log("CHAT_WAKE_SENT:", JSON.stringify(sendResult));
 
     const confirmed = await confirmSubmission(send, callbackId, message, 30000);
