@@ -26,6 +26,10 @@ export const ERROR_CATALOG={
   "CALLBACK-002":"Chat composer was not found.",
   "CALLBACK-003":"Callback text reached ChatGPT but submission was not confirmed.",
   "CALLBACK-004":"Callback was queued for retry.",
+  "ROUTE-001":"This Chat has not completed explicit callback registration.",
+  "ROUTE-002":"The supplied Chat review route is missing, malformed, inactive, or unregistered.",
+  "ROUTE-003":"Chat route registration callback is still pending or failed.",
+  "ROUTE-004":"A callback could not be confirmed as delivered to its pinned Chat."
   "REVIEW-001":"Independent Codex review command is unavailable.",
   "REVIEW-002":"Requested reviewed commit became stale.",
   "MERGE-001":"Approved commit does not match the branch head.",
