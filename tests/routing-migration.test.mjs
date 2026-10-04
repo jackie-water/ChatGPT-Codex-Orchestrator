@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import vm from "node:vm";
 import {removeLegacyDefaultReviewRoutes} from "../src/lib/control-env.mjs";
+import {receiptDomSource} from "../runtime/scripts/callback-receipt.mjs";
 
 test("legacy project routes are removed without changing other registry fields",()=>{
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),"routing-migration-"));
@@ -39,10 +41,15 @@ test("existing install upgrade retires origin discovery runtime",()=>{
 test("new callback delivery has explicit state transitions",()=>{
   const ps=fs.readFileSync(new URL("../runtime/scripts/wake-chat.ps1",import.meta.url),"utf8");
   const js=fs.readFileSync(new URL("../runtime/scripts/wake-chat.mjs",import.meta.url),"utf8");
+  const receipt=fs.readFileSync(new URL("../runtime/scripts/callback-receipt.mjs",import.meta.url),"utf8");
   assert.match(ps,/routing_version = \"explicit-route-v1\"/);
   assert.match(ps,/delivery_state = \"PENDING\"/);
   assert.match(js,/updateDeliveryState\(\"DRAFT_INSERTED\"\)/);
   assert.match(js,/updateDeliveryState\(\"DELIVERED\"/);
-  assert.match(js,/data-message-author-role/);
-  assert.match(js,/user/);
+  assert.match(js,/receiptDomSource\(\)/g);
+  assert.match(receipt,/data-message-author-role="user"/);
+  assert.doesNotMatch(js,/body\.innerText|capture-chat-origins|origin-router-loop/);
+  const extract=vm.runInNewContext(`(${receiptDomSource()})`,{});
+  const user={attrs:{"data-message-id":"m1","data-message-author-role":"user"},parentElement:null,innerText:"[CODEX-AUTO callback_id=x] ok",textContent:"[CODEX-AUTO callback_id=x] ok",getAttribute(k){return this.attrs[k]??null},matches(){return false},closest(){return null},querySelector(){return null},querySelectorAll(){return []},cloneNode(){return this}};
+  assert.deepEqual(JSON.parse(JSON.stringify(extract({querySelectorAll(){return [user]}}))),[{text:"[CODEX-AUTO callback_id=x] ok",key:"m1"}]);
 });

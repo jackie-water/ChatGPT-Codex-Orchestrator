@@ -4,6 +4,8 @@ This checklist defines when the Windows-first v0.1 is ready for beta testing.
 
 The test environment must be isolated. Existing production orchestrators, runners, browser profiles, callback queues and project repositories are not test fixtures.
 
+Callback receipt and PowerShell lifecycle tests use isolated synthetic fixtures; live queue/browser reconciliation remains a separate E2E step and is not part of these tests.
+
 ## A. Beginner installation
 
 - [ ] A fresh Windows user can start with only the repository link.
