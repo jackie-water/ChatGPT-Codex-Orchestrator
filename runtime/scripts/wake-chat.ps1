@@ -7,7 +7,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$Config = Join-Path $HOME ".chatgpt-codex-orchestrator\config.ps1"
+. (Join-Path $PSScriptRoot "runtime-context.ps1")
+$Config = Get-OrchestratorConfigPath
 if (-not (Test-Path $Config)) { throw "Missing local config: $Config" }
 . $Config
 
@@ -32,7 +33,7 @@ if ($CallbackId -notmatch '^[A-Za-z0-9._-]{1,160}$') { throw "CallbackId contain
 
 if (-not $env:ORCHESTRATOR_BROWSER_DEBUG_PORT) { $env:ORCHESTRATOR_BROWSER_DEBUG_PORT = "9333" }
 
-$pendingDir = Join-Path $HOME ".chatgpt-codex-orchestrator\pending-wakes"
+$pendingDir = Get-OrchestratorPendingWakeDir
 $pendingPath = Join-Path $pendingDir ($CallbackId + ".json")
 
 $previousChatUrl = $env:ORCHESTRATOR_CHAT_URL
