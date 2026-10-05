@@ -46,6 +46,7 @@ After Node bootstrap:
 - setup: `node src/cli.mjs setup --json --language <en|zh-CN>`
 - save a verified user answer: `node src/cli.mjs answer --action <action_id> --value <value> --json`
 - resume: `node src/cli.mjs resume --json`
+- refresh runtime: `node src/cli.mjs refresh-runtime --json`
 - doctor: `node src/cli.mjs doctor --json`
 - status: `node src/cli.mjs status --json`
 - repair: `node src/cli.mjs repair --json`

@@ -9,7 +9,7 @@ import { t, normalizeLanguage } from "./lib/i18n.mjs";
 import { ERROR_CATALOG } from "./lib/errors.mjs";
 import { sanitizeObject } from "./lib/sanitize.mjs";
 import { submitDiagnosticReport } from "./lib/reporting.mjs";
-import { prepareControlEnvironment, activateTargetProject, upgradeControlEnvironment } from "./lib/control-env.mjs";
+import { prepareControlEnvironment, activateTargetProject, upgradeControlEnvironment, refreshControlRuntime } from "./lib/control-env.mjs";
 import { renderProjectInstructions } from "./lib/project-instructions.mjs";
 import { ensureInstallerChatRegistration } from "./lib/chat-registration.mjs";
 import {
@@ -762,6 +762,20 @@ function repair() {
   emit({status:"PASS",preferred_language:lang,message:t(lang,"repair.success"),repaired:["runner","reviewer_browser","pending_callbacks","preflight"],runtime:runtimeChecks(state)});
 }
 
+function refreshRuntime() {
+  const state=loadState();
+  const lang=ensureStateLanguage(state);
+  try {
+    const result=refreshControlRuntime({state,sourceRoot:process.cwd()});
+    state.runtime_refreshed_at=new Date().toISOString();
+    if(result.changed) state.control_commit=spawnSafeSync("git",["rev-parse","HEAD"],{cwd:state.control_clone_path,encoding:"utf8"}).stdout.trim();
+    saveState(state);
+    emit({status:"PASS",preferred_language:lang,message:"Control runtime refresh completed",...result});
+  } catch(error) {
+    emit({status:"ERROR",error_id:"RUNTIME-REFRESH-001",recoverable:true,preferred_language:lang,message:"Control runtime refresh was not completed",details:String(error.message||error)},1);
+  }
+}
+
 function reportProblem() {
   const state=loadState();
   const lang=ensureStateLanguage(state);
@@ -807,8 +821,9 @@ else if (command==="smoke-approve") smokeApproveCommand();
 else if (command==="doctor") doctor();
 else if (command==="status") status();
 else if (command==="repair") repair();
+else if (command==="refresh-runtime") refreshRuntime();
 else if (command==="report-problem") reportProblem();
 else if (command==="submit-report") submitReport();
 else if (command==="answer") answer();
 else if (command==="errors") emit({status:"PASS",errors:ERROR_CATALOG});
-else emit({status:"PASS",message:"Commands: dry-run, setup, resume, answer, github-login, codex-login, codex-open, smoke-status, smoke-review, smoke-approve, doctor, status, repair, report-problem, submit-report, errors"});
+else emit({status:"PASS",message:"Commands: dry-run, setup, resume, refresh-runtime, answer, github-login, codex-login, codex-open, smoke-status, smoke-review, smoke-approve, doctor, status, repair, report-problem, submit-report, errors"});

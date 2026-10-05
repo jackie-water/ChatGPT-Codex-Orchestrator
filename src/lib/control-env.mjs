@@ -296,6 +296,37 @@ export function upgradeControlEnvironment({state,sourceRoot=process.cwd(),home=o
   };
 }
 
+export function refreshControlRuntime({state,sourceRoot=process.cwd()}){
+  if(!state?.control_clone_path||!fs.existsSync(path.join(state.control_clone_path,".git"))){
+    throw new Error("Existing control clone is unavailable for runtime refresh");
+  }
+  if(!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(String(state.runner_label||""))){
+    throw new Error("Existing runner identity is incomplete or invalid for runtime refresh");
+  }
+
+  const scriptsSource=path.join(sourceRoot,"runtime","scripts");
+  const workflowTemplatePath=path.join(sourceRoot,"templates","control-repo","orchestrator.yml.template");
+  if(!fs.existsSync(scriptsSource)||!fs.existsSync(workflowTemplatePath)){
+    throw new Error("Current runtime source tree is incomplete");
+  }
+
+  const scriptsDir=path.join(state.control_clone_path,"scripts");
+  copyDirectory(scriptsSource,scriptsDir);
+  for(const name of RETIRED_ROUTING_SCRIPTS) fs.rmSync(path.join(scriptsDir,name),{force:true});
+
+  const workflowPath=path.join(state.control_clone_path,".github","workflows","orchestrator.yml");
+  fs.mkdirSync(path.dirname(workflowPath),{recursive:true});
+  fs.writeFileSync(workflowPath,renderWorkflow(
+    fs.readFileSync(workflowTemplatePath,"utf8"),
+    {runnerLabel:state.runner_label}
+  ));
+
+  return {
+    ...commitControlRepo(state.control_clone_path),
+    retired_scripts:RETIRED_ROUTING_SCRIPTS
+  };
+}
+
 export function prepareControlEnvironment({
   installationId,
   targetRepository,
