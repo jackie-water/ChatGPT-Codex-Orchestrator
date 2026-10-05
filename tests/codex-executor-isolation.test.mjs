@@ -22,7 +22,8 @@ test("implementation and independent review use isolated Codex exec sessions", (
     assert.match(source, /exec --ignore-user-config/);
     for (const setting of isolation) assert.match(source, new RegExp(setting.replaceAll(".", "\\.")));
   }
-  assert.match(runner, /exec --ignore-user-config[\s\S]*-m \$model[\s\S]*-c \$cfg[\s\S]*-c \$projectDocsCfg[\s\S]*-s workspace-write/);
+  assert.match(runner, /exec --ignore-user-config[\s\S]*-m \$model[\s\S]*-c \$cfg[\s\S]*-c \$projectDocsCfg[\s\S]*-c 'default_permissions=":workspace"'/);
+  assert.doesNotMatch(runner, /-s workspace-write/);
   assert.doesNotMatch(runner, /-a never/);
   assert.doesNotMatch(runner, /\$approvalCfg|\$sandboxCfg|approval_policy|sandbox_mode/);
   assert.match(review, /exec --ignore-user-config[\s\S]*review --base/);
@@ -39,7 +40,7 @@ test("preflight requires isolated exec, review base, and feature capability supp
   const preflight = read("preflight.ps1");
   assert.match(preflight, /codex exec --help/);
   assert.match(preflight, /--ignore-user-config/);
-  assert.match(preflight, /(?:-s|--sandbox)/);
+  assert.doesNotMatch(preflight, /-not \(\$execHelp -match "\(\?m\).*--sandbox/);
   assert.match(preflight, /codex exec review --help/);
   assert.match(preflight, /codex exec review --base/);
   assert.match(preflight, /codex features list/);
@@ -61,9 +62,10 @@ test("feature capability check fails closed for a missing fake key", () => {
   assert.match(preflight, /throw ["']Installed Codex CLI does not expose required feature key/);
 });
 
-test("preflight fails closed when explicit sandbox capability is absent", () => {
+test("preflight does not require legacy sandbox CLI capability", () => {
   const preflight = read("preflight.ps1");
   const execHelpWithoutSandbox = "--ignore-user-config\n--approval-policy";
   assert.equal(/(?:-s\b|--sandbox\b)/.test(execHelpWithoutSandbox), false);
-  assert.match(preflight, /-not \(\$execHelp -match "[\s\S]*--ignore-user-config[\s\S]*"\)[\s\S]*-not \(\$execHelp -match "[\s\S]*-s[\s\S]*--sandbox/);
+  assert.match(preflight, /-not \(\$execHelp -match "--ignore-user-config"\)/);
+  assert.match(preflight, /throw "Installed Codex CLI does not expose required feature key/);
 });

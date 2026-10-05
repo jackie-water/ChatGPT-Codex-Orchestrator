@@ -145,7 +145,7 @@ codex --version
 if ($LASTEXITCODE -ne 0) { throw "Codex CLI unavailable" }
 
 $execHelp = & codex exec --help 2>&1
-if ($LASTEXITCODE -ne 0 -or -not ($execHelp -match "--ignore-user-config") -or -not ($execHelp -match "(?m)(?:^|\s)-s(?:,|\s|$)|--sandbox")) {
+if ($LASTEXITCODE -ne 0 -or -not ($execHelp -match "--ignore-user-config")) {
   throw "Installed Codex CLI does not support isolated 'codex exec --ignore-user-config' execution"
 }
 
