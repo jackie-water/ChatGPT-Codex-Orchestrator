@@ -325,8 +325,10 @@ export function refreshControlRuntime({state,sourceRoot=process.cwd(),gitRun=run
   }
   const fetchUrl=gitRun("git",["config","--get","remote.origin.url"],{cwd:state.control_clone_path}).stdout;
   const pushUrls=gitRun("git",["config","--get-all","remote.origin.pushurl"],{cwd:state.control_clone_path,allowFailure:true}).stdout.split(/\r?\n/).filter(Boolean);
-  const destinations=pushUrls.length?pushUrls:[fetchUrl];
-  if(!destinations.every(url=>normalizedGithubRepository(url)===repository.toLowerCase())) throw new Error("Control clone push destination does not match control repository");
+  if(normalizedGithubRepository(fetchUrl)!==repository.toLowerCase()||
+    pushUrls.some(url=>normalizedGithubRepository(url)!==repository.toLowerCase())){
+    throw new Error("Control clone push destination does not match control repository");
+  }
   if(gitRun("git",["branch","--show-current"],{cwd:state.control_clone_path}).stdout!=="main") throw new Error("Control clone must be on main for runtime refresh");
   if(!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(String(state.runner_label||""))){
     throw new Error("Existing runner identity is incomplete or invalid for runtime refresh");

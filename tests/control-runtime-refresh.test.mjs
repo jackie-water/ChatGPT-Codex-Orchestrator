@@ -16,6 +16,43 @@ test("runtime refresh accepts exact GitHub HTTPS and SSH remotes",()=>{
   assert.equal(normalizedGithubRepository("https://github.com/Owner/Control/extra"),null);
 });
 
+test("runtime refresh validates fetch and every explicit push URL before mutation",()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),"orchestrator-remote-check-"));
+  const control=path.join(root,"control");
+  fs.mkdirSync(path.join(control,".git"),{recursive:true});
+  const state={control_environment_ready:true,control_repository:"owner/control",control_clone_path:control,runner_label:"valid"};
+  const runWith=(fetchUrl,pushUrls)=>{
+    const calls=[];
+    const gitRun=(command,args,options)=>{
+      calls.push(args);
+      if(args.join(" ")==="config --get remote.origin.url") return {ok:true,stdout:fetchUrl,stderr:"",status:0};
+      if(args.join(" ")==="config --get-all remote.origin.pushurl") return {ok:true,stdout:pushUrls.join("\n"),stderr:"",status:0};
+      if(args[0]==="branch") return {ok:true,stdout:"main",stderr:"",status:0};
+      return {ok:true,stdout:"",stderr:"",status:0};
+    };
+    return {calls,run:()=>refreshControlRuntime({state,sourceRoot:process.cwd(),gitRun})};
+  };
+
+  const matching=runWith("https://github.com/Owner/Control.git",["git@github.com:Owner/Control.git"]);
+  assert.equal(matching.run().changed,false);
+  assert.deepEqual(matching.calls.slice(0,2).map(args=>args.slice(0,4)),[
+    ["config","--get","remote.origin.url"],
+    ["config","--get-all","remote.origin.pushurl"]
+  ]);
+
+  for(const [fetchUrl,pushUrls] of [
+    ["https://github.com/Owner/Other.git",["git@github.com:Owner/Control.git"]],
+    ["not-a-github-url",[]],
+    ["https://github.com/Owner/Control.git",["git@github.com:Owner/Control.git","https://github.com/Owner/Other.git"]],
+    ["https://github.com/Owner/Control.git",["not-a-github-url"]]
+  ]){
+    const checked=runWith(fetchUrl,pushUrls);
+    assert.throws(checked.run,/push destination/);
+    assert.equal(checked.calls.length,2);
+    assert.deepEqual(fs.readdirSync(control),[".git"]);
+  }
+});
+
 test("runtime refresh preserves mature control state and is idempotent",()=>{
   const root=fs.mkdtempSync(path.join(os.tmpdir(),"orchestrator-refresh-"));
   const remote=path.join(root,"remote.git");
@@ -65,6 +102,6 @@ test("runtime refresh preserves mature control state and is idempotent",()=>{
 
 test("runtime refresh rejects missing or mismatched control identity before mutation",()=>{
   assert.throws(()=>refreshControlRuntime({state:{control_environment_ready:true,runner_label:"valid"},sourceRoot:process.cwd()}),/identity/i);
-  assert.throws(()=>refreshControlRuntime({state:{control_environment_ready:true,control_repository:"owner/control",control_clone_path:process.cwd(),runner_label:"valid"},sourceRoot:process.cwd()}),/origin/i);
-  assert.throws(()=>refreshControlRuntime({state:{control_environment_ready:true,control_repository:"owner/other",control_clone_path:process.cwd(),runner_label:"valid"},sourceRoot:process.cwd()}),/origin/i);
+  assert.throws(()=>refreshControlRuntime({state:{control_environment_ready:true,control_repository:"owner/control",control_clone_path:process.cwd(),runner_label:"valid"},sourceRoot:process.cwd()}),/push destination/i);
+  assert.throws(()=>refreshControlRuntime({state:{control_environment_ready:true,control_repository:"owner/other",control_clone_path:process.cwd(),runner_label:"valid"},sourceRoot:process.cwd()}),/push destination/i);
 });
