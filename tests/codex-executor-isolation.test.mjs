@@ -40,15 +40,25 @@ test("preflight requires isolated exec, review base, and feature capability supp
   const preflight = read("preflight.ps1");
   assert.match(preflight, /codex exec --help/);
   assert.match(preflight, /--ignore-user-config/);
-  assert.match(preflight, /default_permissions=\\":workspace\\"/);
-  assert.match(preflight, /codex --ignore-user-config[\\s\\S]*sandbox[\\s\\S]*--include-managed-config/);
+  assert.match(preflight, /default_permissions=":workspace"/);
+  assert.match(preflight, /& codex -c 'default_permissions=":workspace"' sandbox --/);
+  assert.doesNotMatch(preflight, /codex -c 'default_permissions=":workspace"' sandbox[\s\S]*--ignore-user-config/);
+  assert.doesNotMatch(preflight, /codex -c 'default_permissions=":workspace"' sandbox[\s\S]*sandbox -C/);
+  assert.doesNotMatch(preflight, /codex -c 'default_permissions=":workspace"' sandbox[\s\S]*--include-managed-config/);
+  assert.doesNotMatch(preflight, /codex -c 'default_permissions=":workspace"' sandbox[\s\S]*--permission-profile/);
+  assert.match(preflight, /SetEnvironmentVariable\("CODEX_HOME", \$workspaceProbeCodexHome, "Process"\)/);
+  assert.match(preflight, /Push-Location \$workspaceProbeWorkspace/);
+  assert.match(preflight, /Pop-Location/);
+  assert.match(preflight, /workspaceProbeCodexHomeWasSet/);
+  assert.match(preflight, /SetEnvironmentVariable\("CODEX_HOME", \$null, "Process"\)/);
   assert.match(preflight, /marker\.txt/);
   assert.match(preflight, /Test-Path -LiteralPath \$workspaceProbeMarker/);
   assert.match(preflight, /Get-Content -Raw -LiteralPath \$workspaceProbeMarker/);
-  assert.match(preflight, /\$LASTEXITCODE -ne 0[\\s\\S]*workspaceProbeMarker/);
+  assert.match(preflight, /\$LASTEXITCODE -ne 0[\s\S]*workspaceProbeMarker/);
   assert.match(preflight, /-not \(Test-Path -LiteralPath \$workspaceProbeMarker\)/);
-  assert.match(preflight, /finally \{[\\s\\S]*Remove-Item -LiteralPath \$workspaceProbeDirectory -Recurse -Force/);
+  assert.match(preflight, /finally \{[\s\S]*Remove-Item -LiteralPath \$workspaceProbeDirectory -Recurse -Force/);
   assert.match(preflight, /Codex workspace-permission-profile compatibility error/);
+  assert.match(preflight, /failed to create the expected marker with exact content/);
   assert.doesNotMatch(preflight, /-not \(\$execHelp -match "\(\?m\).*--sandbox/);
   assert.match(preflight, /codex exec review --help/);
   assert.match(preflight, /codex exec review --base/);
@@ -59,8 +69,6 @@ test("preflight requires isolated exec, review base, and feature capability supp
   assert.doesNotMatch(preflight, /codex review --help/);
   assert.doesNotMatch(preflight, /codex features (?:enable|disable)/);
   assert.doesNotMatch(preflight, /(?:plugin|features)\s+(?:install|remove)/);
-  assert.doesNotMatch(preflight, /(?:Write|Set-Content|Remove-Item|Rename-Item)[\s\S]*(?:CODEX_HOME|\.codex)/i);
-  assert.doesNotMatch(preflight, /(?:CODEX_HOME|\.codex)[\s\S]*(?:Write|Set-Content|Remove-Item|Rename-Item)/i);
 });
 
 test("feature capability check fails closed for a missing fake key", () => {

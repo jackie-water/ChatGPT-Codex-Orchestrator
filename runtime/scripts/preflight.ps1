@@ -150,17 +150,31 @@ if ($LASTEXITCODE -ne 0 -or -not ($execHelp -match "--ignore-user-config")) {
 }
 
 $workspaceProbeDirectory = Join-Path $env:TEMP ("codex-workspace-profile-probe-" + [guid]::NewGuid().ToString("N"))
-$workspaceProbeMarker = Join-Path $workspaceProbeDirectory "marker.txt"
+$workspaceProbeCodexHome = Join-Path $workspaceProbeDirectory "codex-home"
+$workspaceProbeWorkspace = Join-Path $workspaceProbeDirectory "workspace"
+$workspaceProbeMarker = Join-Path $workspaceProbeWorkspace "marker.txt"
+$workspaceProbePushed = $false
+$workspaceProbeCodexHomeWasSet = [Environment]::GetEnvironmentVariables("Process").Contains("CODEX_HOME")
+$workspaceProbePreviousCodexHome = [Environment]::GetEnvironmentVariable("CODEX_HOME", "Process")
 try {
-  New-Item -ItemType Directory -Path $workspaceProbeDirectory -Force | Out-Null
-  $workspaceProbeCommand = "Set-Content -LiteralPath '$workspaceProbeMarker' -Value 'workspace-profile-ok' -NoNewline"
-  & codex --ignore-user-config -c 'default_permissions=":workspace"' sandbox -C $workspaceProbeDirectory --include-managed-config -- powershell.exe -NoProfile -NonInteractive -Command $workspaceProbeCommand 2>&1 | Out-Null
+  New-Item -ItemType Directory -Path $workspaceProbeCodexHome, $workspaceProbeWorkspace -Force | Out-Null
+  [Environment]::SetEnvironmentVariable("CODEX_HOME", $workspaceProbeCodexHome, "Process")
+  Push-Location $workspaceProbeWorkspace
+  $workspaceProbePushed = $true
+  $workspaceProbeCommand = "Set-Content -LiteralPath '.\marker.txt' -Value 'workspace-profile-ok' -NoNewline"
+  & codex -c 'default_permissions=":workspace"' sandbox -- powershell.exe -NoProfile -NonInteractive -Command $workspaceProbeCommand 2>&1 | Out-Null
   if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $workspaceProbeMarker) -or (Get-Content -Raw -LiteralPath $workspaceProbeMarker) -ne "workspace-profile-ok") {
-    throw "workspace permission-profile probe did not create the expected marker"
+    throw "workspace permission-profile probe failed to create the expected marker with exact content"
   }
 } catch {
   throw "Codex workspace-permission-profile compatibility error: $($_.Exception.Message)"
 } finally {
+  if ($workspaceProbePushed) { Pop-Location }
+  if ($workspaceProbeCodexHomeWasSet) {
+    [Environment]::SetEnvironmentVariable("CODEX_HOME", $workspaceProbePreviousCodexHome, "Process")
+  } else {
+    [Environment]::SetEnvironmentVariable("CODEX_HOME", $null, "Process")
+  }
   Remove-Item -LiteralPath $workspaceProbeDirectory -Recurse -Force -ErrorAction SilentlyContinue
 }
 
