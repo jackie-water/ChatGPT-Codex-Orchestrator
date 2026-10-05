@@ -149,6 +149,21 @@ if ($LASTEXITCODE -ne 0 -or -not ($execHelp -match "--ignore-user-config")) {
   throw "Installed Codex CLI does not support isolated 'codex exec --ignore-user-config' execution"
 }
 
+$workspaceProbeDirectory = Join-Path $env:TEMP ("codex-workspace-profile-probe-" + [guid]::NewGuid().ToString("N"))
+$workspaceProbeMarker = Join-Path $workspaceProbeDirectory "marker.txt"
+try {
+  New-Item -ItemType Directory -Path $workspaceProbeDirectory -Force | Out-Null
+  $workspaceProbeCommand = "Set-Content -LiteralPath '$workspaceProbeMarker' -Value 'workspace-profile-ok' -NoNewline"
+  & codex --ignore-user-config -c 'default_permissions=":workspace"' sandbox -C $workspaceProbeDirectory --include-managed-config -- powershell.exe -NoProfile -NonInteractive -Command $workspaceProbeCommand 2>&1 | Out-Null
+  if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $workspaceProbeMarker) -or (Get-Content -Raw -LiteralPath $workspaceProbeMarker) -ne "workspace-profile-ok") {
+    throw "workspace permission-profile probe did not create the expected marker"
+  }
+} catch {
+  throw "Codex workspace-permission-profile compatibility error: $($_.Exception.Message)"
+} finally {
+  Remove-Item -LiteralPath $workspaceProbeDirectory -Recurse -Force -ErrorAction SilentlyContinue
+}
+
 $reviewHelp = & codex exec review --help 2>&1
 if ($LASTEXITCODE -ne 0 -or -not ($reviewHelp -match "--base")) {
   throw "Installed Codex CLI does not support the required non-interactive 'codex exec review --base' command"

@@ -40,6 +40,15 @@ test("preflight requires isolated exec, review base, and feature capability supp
   const preflight = read("preflight.ps1");
   assert.match(preflight, /codex exec --help/);
   assert.match(preflight, /--ignore-user-config/);
+  assert.match(preflight, /default_permissions=\\":workspace\\"/);
+  assert.match(preflight, /codex --ignore-user-config[\\s\\S]*sandbox[\\s\\S]*--include-managed-config/);
+  assert.match(preflight, /marker\.txt/);
+  assert.match(preflight, /Test-Path -LiteralPath \$workspaceProbeMarker/);
+  assert.match(preflight, /Get-Content -Raw -LiteralPath \$workspaceProbeMarker/);
+  assert.match(preflight, /\$LASTEXITCODE -ne 0[\\s\\S]*workspaceProbeMarker/);
+  assert.match(preflight, /-not \(Test-Path -LiteralPath \$workspaceProbeMarker\)/);
+  assert.match(preflight, /finally \{[\\s\\S]*Remove-Item -LiteralPath \$workspaceProbeDirectory -Recurse -Force/);
+  assert.match(preflight, /Codex workspace-permission-profile compatibility error/);
   assert.doesNotMatch(preflight, /-not \(\$execHelp -match "\(\?m\).*--sandbox/);
   assert.match(preflight, /codex exec review --help/);
   assert.match(preflight, /codex exec review --base/);
