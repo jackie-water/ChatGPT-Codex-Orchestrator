@@ -154,6 +154,15 @@ if ($LASTEXITCODE -ne 0 -or -not ($reviewHelp -match "--base")) {
   throw "Installed Codex CLI does not support the required non-interactive 'codex exec review --base' command"
 }
 
+$featureList = & codex features list 2>&1
+if ($LASTEXITCODE -ne 0) { throw "Could not inspect the installed Codex feature surface" }
+$requiredFeatures = @("plugins", "apps", "hooks", "memories", "goals", "skill_search", "skip_host_skill_discovery")
+foreach ($feature in $requiredFeatures) {
+  if (-not ($featureList -match ("(?m)^\s*" + [regex]::Escape($feature) + "\s"))) {
+    throw "Installed Codex CLI does not expose required feature key: $feature"
+  }
+}
+
 Push-Location $repoPath
 try {
   git fetch origin --prune

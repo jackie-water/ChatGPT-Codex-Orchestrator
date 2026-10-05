@@ -266,7 +266,7 @@ try {
   $previousErrorActionPreference = $ErrorActionPreference
   try {
     $ErrorActionPreference = "Continue"
-    Get-Content -Raw $promptFile | & $codexCommand.Source exec --ignore-user-config -m $model -c $cfg -c $approvalCfg -c $sandboxCfg -c $projectDocsCfg -c 'features.plugins=false' -c 'features.apps=false' -c 'features.hooks=false' -c 'features.memories=false' -c 'features.goals=false' -c 'cloud.skills.enabled=false' -c 'skills.include_instructions=false' - 1> $finalFile 2> $logFile
+    Get-Content -Raw $promptFile | & $codexCommand.Source exec --ignore-user-config -m $model -c $cfg -c $approvalCfg -c $sandboxCfg -c $projectDocsCfg -c 'features.plugins=false' -c 'features.apps=false' -c 'features.hooks=false' -c 'features.memories=false' -c 'features.goals=false' -c 'features.skill_search=false' -c 'features.skip_host_skill_discovery=true' -c 'cloud.skills.enabled=false' -c 'skills.include_instructions=false' - 1> $finalFile 2> $logFile
     $codexExit = $LASTEXITCODE
   } finally {
     $ErrorActionPreference = $previousErrorActionPreference
