@@ -7,6 +7,7 @@ import {execFileSync} from "node:child_process";
 import {normalizedGithubRepository,refreshControlRuntime} from "../src/lib/control-env.mjs";
 
 const git=(args,cwd)=>execFileSync("git",args,{cwd,encoding:"utf8"});
+const fakePush=({cwd})=>({ok:true,stdout:"",stderr:"",status:0});
 
 test("runtime refresh accepts exact GitHub HTTPS and SSH remotes",()=>{
   assert.equal(normalizedGithubRepository("https://github.com/Owner/Control.git"),"owner/control");
@@ -39,10 +40,14 @@ test("runtime refresh preserves mature control state and is idempotent",()=>{
   fs.writeFileSync(path.join(control,".github","workflows","orchestrator.yml"),"old\n");
   git(["add","."],control); git(["commit","-m","fixture"],control); git(["push","-u","origin","main"],control);
   git(["remote","set-url","origin","https://github.com/Owner/Control.git"],control);
-  git(["remote","set-url","--push","origin",remote],control);
+  git(["remote","set-url","--push","origin","git@github.com:Owner/Control.git"],control);
 
   const state={control_environment_ready:true,control_repository:"owner/control",control_clone_path:control,runner_label:"codex-orchestrator-fixture"};
-  const first=refreshControlRuntime({state,sourceRoot:process.cwd()});
+  const first=refreshControlRuntime({state,sourceRoot:process.cwd(),gitRun:(command,args,options)=>{
+    if(args[0]==="push") return fakePush(options);
+    try { return {ok:true,stdout:git(args,options.cwd).trim(),stderr:"",status:0}; }
+    catch(error) { if(options.allowFailure) return {ok:false,stdout:"",stderr:error.stderr?.toString().trim()||"",status:error.status}; throw error; }
+  }});
   assert.equal(first.changed,true);
   for(const [name,value] of Object.entries(preserved)) assert.equal(fs.readFileSync(path.join(control,name),"utf8"),value);
   assert.equal(fs.existsSync(path.join(control,"scripts","capture-chat-origins.mjs")),false);
@@ -50,7 +55,11 @@ test("runtime refresh preserves mature control state and is idempotent",()=>{
   assert.equal(fs.readFileSync(path.join(control,"scripts","callback-delivery.mjs"),"utf8"),fs.readFileSync(path.join(process.cwd(),"runtime","scripts","callback-delivery.mjs"),"utf8"));
   assert.match(fs.readFileSync(path.join(control,".github","workflows","orchestrator.yml"),"utf8"),/codex-orchestrator-fixture/);
 
-  const second=refreshControlRuntime({state,sourceRoot:process.cwd()});
+  const second=refreshControlRuntime({state,sourceRoot:process.cwd(),gitRun:(command,args,options)=>{
+    if(args[0]==="push") return fakePush(options);
+    try { return {ok:true,stdout:git(args,options.cwd).trim(),stderr:"",status:0}; }
+    catch(error) { if(options.allowFailure) return {ok:false,stdout:"",stderr:error.stderr?.toString().trim()||"",status:error.status}; throw error; }
+  }});
   assert.equal(second.changed,false);
 });
 
