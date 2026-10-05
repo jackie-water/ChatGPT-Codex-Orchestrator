@@ -22,7 +22,8 @@ test("implementation and independent review use isolated Codex exec sessions", (
     assert.match(source, /exec --ignore-user-config/);
     for (const setting of isolation) assert.match(source, new RegExp(setting.replaceAll(".", "\\.")));
   }
-  assert.match(runner, /exec --ignore-user-config[\s\S]*-m \$model[\s\S]*-c \$cfg[\s\S]*-c \$projectDocsCfg[\s\S]*-a never[\s\S]*-s workspace-write/);
+  assert.match(runner, /exec --ignore-user-config[\s\S]*-m \$model[\s\S]*-c \$cfg[\s\S]*-c \$projectDocsCfg[\s\S]*-s workspace-write/);
+  assert.doesNotMatch(runner, /-a never/);
   assert.doesNotMatch(runner, /\$approvalCfg|\$sandboxCfg|approval_policy|sandbox_mode/);
   assert.match(review, /exec --ignore-user-config[\s\S]*review --base/);
   assert.match(review, /-a never[\s\S]*-s read-only/);
