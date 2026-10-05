@@ -14,6 +14,15 @@ const gitResult=(control,remote,failPush=false)=> (command,args,options)=>{
     git(["update-ref","refs/heads/main",git(["rev-parse","HEAD"],control).trim()],remote);
     return {ok:true,stdout:"",stderr:"",status:0};
   }
+  if(args[0]==="ls-remote"){
+    try {
+      const sha=git(["rev-parse","refs/heads/main"],remote).trim();
+      return {ok:true,stdout:sha+"\trefs/heads/main",stderr:"",status:0};
+    } catch(error) {
+      if(options.allowFailure) return {ok:false,stdout:"",stderr:error.stderr?.toString().trim()||"",status:error.status};
+      throw error;
+    }
+  }
   try { return {ok:true,stdout:git(args,options.cwd).trim(),stderr:"",status:0}; }
   catch(error) { if(options.allowFailure) return {ok:false,stdout:"",stderr:error.stderr?.toString().trim()||"",status:error.status}; throw error; }
 };
@@ -93,8 +102,12 @@ test("runtime refresh preserves mature control state and is idempotent",()=>{
   git(["remote","set-url","--push","origin","git@github.com:Owner/Control.git"],control);
 
   const state={control_environment_ready:true,control_repository:"owner/control",control_clone_path:control,runner_label:"codex-orchestrator-fixture"};
+  const before=git(["rev-parse","HEAD"],control).trim();
   const first=refreshControlRuntime({state,sourceRoot:process.cwd(),gitRun:gitResult(control,remote)});
   assert.equal(first.changed,true);
+  const refreshed=git(["rev-parse","HEAD"],control).trim();
+  assert.notEqual(refreshed,before);
+  assert.equal(git(["rev-parse","refs/heads/main"],remote).trim(),refreshed);
   for(const [name,value] of Object.entries(preserved)) if(name!=="config.ps1") assert.equal(fs.readFileSync(path.join(control,name),"utf8"),value);
   assert.equal(fs.existsSync(path.join(control,"scripts","capture-chat-origins.mjs")),false);
   assert.equal(fs.readFileSync(path.join(control,"scripts","local-extra.ps1"),"utf8"),"keep\n");
@@ -106,6 +119,7 @@ test("runtime refresh preserves mature control state and is idempotent",()=>{
 
   const second=refreshControlRuntime({state,sourceRoot:process.cwd(),gitRun:gitResult(control,remote)});
   assert.equal(second.changed,false);
+  assert.equal(git(["rev-parse","refs/heads/main"],remote).trim(),refreshed);
 });
 
 test("runtime refresh rolls back a committed refresh when push fails and retries",()=>{
@@ -118,8 +132,10 @@ test("runtime refresh rolls back a committed refresh when push fails and retries
   git(["remote","set-url","origin","https://github.com/Owner/Control.git"],control);
   const state={control_environment_ready:true,control_repository:"owner/control",control_clone_path:control,runner_label:"retry"};
   const before=git(["rev-parse","HEAD"],control).trim();
+  const remoteBefore=git(["rev-parse","refs/heads/main"],remote).trim();
   assert.throws(()=>refreshControlRuntime({state,sourceRoot:process.cwd(),gitRun:gitResult(control,remote,true)}),/simulated push failure/);
   assert.equal(git(["rev-parse","HEAD"],control).trim(),before);
+  assert.equal(git(["rev-parse","refs/heads/main"],remote).trim(),remoteBefore);
   assert.equal(git(["diff","--cached","--quiet"],control,{stdio:"ignore"}),"");
   assert.match(git(["status","--short"],control),/^[ MARC?]{2}/m);
   assert.equal(fs.readFileSync(path.join(control,"seed.txt"),"utf8"),"seed\n");
@@ -159,6 +175,10 @@ test("runtime refresh rejects pre-staged changes before copying",()=>{
     if(args[0]==="branch") return {ok:true,stdout:"main",stderr:"",status:0};
     if(args[0]==="rev-parse") return {ok:true,stdout:git(args,options.cwd).trim(),stderr:"",status:0};
     if(args[0]==="ls-remote") return {ok:true,stdout:git(["rev-parse","HEAD"],control).trim()+"\trefs/heads/main",stderr:"",status:0};
+    if(args[0]==="diff"){
+      try { return {ok:true,stdout:git(args,options.cwd).trim(),stderr:"",status:0}; }
+      catch(error) { if(options.allowFailure) return {ok:false,stdout:"",stderr:error.stderr?.toString().trim()||"",status:error.status}; throw error; }
+    }
     return {ok:true,stdout:"",stderr:"",status:0};
   };
   assert.throws(()=>refreshControlRuntime({state,sourceRoot:process.cwd(),gitRun:run}),/pre-staged/);
