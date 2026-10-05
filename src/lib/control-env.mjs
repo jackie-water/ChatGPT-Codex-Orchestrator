@@ -240,7 +240,7 @@ function refreshControlCommit(controlPath,ownedPaths,execute=run){
   if(execute("git",["diff","--cached","--quiet"],{cwd:controlPath,allowFailure:true}).ok) return {changed:false};
   const before=execute("git",["rev-parse","HEAD"],{cwd:controlPath}).stdout;
   execute("git",["-c","user.name=ChatGPT Codex Orchestrator","-c","user.email=codex-orchestrator@users.noreply.github.com","commit","-m","chore: refresh orchestrator runtime"],{cwd:controlPath});
-  try { execute("git",["push","-u","origin","HEAD:main"],{cwd:controlPath}); } catch(error) { execute("git",["reset","--mixed",before],{cwd:controlPath}); throw error; }
+  try { execute("git",["push","origin","HEAD:main"],{cwd:controlPath}); } catch(error) { execute("git",["reset","--mixed",before],{cwd:controlPath}); throw error; }
   return {changed:true};
 }
 
@@ -330,6 +330,11 @@ export function refreshControlRuntime({state,sourceRoot=process.cwd(),gitRun=run
     throw new Error("Control clone push destination does not match control repository");
   }
   if(gitRun("git",["branch","--show-current"],{cwd:state.control_clone_path}).stdout!=="main") throw new Error("Control clone must be on main for runtime refresh");
+  const localHead=gitRun("git",["rev-parse","HEAD"],{cwd:state.control_clone_path}).stdout;
+  if(!/^[0-9a-f]{40}$/i.test(localHead)) throw new Error("Control repository HEAD is invalid for runtime refresh");
+  const remoteMain=gitRun("git",["ls-remote","--heads","origin","refs/heads/main"],{cwd:state.control_clone_path,allowFailure:true});
+  const remoteMatch=remoteMain.stdout.match(/^([0-9a-f]{40})\trefs\/heads\/main$/i);
+  if(!remoteMain.ok||!remoteMatch||remoteMatch[1].toLowerCase()!==localHead.toLowerCase()) throw new Error("Control repository local HEAD must match remote main for runtime refresh");
   if(!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(String(state.runner_label||""))){
     throw new Error("Existing runner identity is incomplete or invalid for runtime refresh");
   }

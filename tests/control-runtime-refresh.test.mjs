@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import crypto from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import {execFileSync} from "node:child_process";
@@ -18,19 +19,21 @@ test("runtime refresh accepts exact GitHub HTTPS and SSH remotes",()=>{
 
 test("runtime refresh validates fetch and every explicit push URL before mutation",()=>{
   const root=fs.mkdtempSync(path.join(os.tmpdir(),"orchestrator-remote-check-"));
-  const control=path.join(root,"control");
-  fs.mkdirSync(path.join(control,".git"),{recursive:true});
-  const state={control_environment_ready:true,control_repository:"owner/control",control_clone_path:control,runner_label:"valid"};
   const runWith=(fetchUrl,pushUrls)=>{
+    const control=path.join(root,crypto.randomUUID());
+    fs.mkdirSync(path.join(control,".git"),{recursive:true});
+    const state={control_environment_ready:true,control_repository:"owner/control",control_clone_path:control,runner_label:"valid"};
     const calls=[];
     const gitRun=(command,args,options)=>{
       calls.push(args);
       if(args.join(" ")==="config --get remote.origin.url") return {ok:true,stdout:fetchUrl,stderr:"",status:0};
       if(args.join(" ")==="config --get-all remote.origin.pushurl") return {ok:true,stdout:pushUrls.join("\n"),stderr:"",status:0};
       if(args[0]==="branch") return {ok:true,stdout:"main",stderr:"",status:0};
+      if(args[0]==="rev-parse") return {ok:true,stdout:"a".repeat(40),stderr:"",status:0};
+      if(args[0]==="ls-remote") return {ok:true,stdout:"a".repeat(40)+"\trefs/heads/main",stderr:"",status:0};
       return {ok:true,stdout:"",stderr:"",status:0};
     };
-    return {calls,run:()=>refreshControlRuntime({state,sourceRoot:process.cwd(),gitRun})};
+    return {calls,control,run:()=>refreshControlRuntime({state,sourceRoot:process.cwd(),gitRun})};
   };
 
   const matching=runWith("https://github.com/Owner/Control.git",["git@github.com:Owner/Control.git"]);
@@ -49,7 +52,7 @@ test("runtime refresh validates fetch and every explicit push URL before mutatio
     const checked=runWith(fetchUrl,pushUrls);
     assert.throws(checked.run,/push destination/);
     assert.equal(checked.calls.length,2);
-    assert.deepEqual(fs.readdirSync(control),[".git"]);
+    assert.deepEqual(fs.readdirSync(checked.control),[".git"]);
   }
 });
 
