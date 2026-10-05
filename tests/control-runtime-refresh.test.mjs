@@ -11,7 +11,7 @@ const git=(args,cwd)=>execFileSync("git",args,{cwd,encoding:"utf8"});
 const gitResult=(control,remote,failPush=false)=> (command,args,options)=>{
   if(args[0]==="push"){
     if(failPush) throw new Error("simulated push failure");
-    git(["update-ref","refs/heads/main",git(["rev-parse","HEAD"],control).trim()],remote);
+    git(["push",remote,"HEAD:refs/heads/main"],control);
     return {ok:true,stdout:"",stderr:"",status:0};
   }
   if(args[0]==="ls-remote"){
@@ -139,7 +139,9 @@ test("runtime refresh rolls back a committed refresh when push fails and retries
   assert.equal(git(["diff","--cached","--quiet"],control,{stdio:"ignore"}),"");
   assert.match(git(["status","--short"],control),/^[ MARC?]{2}/m);
   assert.equal(fs.readFileSync(path.join(control,"seed.txt"),"utf8"),"seed\n");
-  assert.equal(refreshControlRuntime({state,sourceRoot:process.cwd(),gitRun:gitResult(control,remote)}).changed,true);
+  const retry=refreshControlRuntime({state,sourceRoot:process.cwd(),gitRun:gitResult(control,remote)});
+  assert.equal(retry.changed,true);
+  assert.equal(git(["rev-parse","refs/heads/main"],remote).trim(),git(["rev-parse","HEAD"],control).trim());
 });
 
 test("runtime refresh rejects every remote-main mismatch before mutation",()=>{
@@ -163,26 +165,23 @@ test("runtime refresh rejects every remote-main mismatch before mutation",()=>{
 
 test("runtime refresh rejects pre-staged changes before copying",()=>{
   const root=fs.mkdtempSync(path.join(os.tmpdir(),"orchestrator-staged-"));
-  const control=path.join(root,"control"); fs.mkdirSync(path.join(control,"scripts"),{recursive:true});
+  const remote=path.join(root,"remote.git"), control=path.join(root,"control");
+  git(["init","--bare",remote],root); fs.mkdirSync(path.join(control,"scripts"),{recursive:true});
   git(["init","-b","main"],control); git(["config","user.name","fixture"],control); git(["config","user.email","fixture@example.invalid"],control);
+  git(["remote","add","origin",remote],control);
   fs.writeFileSync(path.join(control,"scripts","unrelated.mjs"),"before\n"); git(["add","."],control); git(["commit","-m","fixture"],control);
+  git(["push","origin","main"],control);
   fs.writeFileSync(path.join(control,"scripts","unrelated.mjs"),"staged\n"); git(["add","."],control);
+  git(["remote","set-url","origin","https://github.com/Owner/Control.git"],control);
+  git(["remote","set-url","--push","origin","git@github.com:Owner/Control.git"],control);
   const state={control_environment_ready:true,control_repository:"owner/control",control_clone_path:control,runner_label:"valid"};
   const snapshot=git(["diff","--cached","--binary"],control)+git(["diff","--binary"],control);
-  const run=(command,args,options)=>{
-    if(args[0]==="config"&&args[1]==="--get") return {ok:true,stdout:"https://github.com/owner/control",stderr:"",status:0};
-    if(args[0]==="config") return {ok:true,stdout:"",stderr:"",status:0};
-    if(args[0]==="branch") return {ok:true,stdout:"main",stderr:"",status:0};
-    if(args[0]==="rev-parse") return {ok:true,stdout:git(args,options.cwd).trim(),stderr:"",status:0};
-    if(args[0]==="ls-remote") return {ok:true,stdout:git(["rev-parse","HEAD"],control).trim()+"\trefs/heads/main",stderr:"",status:0};
-    if(args[0]==="diff"){
-      try { return {ok:true,stdout:git(args,options.cwd).trim(),stderr:"",status:0}; }
-      catch(error) { if(options.allowFailure) return {ok:false,stdout:"",stderr:error.stderr?.toString().trim()||"",status:error.status}; throw error; }
-    }
-    return {ok:true,stdout:"",stderr:"",status:0};
-  };
-  assert.throws(()=>refreshControlRuntime({state,sourceRoot:process.cwd(),gitRun:run}),/pre-staged/);
+  const before=git(["rev-parse","HEAD"],control).trim();
+  const remoteBefore=git(["rev-parse","refs/heads/main"],remote).trim();
+  assert.throws(()=>refreshControlRuntime({state,sourceRoot:process.cwd(),gitRun:gitResult(control,remote)}),/pre-staged/);
   assert.equal(git(["diff","--cached","--binary"],control)+git(["diff","--binary"],control),snapshot);
+  assert.equal(git(["rev-parse","HEAD"],control).trim(),before);
+  assert.equal(git(["rev-parse","refs/heads/main"],remote).trim(),remoteBefore);
   assert.equal(git(["log","-1","--format=%s"],control).trim(),"fixture");
 });
 
