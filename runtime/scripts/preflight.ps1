@@ -162,7 +162,7 @@ try {
   Push-Location $workspaceProbeWorkspace
   $workspaceProbePushed = $true
   $workspaceProbeCommand = "Set-Content -LiteralPath '.\marker.txt' -Value 'workspace-profile-ok' -NoNewline"
-  & codex -c 'default_permissions=":workspace"' sandbox -- powershell.exe -NoProfile -NonInteractive -Command $workspaceProbeCommand 2>&1 | Out-Null
+  & codex -c 'default_permissions=":workspace"' -c 'windows.sandbox="unelevated"' sandbox -- powershell.exe -NoProfile -NonInteractive -Command $workspaceProbeCommand 2>&1 | Out-Null
   if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $workspaceProbeMarker) -or (Get-Content -Raw -LiteralPath $workspaceProbeMarker) -ne "workspace-profile-ok") {
     throw "workspace permission-profile probe failed to create the expected marker with exact content"
   }
