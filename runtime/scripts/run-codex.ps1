@@ -250,8 +250,6 @@ try {
   Write-Host "project=$projectKey repo=$repository model=$model reasoning=$effort branch=$before iteration=$iteration/$effectiveMax"
 
   $cfg = 'model_reasoning_effort="' + $effort + '"'
-  $approvalCfg = 'approval_policy="never"'
-  $sandboxCfg = 'sandbox_mode="workspace-write"'
   $projectDocsCfg = 'project_doc_max_bytes=0'
 
   # On Windows PowerShell 5.1, the npm codex.ps1 shim can surface normal
@@ -266,7 +264,7 @@ try {
   $previousErrorActionPreference = $ErrorActionPreference
   try {
     $ErrorActionPreference = "Continue"
-    Get-Content -Raw $promptFile | & $codexCommand.Source exec --ignore-user-config -m $model -c $cfg -c $approvalCfg -c $sandboxCfg -c $projectDocsCfg -c 'features.plugins=false' -c 'features.apps=false' -c 'features.hooks=false' -c 'features.memories=false' -c 'features.goals=false' -c 'features.skill_search=false' -c 'features.skip_host_skill_discovery=true' -c 'cloud.skills.enabled=false' -c 'skills.include_instructions=false' - 1> $finalFile 2> $logFile
+    Get-Content -Raw $promptFile | & $codexCommand.Source exec --ignore-user-config -m $model -c $cfg -c $projectDocsCfg -c 'features.plugins=false' -c 'features.apps=false' -c 'features.hooks=false' -c 'features.memories=false' -c 'features.goals=false' -c 'features.skill_search=false' -c 'features.skip_host_skill_discovery=true' -c 'cloud.skills.enabled=false' -c 'skills.include_instructions=false' -a never -s workspace-write - 1> $finalFile 2> $logFile
     $codexExit = $LASTEXITCODE
   } finally {
     $ErrorActionPreference = $previousErrorActionPreference

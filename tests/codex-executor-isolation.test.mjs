@@ -22,17 +22,23 @@ test("implementation and independent review use isolated Codex exec sessions", (
     assert.match(source, /exec --ignore-user-config/);
     for (const setting of isolation) assert.match(source, new RegExp(setting.replaceAll(".", "\\.")));
   }
-  assert.match(runner, /exec --ignore-user-config[\s\S]*-m \$model[\s\S]*-c \$cfg[\s\S]*-c \$approvalCfg[\s\S]*-c \$sandboxCfg[\s\S]*-c \$projectDocsCfg/);
+  assert.match(runner, /exec --ignore-user-config[\s\S]*-m \$model[\s\S]*-c \$cfg[\s\S]*-c \$projectDocsCfg[\s\S]*-a never[\s\S]*-s workspace-write/);
+  assert.doesNotMatch(runner, /\$approvalCfg|\$sandboxCfg|approval_policy|sandbox_mode/);
   assert.match(review, /exec --ignore-user-config[\s\S]*review --base/);
   assert.match(review, /-a never[\s\S]*-s read-only/);
   assert.doesNotMatch(review, /& \$codexCommand\.Source\s+-m[\s\S]*\breview --base/);
   assert.doesNotMatch(review, /codex review(?:\s|--)/);
+  assert.match(review, /review --base "origin\/\$defaultBranch"/);
+  for (const source of [runner, review]) {
+    assert.equal(source.split(/\r?\n/).some(line => /(?:Write|Set-Content|Remove-Item|Rename-Item).*?(?:CODEX_HOME|\.codex)|(?:CODEX_HOME|\.codex).*?(?:Write|Set-Content|Remove-Item|Rename-Item)/i.test(line)), false);
+  }
 });
 
 test("preflight requires isolated exec, review base, and feature capability support", () => {
   const preflight = read("preflight.ps1");
   assert.match(preflight, /codex exec --help/);
   assert.match(preflight, /--ignore-user-config/);
+  assert.match(preflight, /(?:-s|--sandbox)/);
   assert.match(preflight, /codex exec review --help/);
   assert.match(preflight, /codex exec review --base/);
   assert.match(preflight, /codex features list/);
@@ -43,6 +49,7 @@ test("preflight requires isolated exec, review base, and feature capability supp
   assert.doesNotMatch(preflight, /codex features (?:enable|disable)/);
   assert.doesNotMatch(preflight, /(?:plugin|features)\s+(?:install|remove)/);
   assert.doesNotMatch(preflight, /(?:Write|Set-Content|Remove-Item|Rename-Item)[\s\S]*(?:CODEX_HOME|\.codex)/i);
+  assert.doesNotMatch(preflight, /(?:CODEX_HOME|\.codex)[\s\S]*(?:Write|Set-Content|Remove-Item|Rename-Item)/i);
 });
 
 test("feature capability check fails closed for a missing fake key", () => {
@@ -51,4 +58,11 @@ test("feature capability check fails closed for a missing fake key", () => {
   const required = ["plugins", "apps", "hooks", "memories", "goals", "skill_search", "skip_host_skill_discovery"];
   assert.ok(required.some(feature => !new RegExp(`^\\s*${feature}\\s`, "m").test(fakeFeatureList)));
   assert.match(preflight, /throw ["']Installed Codex CLI does not expose required feature key/);
+});
+
+test("preflight fails closed when explicit sandbox capability is absent", () => {
+  const preflight = read("preflight.ps1");
+  const execHelpWithoutSandbox = "--ignore-user-config\n--approval-policy";
+  assert.equal(/(?:-s\b|--sandbox\b)/.test(execHelpWithoutSandbox), false);
+  assert.match(preflight, /-not \(\$execHelp -match "[\s\S]*--ignore-user-config[\s\S]*"\)[\s\S]*-not \(\$execHelp -match "[\s\S]*-s[\s\S]*--sandbox/);
 });
