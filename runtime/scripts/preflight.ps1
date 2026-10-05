@@ -144,9 +144,14 @@ if ($LASTEXITCODE -ne 0) { throw "GitHub CLI is not authenticated" }
 codex --version
 if ($LASTEXITCODE -ne 0) { throw "Codex CLI unavailable" }
 
-$reviewHelp = & codex review --help 2>&1
+$execHelp = & codex exec --help 2>&1
+if ($LASTEXITCODE -ne 0 -or -not ($execHelp -match "--ignore-user-config")) {
+  throw "Installed Codex CLI does not support isolated 'codex exec --ignore-user-config' execution"
+}
+
+$reviewHelp = & codex exec review --help 2>&1
 if ($LASTEXITCODE -ne 0 -or -not ($reviewHelp -match "--base")) {
-  throw "Installed Codex CLI does not support the required non-interactive 'codex review --base' command"
+  throw "Installed Codex CLI does not support the required non-interactive 'codex exec review --base' command"
 }
 
 Push-Location $repoPath

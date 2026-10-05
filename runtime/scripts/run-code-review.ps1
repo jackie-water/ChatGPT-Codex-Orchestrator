@@ -194,7 +194,7 @@ try {
   $previousErrorActionPreference = $ErrorActionPreference
   try {
     $ErrorActionPreference = "Continue"
-    & $codexCommand.Source -m $reviewModel -c $reviewModelCfg -c $effortCfg -c $projectDocsCfg -a never -s read-only review --base "origin/$defaultBranch" 1> $reviewFile 2> $logFile
+    & $codexCommand.Source exec --ignore-user-config -m $reviewModel -c $reviewModelCfg -c $effortCfg -c $projectDocsCfg -c 'features.plugins=false' -c 'features.apps=false' -c 'features.hooks=false' -c 'features.memories=false' -c 'features.goals=false' -c 'cloud.skills.enabled=false' -c 'skills.include_instructions=false' -a never -s read-only review --base "origin/$defaultBranch" 1> $reviewFile 2> $logFile
     $reviewExit = $LASTEXITCODE
   } finally {
     $ErrorActionPreference = $previousErrorActionPreference
