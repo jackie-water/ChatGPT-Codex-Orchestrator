@@ -223,6 +223,25 @@ function retireLegacyGlobalPending({home,instanceRoot}){
   return {retired,destination};
 }
 
+export function normalizedGithubRepository(remote){
+  const match=String(remote||"").trim().match(/^(?:https:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\.git)?\/?$/i);
+  return match?.[1].toLowerCase()||null;
+}
+
+function refreshControlCommit(controlPath,ownedPaths){
+  if(!run("git",["diff","--cached","--quiet"],{cwd:controlPath,allowFailure:true}).ok) throw new Error("Control repository index contains pre-staged unrelated changes");
+  const add=ownedPaths.filter(name=>fs.existsSync(path.join(controlPath,name)));
+  if(add.length) run("git",["add","--",...add],{cwd:controlPath});
+  const retired=RETIRED_ROUTING_SCRIPTS.map(name=>path.posix.join("scripts",name));
+  run("git",["add","-u","--",...retired],{cwd:controlPath});
+  const staged=run("git",["diff","--cached","--name-only"],{cwd:controlPath}).stdout.split(/\r?\n/).filter(Boolean);
+  if(staged.some(name=>!ownedPaths.includes(name)&&!retired.includes(name))) throw new Error("Runtime refresh staged an unrelated control file");
+  if(run("git",["diff","--cached","--quiet"],{cwd:controlPath,allowFailure:true}).ok) return {changed:false};
+  run("git",["-c","user.name=ChatGPT Codex Orchestrator","-c","user.email=codex-orchestrator@users.noreply.github.com","commit","-m","chore: refresh orchestrator runtime"],{cwd:controlPath});
+  try { run("git",["push","-u","origin","HEAD:main"],{cwd:controlPath}); } catch(error) { run("git",["reset","--soft","HEAD^"],{cwd:controlPath}); throw error; }
+  return {changed:true};
+}
+
 export function removeLegacyDefaultReviewRoutes(registryPath){
   const registry=JSON.parse(fs.readFileSync(registryPath,"utf8"));
   let changed=false;
@@ -297,9 +316,13 @@ export function upgradeControlEnvironment({state,sourceRoot=process.cwd(),home=o
 }
 
 export function refreshControlRuntime({state,sourceRoot=process.cwd()}){
+  const repository=String(state?.control_repository||"");
+  if(state?.control_environment_ready!==true||!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) throw new Error("Control environment identity is incomplete for runtime refresh");
   if(!state?.control_clone_path||!fs.existsSync(path.join(state.control_clone_path,".git"))){
     throw new Error("Existing control clone is unavailable for runtime refresh");
   }
+  if(normalizedGithubRepository(run("git",["remote","get-url","origin"],{cwd:state.control_clone_path}).stdout)!==repository.toLowerCase()) throw new Error("Control clone origin does not match control repository");
+  if(run("git",["branch","--show-current"],{cwd:state.control_clone_path}).stdout!=="main") throw new Error("Control clone must be on main for runtime refresh");
   if(!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(String(state.runner_label||""))){
     throw new Error("Existing runner identity is incomplete or invalid for runtime refresh");
   }
@@ -309,6 +332,7 @@ export function refreshControlRuntime({state,sourceRoot=process.cwd()}){
   if(!fs.existsSync(scriptsSource)||!fs.existsSync(workflowTemplatePath)){
     throw new Error("Current runtime source tree is incomplete");
   }
+  if(!run("git",["diff","--cached","--quiet"],{cwd:state.control_clone_path,allowFailure:true}).ok) throw new Error("Control repository index contains pre-staged unrelated changes");
 
   const scriptsDir=path.join(state.control_clone_path,"scripts");
   copyDirectory(scriptsSource,scriptsDir);
@@ -321,8 +345,9 @@ export function refreshControlRuntime({state,sourceRoot=process.cwd()}){
     {runnerLabel:state.runner_label}
   ));
 
+  const ownedPaths=[...fs.readdirSync(scriptsSource).map(name=>path.posix.join("scripts",name)),".github/workflows/orchestrator.yml"];
   return {
-    ...commitControlRepo(state.control_clone_path),
+    ...refreshControlCommit(state.control_clone_path,ownedPaths),
     retired_scripts:RETIRED_ROUTING_SCRIPTS
   };
 }

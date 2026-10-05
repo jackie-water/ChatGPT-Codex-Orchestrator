@@ -62,4 +62,6 @@
   "setup.chat_registration.waiting": "正在把当前这个 Chat 登记为明确的 callback 返回地址。请等待这条对话收到 CHAT-ROUTE-REGISTERED callback，然后再继续安装。",
   "setup.chat_registration.no_fallback": "登记完成前不会把 callback 改发到其他 Chat。",
   "setup.routing_upgrade.failed": "现有安装无法升级到显式 Chat route。系统不会使用 fallback Chat；请先修复这次升级再继续。"
+  ,"runtime.refresh.success": "Control runtime 刷新已完成。"
+  ,"runtime.refresh.failed": "Control runtime 刷新未完成。"
 }

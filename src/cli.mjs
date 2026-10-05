@@ -770,9 +770,9 @@ function refreshRuntime() {
     state.runtime_refreshed_at=new Date().toISOString();
     if(result.changed) state.control_commit=spawnSafeSync("git",["rev-parse","HEAD"],{cwd:state.control_clone_path,encoding:"utf8"}).stdout.trim();
     saveState(state);
-    emit({status:"PASS",preferred_language:lang,message:"Control runtime refresh completed",...result});
+    emit({status:"PASS",preferred_language:lang,message:t(lang,"runtime.refresh.success"),...result});
   } catch(error) {
-    emit({status:"ERROR",error_id:"RUNTIME-REFRESH-001",recoverable:true,preferred_language:lang,message:"Control runtime refresh was not completed",details:String(error.message||error)},1);
+    emit({status:"ERROR",error_id:"RUNTIME-REFRESH-001",recoverable:true,preferred_language:lang,message:t(lang,"runtime.refresh.failed"),details:String(error.message||error)},1);
   }
 }
 

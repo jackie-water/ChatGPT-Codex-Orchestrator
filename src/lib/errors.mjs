@@ -13,6 +13,7 @@ export const ERROR_CATALOG={
   "SETUP-012":"Reviewer browser sign-in was not confirmed.",
   "SETUP-013":"Verified target project activation failed after sandbox validation.",
   "SETUP-014":"Existing installation routing upgrade failed.",
+  "RUNTIME-REFRESH-001":"Control runtime refresh failed.",
   "AUTH-001":"GitHub authorization is missing.",
   "AUTH-002":"Codex login is unavailable.",
   "AUTH-003":"GitHub CLI login is unavailable.",
