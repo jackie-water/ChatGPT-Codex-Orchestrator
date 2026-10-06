@@ -18,7 +18,7 @@ test("review evidence validates exact context and dispositions", { skip: process
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "code-review-evidence-"));
   const file = path.join(dir, "evidence.md");
   const sha = "a".repeat(40);
-  const evidence = status => `<!-- CODEX_ORCHESTRATOR_CODE_REVIEW_V1 -->\n- source_branch: fix/example\n- reviewed_commit: ${sha}\nStatus: ${status}\n`;
+  const evidence = status => `<!-- CODEX_ORCHESTRATOR_CODE_REVIEW_V1 -->\n# Codex Code Review\n\n- source_branch: fix/example\n- reviewed_commit: ${sha}\n\n---\n\n## Result\n\nStatus: ${status}\n\n## Review target\n\n- source_branch: fix/example\n- reviewed_commit: ${sha}\n`;
   const invoke = (content, policy = false) => {
     fs.writeFileSync(file, content);
     return ps(`. ${quote(helper)}; Get-ExistingReviewEvidenceStatus -Content (Get-Content -Raw ${quote(file)}) -Path ${quote(file)} -ExpectedCommit ${quote(sha)} -ExpectedBranch ${quote("fix/example")} -DocsOnlyPolicy $${policy}`);
@@ -35,7 +35,9 @@ test("review evidence validates exact context and dispositions", { skip: process
       evidence("CODE_REVIEW_COMPLETE").replace("CODEX_ORCHESTRATOR_CODE_REVIEW_V1", "OTHER"),
       evidence("CODE_REVIEW_NOT_A_STATUS"), evidence("CODE_REVIEW_COMPLETE") + "Status: CODE_REVIEW_FAILED\n",
       evidence("CODE_REVIEW_COMPLETE").replace(sha, "b".repeat(40)), evidence("CODE_REVIEW_COMPLETE").replace("fix/example", "feat/other"),
-      evidence("CODE_REVIEW_SKIPPED_DOCS_ONLY"), evidence("CODE_REVIEW_COMPLETE").replace("- source_branch: fix/example\n", "")
+      evidence("CODE_REVIEW_SKIPPED_DOCS_ONLY"), evidence("CODE_REVIEW_COMPLETE").replace("- source_branch: fix/example\n", ""),
+      evidence("CODE_REVIEW_COMPLETE").replace("- source_branch: fix/example\n", "- source_branch: fix/example\n- source_branch: fix/other\n"),
+      evidence("CODE_REVIEW_COMPLETE").replace("- reviewed_commit: " + sha, "- reviewed_commit: " + sha + "\n- reviewed_commit: " + sha)
     ]) assert.notEqual(invoke(bad).status, 0);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
