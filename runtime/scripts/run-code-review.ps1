@@ -2,6 +2,7 @@ param([Parameter(Mandatory=$true)][string]$EventPath)
 $ErrorActionPreference = "Stop"
 
 $Root = Split-Path $PSScriptRoot -Parent
+. (Join-Path $PSScriptRoot "code-review-evidence.ps1")
 . (Join-Path $PSScriptRoot "runtime-context.ps1")
 $ConfigPath = Get-OrchestratorConfigPath
 $RegistryPath = Join-Path $Root "projects.json"
@@ -118,11 +119,17 @@ try {
     }
     if ($reviewEvidenceExists) {
       $checkpointCommit = (git rev-parse "origin/$checkpointBranch").Trim().ToLowerInvariant()
-      $callbackId = "code-review-existing-$projectKey-$reviewedCommit"
-      $message = "[CODE-REVIEW-AUTO callback_id=$callbackId] Independent Codex code review evidence already exists for project '$projectKey', branch $sourceBranch, commit $reviewedCommit. Authoritative review: checkpoint_commit=$checkpointCommit path=$reviewEvidencePath. Read that exact file from the checkpoint commit and adjudicate the findings. Do not rerun Code Review for this exact commit."
-      & (Join-Path $PSScriptRoot "wake-chat.ps1") -ChatUrl $chatUrl -Message $message -CallbackId $callbackId -QueueOnFailure
-      Write-Host "CODE_REVIEW_ALREADY_EXISTS commit=$reviewedCommit checkpoint=$checkpointCommit"
-      return
+      $reviewEvidenceContent = git show $reviewObject 2>$null
+      if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace(($reviewEvidenceContent -join [Environment]::NewLine))) { throw "Could not read code review evidence from exact checkpoint object $reviewObject" }
+      $existingStatus = Get-ExistingReviewEvidenceStatus -Content ($reviewEvidenceContent -join [Environment]::NewLine) -Path $reviewEvidencePath -ExpectedCommit $reviewedCommit -ExpectedBranch $sourceBranch -DocsOnlyPolicy $docsOnlySkip
+      if ((Get-CodeReviewEvidenceDisposition -Status $existingStatus) -eq "RETRY") { Write-Host "CODE_REVIEW_RETRYABLE_FAILED commit=$reviewedCommit checkpoint=$checkpointCommit" }
+      else {
+        $callbackId = "code-review-existing-$projectKey-$reviewedCommit"
+        $message = "[CODE-REVIEW-AUTO callback_id=$callbackId] Independent Codex code review evidence already exists for project '$projectKey', branch $sourceBranch, commit $reviewedCommit. Authoritative review: checkpoint_commit=$checkpointCommit path=$reviewEvidencePath. Read that exact file from the checkpoint commit and adjudicate the findings. Do not rerun Code Review for this exact commit."
+        & (Join-Path $PSScriptRoot "wake-chat.ps1") -ChatUrl $chatUrl -Message $message -CallbackId $callbackId -QueueOnFailure
+        Write-Host "CODE_REVIEW_ALREADY_EXISTS commit=$reviewedCommit checkpoint=$checkpointCommit"
+        return
+      }
     }
   }
 
