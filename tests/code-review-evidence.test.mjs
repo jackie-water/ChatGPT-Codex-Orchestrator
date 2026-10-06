@@ -85,7 +85,7 @@ test("publication replaces canonical evidence while retaining failed history", {
     const verify = (content, status, expectedDisposition) => {
       const file = path.join(dir, "canonical.md");
       fs.writeFileSync(file, content);
-      const result = ps(`. ${quote(evidenceHelper)}; $s = Get-ExistingReviewEvidenceStatus -Content (Get-Content -Raw ${quote(file)}) -Path ${quote(file)} -ExpectedCommit ${quote(reviewedCommit)} -ExpectedBranch ${quote("fix/example")}; if ($s.status -ne ${quote(status)}) { exit 1 }; Get-CodeReviewEvidenceDisposition -Status ${quote(status)}`);
+      const result = ps(`. ${quote(evidenceHelper)}; $s = Get-ExistingReviewEvidenceStatus -Content (Get-Content -Raw ${quote(file)}) -Path ${quote(file)} -ExpectedCommit ${quote(reviewedCommit)} -ExpectedBranch ${quote("fix/example")}; if ($s -ne ${quote(status)}) { exit 1 }; Get-CodeReviewEvidenceDisposition -Status ${quote(status)}`);
       assert.equal(result.status, 0, result.stderr);
       assert.equal(result.stdout.trim().split(/\r?\n/).at(-1), expectedDisposition);
     };
