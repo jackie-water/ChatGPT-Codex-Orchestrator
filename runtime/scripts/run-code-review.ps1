@@ -124,7 +124,8 @@ try {
         throw "Could not read code review evidence from exact checkpoint object $reviewObject"
       }
       $existingStatus = Get-ExistingReviewEvidenceStatus -Content ($reviewEvidenceContent -join [Environment]::NewLine) -Path $reviewEvidencePath -ExpectedCommit $reviewedCommit -ExpectedBranch $sourceBranch -DocsOnlyPolicy $docsOnlySkip
-      if ($existingStatus -eq "CODE_REVIEW_FAILED") {
+      $existingDisposition = Get-CodeReviewEvidenceDisposition -Status $existingStatus
+      if ($existingDisposition -eq "RETRY") {
         Write-Host "CODE_REVIEW_RETRYABLE_FAILED commit=$reviewedCommit checkpoint=$checkpointCommit"
       } else {
         $callbackId = "code-review-existing-$projectKey-$reviewedCommit"
@@ -178,6 +179,8 @@ try {
     Set-Content -Path $reportFile -Value ($reportLines -join [Environment]::NewLine) -Encoding utf8
     $publishOutput = @(& (Join-Path $PSScriptRoot "publish-code-review.ps1") -RepoPath $repoPath -ProjectKey $projectKey -Repository $repository -CheckpointBranch $checkpointBranch -SourceBranch $sourceBranch -SourceCommit $reviewedCommit -ReportPath $reportFile)
     foreach ($line in $publishOutput) { Write-Host $line }
+    git fetch origin "+refs/heads/$checkpointBranch`:refs/remotes/origin/$checkpointBranch" | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Could not synchronize checkpoint remote-tracking ref after publication" }
     $publishLine = @($publishOutput | Where-Object { [string]$_ -match '^CODE_REVIEW_PUBLISHED ' } | Select-Object -Last 1)
     if ($publishLine.Count -eq 0) { throw "Code review publication did not return immutable coordinates" }
     $checkpointCommitMatch = [regex]::Match([string]$publishLine[0],'commit=([0-9a-fA-F]{40})')
@@ -268,6 +271,8 @@ try {
 
   $publishOutput = @(& (Join-Path $PSScriptRoot "publish-code-review.ps1") -RepoPath $repoPath -ProjectKey $projectKey -Repository $repository -CheckpointBranch $checkpointBranch -SourceBranch $sourceBranch -SourceCommit $reviewedCommit -ReportPath $reportFile)
   foreach ($line in $publishOutput) { Write-Host $line }
+  git fetch origin "+refs/heads/$checkpointBranch`:refs/remotes/origin/$checkpointBranch" | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw "Could not synchronize checkpoint remote-tracking ref after publication" }
   $publishLine = @($publishOutput | Where-Object { [string]$_ -match '^CODE_REVIEW_PUBLISHED ' } | Select-Object -Last 1)
   if ($publishLine.Count -eq 0) { throw "Code review publication did not return immutable coordinates" }
   $checkpointCommitMatch = [regex]::Match([string]$publishLine[0],'commit=([0-9a-fA-F]{40})')

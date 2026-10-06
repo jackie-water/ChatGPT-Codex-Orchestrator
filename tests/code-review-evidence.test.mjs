@@ -24,6 +24,15 @@ test("review evidence decisions fail closed and permit only failed retries", { s
     assert.equal(invoke(evidence("CODE_REVIEW_COMPLETE")).status, 0);
     assert.equal(invoke(evidence("CODE_REVIEW_SKIPPED_DOCS_ONLY"), true).status, 0);
     assert.equal(invoke(evidence("CODE_REVIEW_FAILED")).status, 0);
+    const disposition = status => {
+      const command = `. ${quote(helper)}; Get-CodeReviewEvidenceDisposition -Status ${quote(status)}`;
+      const r = ps(command);
+      assert.equal(r.status, 0, r.stdout + r.stderr);
+      return r.stdout.trim().split(/\r?\n/).at(-1);
+    };
+    assert.equal(disposition("CODE_REVIEW_FAILED"), "RETRY");
+    assert.equal(disposition("CODE_REVIEW_COMPLETE"), "DEDUP");
+    assert.equal(disposition("CODE_REVIEW_SKIPPED_DOCS_ONLY"), "DEDUP");
     for (const bad of [
       evidence("CODE_REVIEW_COMPLETE").replace("CODEX_ORCHESTRATOR_CODE_REVIEW_V1", "OTHER"),
       evidence("CODE_REVIEW_NOT_A_STATUS"),
@@ -54,7 +63,11 @@ test("review publisher replaces failed canonical evidence and retains timestampe
     syncCheckpoint();
     const publish = path.resolve("runtime/scripts/publish-code-review.ps1");
     const publishOnce = status => { fs.writeFileSync(report, `## Result\n\nStatus: ${status}\n`); const r = run(publish, ["-RepoPath", work, "-ProjectKey", "fixture", "-Repository", "fixture/repo", "-CheckpointBranch", "checkpoint", "-SourceBranch", "fix/review", "-SourceCommit", commit, "-ReportPath", report]); assert.equal(r.status, 0, r.stdout + r.stderr); syncCheckpoint(); return r.stdout; };
-    assert.equal(spawnSync("git", ["cat-file", "-e", "origin/checkpoint:.codex/reviews/by-commit/" + commit + ".md"], { cwd: work }).status, 1, "no prior evidence proceeds");
+    const checkpointRef = spawnSync("git", ["rev-parse", "--verify", "refs/remotes/origin/checkpoint^{commit}"], { cwd: work, encoding: "utf8" });
+    assert.equal(checkpointRef.status, 0, checkpointRef.stderr);
+    const missingPath = spawnSync("git", ["ls-tree", "--name-only", "origin/checkpoint", ".codex/reviews/by-commit/" + commit + ".md"], { cwd: work, encoding: "utf8" });
+    assert.equal(missingPath.status, 0, missingPath.stderr);
+    assert.equal(missingPath.stdout.trim(), "", "no prior evidence proceeds");
     const first = publishOnce("CODE_REVIEW_FAILED");
     const failedEvidence = git("show", "origin/checkpoint:.codex/reviews/by-commit/" + commit + ".md");
     const failedGate = ps(`. ${quote(path.resolve("runtime/scripts/code-review-evidence.ps1"))}; Get-ExistingReviewEvidenceStatus -Content ${quote(failedEvidence)} -Path ${quote("checkpoint evidence")} -ExpectedCommit ${quote(commit)} -ExpectedBranch ${quote("fix/review")} -DocsOnlyPolicy $false`);

@@ -24,3 +24,10 @@ function Get-ExistingReviewEvidenceStatus {
   if ($status -eq "CODE_REVIEW_SKIPPED_DOCS_ONLY") { throw "Code review evidence at $Path is docs-only but project policy does not allow that skip" }
   throw "Unknown or invalid code review evidence status at $Path`: $status"
 }
+
+function Get-CodeReviewEvidenceDisposition {
+  param([string]$Status)
+  if ($Status -eq "CODE_REVIEW_FAILED") { return "RETRY" }
+  if ($Status -in @("CODE_REVIEW_COMPLETE", "CODE_REVIEW_SKIPPED_DOCS_ONLY")) { return "DEDUP" }
+  throw "Cannot determine code review evidence disposition for status: $Status"
+}
