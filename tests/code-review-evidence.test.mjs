@@ -50,8 +50,10 @@ test("review publisher replaces failed canonical evidence and retains timestampe
     fs.writeFileSync(path.join(work, "seed.txt"), "seed\n"); git("add", "."); git("commit", "-m", "seed"); git("push", "origin", "HEAD:refs/heads/main");
     git("checkout", "-b", "fix/review"); fs.writeFileSync(path.join(work, "change.txt"), "change\n"); git("add", "."); git("commit", "-m", "change"); const commit = git("rev-parse", "HEAD"); git("push", "origin", "HEAD:refs/heads/fix/review");
     git("checkout", "-b", "checkpoint", "main"); git("push", "origin", "HEAD:refs/heads/checkpoint");
+    const syncCheckpoint = () => git("fetch", "origin", "checkpoint:refs/remotes/origin/checkpoint");
+    syncCheckpoint();
     const publish = path.resolve("runtime/scripts/publish-code-review.ps1");
-    const publishOnce = status => { fs.writeFileSync(report, `## Result\n\nStatus: ${status}\n`); const r = run(publish, ["-RepoPath", work, "-ProjectKey", "fixture", "-Repository", "fixture/repo", "-CheckpointBranch", "checkpoint", "-SourceBranch", "fix/review", "-SourceCommit", commit, "-ReportPath", report]); assert.equal(r.status, 0, r.stdout + r.stderr); return r.stdout; };
+    const publishOnce = status => { fs.writeFileSync(report, `## Result\n\nStatus: ${status}\n`); const r = run(publish, ["-RepoPath", work, "-ProjectKey", "fixture", "-Repository", "fixture/repo", "-CheckpointBranch", "checkpoint", "-SourceBranch", "fix/review", "-SourceCommit", commit, "-ReportPath", report]); assert.equal(r.status, 0, r.stdout + r.stderr); syncCheckpoint(); return r.stdout; };
     assert.equal(spawnSync("git", ["cat-file", "-e", "origin/checkpoint:.codex/reviews/by-commit/" + commit + ".md"], { cwd: work }).status, 1, "no prior evidence proceeds");
     const first = publishOnce("CODE_REVIEW_FAILED");
     const failedEvidence = git("show", "origin/checkpoint:.codex/reviews/by-commit/" + commit + ".md");
