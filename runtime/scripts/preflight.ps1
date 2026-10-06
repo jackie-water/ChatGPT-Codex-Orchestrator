@@ -178,9 +178,9 @@ try {
   Remove-Item -LiteralPath $workspaceProbeDirectory -Recurse -Force -ErrorAction SilentlyContinue
 }
 
-$reviewHelp = & codex exec review --help 2>&1
+$reviewHelp = & codex exec --ignore-user-config -c 'approval_policy="never"' -c 'sandbox_mode="read-only"' -c 'windows.sandbox="unelevated"' review --help 2>&1
 if ($LASTEXITCODE -ne 0 -or -not ($reviewHelp -match "--base")) {
-  throw "Installed Codex CLI does not support the required non-interactive 'codex exec review --base' command"
+  throw "Installed Codex CLI does not support the required isolated read-only 'codex exec review --base' command semantics"
 }
 
 $featureList = & codex features list 2>&1

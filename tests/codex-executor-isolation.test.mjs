@@ -27,7 +27,10 @@ test("implementation and independent review use isolated Codex exec sessions", (
   assert.doesNotMatch(runner, /-a never/);
   assert.doesNotMatch(runner, /\$approvalCfg|\$sandboxCfg|approval_policy|sandbox_mode/);
   assert.match(review, /exec --ignore-user-config[\s\S]*review --base/);
-  assert.match(review, /-a never[\s\S]*-s read-only/);
+  assert.match(review, /-c \$approvalCfg[\s\S]*-c \$sandboxCfg[\s\S]*-c 'windows\.sandbox="unelevated"'/);
+  assert.match(review, /\$approvalCfg = 'approval_policy="never"'/);
+  assert.match(review, /\$sandboxCfg = 'sandbox_mode="read-only"'/);
+  assert.doesNotMatch(review, /(?:\s|-)a never|(?:\s|-)s read-only/);
   assert.doesNotMatch(review, /& \$codexCommand\.Source\s+-m[\s\S]*\breview --base/);
   assert.doesNotMatch(review, /codex review(?:\s|--)/);
   assert.match(review, /review --base "origin\/\$defaultBranch"/);
@@ -61,8 +64,8 @@ test("preflight requires isolated exec, review base, and feature capability supp
   assert.match(preflight, /Codex workspace-permission-profile compatibility error/);
   assert.match(preflight, /failed to create the expected marker with exact content/);
   assert.doesNotMatch(preflight, /-not \(\$execHelp -match "\(\?m\).*--sandbox/);
-  assert.match(preflight, /codex exec review --help/);
-  assert.match(preflight, /codex exec review --base/);
+  assert.match(preflight, /codex exec --ignore-user-config -c 'approval_policy="never"' -c 'sandbox_mode="read-only"' -c 'windows\.sandbox="unelevated"' review --help/);
+  assert.match(preflight, /review --base/);
   assert.match(preflight, /codex features list/);
   for (const feature of ["plugins", "apps", "hooks", "memories", "goals", "skill_search", "skip_host_skill_discovery"]) {
     assert.match(preflight, new RegExp(`requiredFeatures[\\s\\S]*${feature}`));
@@ -78,6 +81,13 @@ test("feature capability check fails closed for a missing fake key", () => {
   const required = ["plugins", "apps", "hooks", "memories", "goals", "skill_search", "skip_host_skill_discovery"];
   assert.ok(required.some(feature => !new RegExp(`^\\s*${feature}\\s`, "m").test(fakeFeatureList)));
   assert.match(preflight, /throw ["']Installed Codex CLI does not expose required feature key/);
+});
+
+test("review preflight fails closed unless the isolated read-only invocation parses", () => {
+  const preflight = read("preflight.ps1");
+  assert.match(preflight, /\$reviewHelp = & codex exec --ignore-user-config -c 'approval_policy="never"' -c 'sandbox_mode="read-only"' -c 'windows\.sandbox="unelevated"' review --help/);
+  assert.match(preflight, /\$LASTEXITCODE -ne 0[\s\S]*--base/);
+  assert.match(preflight, /isolated read-only/);
 });
 
 test("preflight does not require legacy sandbox CLI capability", () => {
