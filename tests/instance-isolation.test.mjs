@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { pendingCallbackCount, doctorHealth } from "../src/lib/runtime-health.mjs";
 
 const runtime=file=>fs.readFileSync(new URL("../runtime/scripts/"+file,import.meta.url),"utf8");
 
@@ -46,18 +49,30 @@ test("installer launches the callback browser with its exact port and profile",(
   assert.match(text,/"-ProfilePath",state\.browser_profile/);
 });
 
-test("runtime health counts only the current instance pending-wakes directory",()=>{
-  const text=fs.readFileSync(new URL("../src/cli.mjs",import.meta.url),"utf8");
-  assert.match(text,/state\.instance_root\s*\n\s*\? path\.join\(state\.instance_root,"pending-wakes"\)/);
-  assert.doesNotMatch(text,/path\.join\(os\.homedir\(\),"\.chatgpt-codex-orchestrator","pending-wakes"\)/);
-  assert.match(text,/filter\(x=>x\.endsWith\("\.json"\)\)\.length/);
-  assert.match(text,/checks\.pending_callbacks===0/);
+test("runtime health counts only JSON files in the current instance pending-wakes directory",()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),"runtime-health-"));
+  const instance=path.join(root,"instance");
+  const pending=path.join(instance,"pending-wakes");
+  const shared=path.join(root,"home",".chatgpt-codex-orchestrator","pending-wakes");
+  fs.mkdirSync(pending,{recursive:true});
+  fs.mkdirSync(shared,{recursive:true});
+  for(const name of ["one.json","two.json","three.json"]) fs.writeFileSync(path.join(pending,name),"{}");
+  fs.writeFileSync(path.join(pending,"ignored.txt"),"{}");
+  fs.writeFileSync(path.join(shared,"sentinel.json"),"{}");
+  assert.equal(pendingCallbackCount({instance_root:instance}),3);
 });
 
-test("runtime health has no queue fallback before instance setup",()=>{
-  const text=fs.readFileSync(new URL("../src/cli.mjs",import.meta.url),"utf8");
-  assert.match(text,/const pendingDir=state\.instance_root[\s\S]*?: null;/);
-  assert.match(text,/pendingDir&&fs\.existsSync\(pendingDir\)/);
-  assert.match(text,/pending_callbacks:pendingCallbacks/);
-  assert.match(text,/error_id:healthy\?null:"DOCTOR-001",recoverable:true/);
+test("runtime health does not scan the shared queue before instance setup",()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),"runtime-health-"));
+  const shared=path.join(root,"home",".chatgpt-codex-orchestrator","pending-wakes");
+  fs.mkdirSync(shared,{recursive:true});
+  fs.writeFileSync(path.join(shared,"sentinel.json"),"{}");
+  assert.equal(pendingCallbackCount({instance_root:""}),0);
+  assert.equal(pendingCallbackCount({}),0);
+});
+
+test("doctor health passes with no pending callbacks and errors when callbacks are pending",()=>{
+  const checks={control_repository:true,control_clone:true,project_clone:true,pending_callbacks:0};
+  assert.deepEqual(doctorHealth(checks),{healthy:true,status:"PASS",error_id:null,recoverable:true});
+  assert.deepEqual(doctorHealth({...checks,pending_callbacks:2}),{healthy:false,status:"ERROR",error_id:"DOCTOR-001",recoverable:true});
 });

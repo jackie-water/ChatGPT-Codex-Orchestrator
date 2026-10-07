@@ -12,6 +12,7 @@ import { submitDiagnosticReport } from "./lib/reporting.mjs";
 import { prepareControlEnvironment, activateTargetProject, upgradeControlEnvironment, refreshControlRuntime } from "./lib/control-env.mjs";
 import { renderProjectInstructions } from "./lib/project-instructions.mjs";
 import { ensureInstallerChatRegistration } from "./lib/chat-registration.mjs";
+import { pendingCallbackCount, doctorHealth } from "./lib/runtime-health.mjs";
 import {
   sandboxSmokeStatus,
   startSandboxSmoke,
@@ -662,12 +663,7 @@ function githubLogin() {
 }
 
 function runtimeChecks(state) {
-  const pendingDir=state.instance_root
-    ? path.join(state.instance_root,"pending-wakes")
-    : null;
-  const pendingCallbacks=pendingDir&&fs.existsSync(pendingDir)
-    ? fs.readdirSync(pendingDir).filter(x=>x.endsWith(".json")).length
-    : 0;
+  const pendingCallbacks=pendingCallbackCount(state);
 
   let runnerRunning=false;
   if(process.platform==="win32" && state.runner_path){
@@ -727,9 +723,8 @@ function doctor() {
   }
   checks.runtime_preflight=preflight;
 
-  const booleanChecks=Object.fromEntries(Object.entries(checks).filter(([,v])=>typeof v==="boolean"));
-  const healthy=Object.values(booleanChecks).every(Boolean)&&checks.pending_callbacks===0;
-  emit({status:healthy?"PASS":"ERROR",error_id:healthy?null:"DOCTOR-001",recoverable:true,preferred_language:lang,message:healthy?t(lang,"doctor.healthy"):t(lang,"doctor.attention"),checks,preflight_details:preflightDetails},healthy?0:1);
+  const health=doctorHealth(checks);
+  emit({status:health.status,error_id:health.error_id,recoverable:health.recoverable,preferred_language:lang,message:health.healthy?t(lang,"doctor.healthy"):t(lang,"doctor.attention"),checks,preflight_details:preflightDetails},health.healthy?0:1);
 }
 
 function status() {
