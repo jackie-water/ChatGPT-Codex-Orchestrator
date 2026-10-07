@@ -45,3 +45,19 @@ test("installer launches the callback browser with its exact port and profile",(
   assert.match(text,/"-Port",String\(state\.browser_port\)/);
   assert.match(text,/"-ProfilePath",state\.browser_profile/);
 });
+
+test("runtime health counts only the current instance pending-wakes directory",()=>{
+  const text=fs.readFileSync(new URL("../src/cli.mjs",import.meta.url),"utf8");
+  assert.match(text,/state\.instance_root\s*\n\s*\? path\.join\(state\.instance_root,"pending-wakes"\)/);
+  assert.doesNotMatch(text,/path\.join\(os\.homedir\(\),"\.chatgpt-codex-orchestrator","pending-wakes"\)/);
+  assert.match(text,/filter\(x=>x\.endsWith\("\.json"\)\)\.length/);
+  assert.match(text,/checks\.pending_callbacks===0/);
+});
+
+test("runtime health has no queue fallback before instance setup",()=>{
+  const text=fs.readFileSync(new URL("../src/cli.mjs",import.meta.url),"utf8");
+  assert.match(text,/const pendingDir=state\.instance_root[\s\S]*?: null;/);
+  assert.match(text,/pendingDir&&fs\.existsSync\(pendingDir\)/);
+  assert.match(text,/pending_callbacks:pendingCallbacks/);
+  assert.match(text,/error_id:healthy\?null:"DOCTOR-001",recoverable:true/);
+});

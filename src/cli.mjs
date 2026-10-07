@@ -662,8 +662,10 @@ function githubLogin() {
 }
 
 function runtimeChecks(state) {
-  const pendingDir=path.join(os.homedir(),".chatgpt-codex-orchestrator","pending-wakes");
-  const pendingCallbacks=fs.existsSync(pendingDir)
+  const pendingDir=state.instance_root
+    ? path.join(state.instance_root,"pending-wakes")
+    : null;
+  const pendingCallbacks=pendingDir&&fs.existsSync(pendingDir)
     ? fs.readdirSync(pendingDir).filter(x=>x.endsWith(".json")).length
     : 0;
 
@@ -726,7 +728,7 @@ function doctor() {
   checks.runtime_preflight=preflight;
 
   const booleanChecks=Object.fromEntries(Object.entries(checks).filter(([,v])=>typeof v==="boolean"));
-  const healthy=Object.values(booleanChecks).every(Boolean);
+  const healthy=Object.values(booleanChecks).every(Boolean)&&checks.pending_callbacks===0;
   emit({status:healthy?"PASS":"ERROR",error_id:healthy?null:"DOCTOR-001",recoverable:true,preferred_language:lang,message:healthy?t(lang,"doctor.healthy"):t(lang,"doctor.attention"),checks,preflight_details:preflightDetails},healthy?0:1);
 }
 
