@@ -18,13 +18,22 @@ test("review evidence validates exact context and dispositions", { skip: process
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "code-review-evidence-"));
   const file = path.join(dir, "evidence.md");
   const sha = "a".repeat(40);
-  const evidence = status => `<!-- CODEX_ORCHESTRATOR_CODE_REVIEW_V1 -->\n# Codex Code Review\n\n- source_branch: fix/example\n- reviewed_commit: ${sha}\n\n---\n\n## Result\n\nStatus: ${status}\n\n## Review target\n\n- source_branch: fix/example\n- reviewed_commit: ${sha}\n`;
+  const evidenceLines = status => [
+    "<!-- CODEX_ORCHESTRATOR_CODE_REVIEW_V1 -->", "# Codex Code Review", "",
+    "- source_branch: fix/example", `- reviewed_commit: ${sha}`, "", "---", "",
+    "## Result", "", `Status: ${status}`, "", "## Review target", "",
+    "- source_branch: fix/example", `- reviewed_commit: ${sha}`, ""
+  ];
+  const evidence = (status, newline = "\n") => evidenceLines(status).join(newline);
   const invoke = (content, policy = false) => {
     fs.writeFileSync(file, content);
     return ps(`. ${quote(helper)}; Get-ExistingReviewEvidenceStatus -Content (Get-Content -Raw ${quote(file)}) -Path ${quote(file)} -ExpectedCommit ${quote(sha)} -ExpectedBranch ${quote("fix/example")} -DocsOnlyPolicy $${policy}`);
   };
   try {
     for (const status of ["CODE_REVIEW_COMPLETE", "CODE_REVIEW_FAILED"]) assert.equal(invoke(evidence(status)).status, 0);
+    assert.equal(invoke(evidence("CODE_REVIEW_COMPLETE", "\r\n")).status, 0);
+    const environmentNewline = JSON.parse(ps("[Environment]::NewLine | ConvertTo-Json").stdout);
+    assert.equal(invoke(evidence("CODE_REVIEW_COMPLETE", environmentNewline)).status, 0);
     assert.equal(invoke(evidence("CODE_REVIEW_SKIPPED_DOCS_ONLY"), true).status, 0);
     for (const [status, expected] of [["CODE_REVIEW_FAILED", "RETRY"], ["CODE_REVIEW_COMPLETE", "DEDUP"], ["CODE_REVIEW_SKIPPED_DOCS_ONLY", "DEDUP"]]) {
       const result = ps(`. ${quote(helper)}; Get-CodeReviewEvidenceDisposition -Status ${quote(status)}`);
