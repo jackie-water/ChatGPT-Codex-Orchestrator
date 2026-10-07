@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { pendingCallbackCount, doctorHealth } from "../src/lib/runtime-health.mjs";
+import { pendingCallbackCount, doctorHealth, repairHealth } from "../src/lib/runtime-health.mjs";
 
 const runtime=file=>fs.readFileSync(new URL("../runtime/scripts/"+file,import.meta.url),"utf8");
 
@@ -75,4 +75,17 @@ test("doctor health passes with no pending callbacks and errors when callbacks a
   const checks={control_repository:true,control_clone:true,project_clone:true,pending_callbacks:0};
   assert.deepEqual(doctorHealth(checks),{healthy:true,status:"PASS",error_id:null,recoverable:true});
   assert.deepEqual(doctorHealth({...checks,pending_callbacks:2}),{healthy:false,status:"ERROR",error_id:"DOCTOR-001",recoverable:true});
+});
+
+test("repair health passes only when pending callbacks are resolved",()=>{
+  const pass=repairHealth({pending_callbacks:0});
+  assert.equal(pass.status,"PASS");
+  assert.equal(pass.error_id,null);
+  assert.ok(pass.repaired.includes("pending_callbacks"));
+
+  const unresolved=repairHealth({pending_callbacks:2});
+  assert.deepEqual(unresolved,{status:"ERROR",error_id:"REPAIR-001",recoverable:true,
+    message:"Unresolved pending callbacks remain after safe retry/reconciliation and require separate resolution.",
+    repaired:["runner","reviewer_browser","preflight"]});
+  assert.ok(!unresolved.repaired.includes("pending_callbacks"));
 });

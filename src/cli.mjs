@@ -12,7 +12,7 @@ import { submitDiagnosticReport } from "./lib/reporting.mjs";
 import { prepareControlEnvironment, activateTargetProject, upgradeControlEnvironment, refreshControlRuntime } from "./lib/control-env.mjs";
 import { renderProjectInstructions } from "./lib/project-instructions.mjs";
 import { ensureInstallerChatRegistration } from "./lib/chat-registration.mjs";
-import { pendingCallbackCount, doctorHealth } from "./lib/runtime-health.mjs";
+import { pendingCallbackCount, doctorHealth, repairHealth } from "./lib/runtime-health.mjs";
 import {
   sandboxSmokeStatus,
   startSandboxSmoke,
@@ -756,7 +756,12 @@ function repair() {
     return emit({status:"ERROR",error_id:"REPAIR-001",recoverable:true,preferred_language:lang,message:t(lang,"repair.failed"),details:state.last_error.message,runtime:runtimeChecks(state)},1);
   }
 
-  emit({status:"PASS",preferred_language:lang,message:t(lang,"repair.success"),repaired:["runner","reviewer_browser","pending_callbacks","preflight"],runtime:runtimeChecks(state)});
+  const runtime=runtimeChecks(state);
+  const health=repairHealth(runtime);
+  if(health.status!=="PASS"){
+    return emit({status:health.status,error_id:health.error_id,recoverable:health.recoverable,preferred_language:lang,message:health.message,repaired:health.repaired,runtime},1);
+  }
+  emit({status:"PASS",preferred_language:lang,message:t(lang,"repair.success"),repaired:health.repaired,runtime});
 }
 
 function refreshRuntime() {

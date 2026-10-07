@@ -21,3 +21,21 @@ export function doctorHealth(checks) {
     recoverable: true
   };
 }
+
+export function repairHealth(runtime) {
+  if (runtime.pending_callbacks > 0) {
+    return {
+      status: "ERROR",
+      error_id: "REPAIR-001",
+      recoverable: true,
+      message: "Unresolved pending callbacks remain after safe retry/reconciliation and require separate resolution.",
+      repaired: ["runner", "reviewer_browser", "preflight"]
+    };
+  }
+  return {
+    status: "PASS",
+    error_id: null,
+    recoverable: true,
+    repaired: ["runner", "reviewer_browser", "pending_callbacks", "preflight"]
+  };
+}
