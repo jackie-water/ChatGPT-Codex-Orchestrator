@@ -13,34 +13,9 @@ if (-not [string]::IsNullOrWhiteSpace($ChatUrl) -and
 if ([string]::IsNullOrWhiteSpace($Port)) {
   $Port = if ($env:ORCHESTRATOR_BROWSER_DEBUG_PORT) { $env:ORCHESTRATOR_BROWSER_DEBUG_PORT } else { "9333" }
 }
-if ([string]::IsNullOrWhiteSpace($ProfilePath)) {
-  $ProfilePath = if ($env:ORCHESTRATOR_BROWSER_PROFILE) {
-    $env:ORCHESTRATOR_BROWSER_PROFILE
-  }
-  if ([string]::IsNullOrWhiteSpace($ProfilePath)) {
-    if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
-      throw "A browser profile path is required when LOCALAPPDATA is unavailable"
-    }
-    $ProfilePath = Join-Path $env:LOCALAPPDATA "ChatGPTCodexOrchestratorReviewer"
-  }
+if ($Port -notmatch '^\d+$' -or [int64]$Port -lt 1 -or [int64]$Port -gt 65535) {
+  throw "Browser debug port must be an integer between 1 and 65535"
 }
-
-$edge = $null
-$edgeCmd = Get-Command msedge.exe -ErrorAction SilentlyContinue
-if ($edgeCmd) { $edge = $edgeCmd.Source }
-
-if (-not $edge) {
-  $programFilesX86 = [Environment]::GetEnvironmentVariable("ProgramFiles(x86)")
-  $candidates = @()
-  foreach ($basePath in @($programFilesX86, $env:ProgramFiles, $env:LOCALAPPDATA)) {
-    if (-not [string]::IsNullOrWhiteSpace($basePath)) {
-      $candidate = Join-Path $basePath "Microsoft\Edge\Application\msedge.exe"
-      if (Test-Path $candidate) { $candidates += $candidate }
-    }
-  }
-  $edge = $candidates | Select-Object -First 1
-}
-if (-not $edge) { throw "Microsoft Edge was not found" }
 
 $up = $false
 try {
@@ -49,6 +24,31 @@ try {
 } catch {}
 
 if (-not $up) {
+  if ([string]::IsNullOrWhiteSpace($ProfilePath)) {
+    $ProfilePath = if ($env:ORCHESTRATOR_BROWSER_PROFILE) { $env:ORCHESTRATOR_BROWSER_PROFILE }
+    if ([string]::IsNullOrWhiteSpace($ProfilePath)) {
+      if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+        throw "A browser profile path is required when LOCALAPPDATA is unavailable"
+      }
+      $ProfilePath = Join-Path $env:LOCALAPPDATA "ChatGPTCodexOrchestratorReviewer"
+    }
+  }
+  $edge = $null
+  $edgeCmd = Get-Command msedge.exe -ErrorAction SilentlyContinue
+  if ($edgeCmd) { $edge = $edgeCmd.Source }
+  if (-not $edge) {
+    $programFilesX86 = [Environment]::GetEnvironmentVariable("ProgramFiles(x86)")
+    $candidates = @()
+    foreach ($basePath in @($programFilesX86, $env:ProgramFiles, $env:LOCALAPPDATA)) {
+      if (-not [string]::IsNullOrWhiteSpace($basePath)) {
+        $candidate = Join-Path $basePath "Microsoft\Edge\Application\msedge.exe"
+        if (Test-Path $candidate) { $candidates += $candidate }
+      }
+    }
+    $edge = $candidates | Select-Object -First 1
+  }
+  if (-not $edge) { throw "Microsoft Edge was not found" }
+
   Start-Process -FilePath $edge -ArgumentList @(
     "--remote-debugging-port=$Port",
     "--user-data-dir=$ProfilePath",

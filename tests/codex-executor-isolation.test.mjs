@@ -63,6 +63,10 @@ test("preflight requires isolated exec, review base, and feature capability supp
   assert.match(preflight, /finally \{[\s\S]*Remove-Item -LiteralPath \$workspaceProbeDirectory -Recurse -Force/);
   assert.match(preflight, /Codex workspace-permission-profile compatibility error/);
   assert.match(preflight, /failed to create the expected marker with exact content/);
+  assert.match(preflight, /Join-Path \(Get-OrchestratorInstanceRoot\) \("codex-workspace-profile-probe-/);
+  assert.doesNotMatch(preflight, /workspaceProbeDirectory = Join-Path \$env:TEMP/);
+  assert.match(preflight, /workspaceProbeCodexHome = Join-Path \$workspaceProbeDirectory "codex-home"/);
+  assert.match(preflight, /workspaceProbeWorkspace = Join-Path \$workspaceProbeDirectory "workspace"/);
   assert.doesNotMatch(preflight, /-not \(\$execHelp -match "\(\?m\).*--sandbox/);
   assert.match(preflight, /codex exec --ignore-user-config -c 'approval_policy="never"' -c 'sandbox_mode="read-only"' -c 'windows\.sandbox="unelevated"' review --help/);
   assert.match(preflight, /review --base/);

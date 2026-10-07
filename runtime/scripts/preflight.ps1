@@ -149,7 +149,7 @@ if ($LASTEXITCODE -ne 0 -or -not ($execHelp -match "--ignore-user-config")) {
   throw "Installed Codex CLI does not support isolated 'codex exec --ignore-user-config' execution"
 }
 
-$workspaceProbeDirectory = Join-Path $env:TEMP ("codex-workspace-profile-probe-" + [guid]::NewGuid().ToString("N"))
+$workspaceProbeDirectory = Join-Path (Get-OrchestratorInstanceRoot) ("codex-workspace-profile-probe-" + [guid]::NewGuid().ToString("N"))
 $workspaceProbeCodexHome = Join-Path $workspaceProbeDirectory "codex-home"
 $workspaceProbeWorkspace = Join-Path $workspaceProbeDirectory "workspace"
 $workspaceProbeMarker = Join-Path $workspaceProbeWorkspace "marker.txt"
