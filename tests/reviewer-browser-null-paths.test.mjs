@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {execFileSync} from "node:child_process";
+import {execFile, execFileSync} from "node:child_process";
 import {createServer} from "node:http";
 import path from "node:path";
 
@@ -18,6 +18,18 @@ const powershell=(assignments,args="")=>{
   }
 };
 
+const powershellAsync=(assignments,args="")=>{
+  const setup=assignments.map(([name,value])=>
+    `[Environment]::SetEnvironmentVariable('${name}',${value === null ? "$null" : `'${value}'`},'Process')`
+  ).join("; ");
+  return new Promise(resolve=>execFile(
+    "powershell.exe",
+    ["-NoLogo","-NoProfile","-NonInteractive","-ExecutionPolicy","Bypass","-Command",`${setup}; & '${script}' ${args}`],
+    {encoding:"utf8"},
+    (error,stdout,stderr)=>resolve(error ? `${error.message ?? ""}${stdout ?? ""}${stderr ?? ""}` : "")
+  ));
+};
+
 const isolatedPort=async()=>{
   const server=createServer();
   await new Promise(resolve=>server.listen(0,"127.0.0.1",resolve));
@@ -32,19 +44,21 @@ test("already-running browser is probed before Edge and profile discovery",()=>{
 });
 
 test("already-up debug endpoint succeeds without Edge discovery",async()=>{
+  let requests=0;
   const server=createServer((request,response)=>{
-    if(request.url === "/json/version") { response.end('{"Browser":"Edge/1"}'); return; }
+    if(request.url === "/json/version") { requests++; response.end('{"Browser":"Edge/1"}'); return; }
     response.statusCode=404; response.end();
   });
   await new Promise(resolve=>server.listen(0,"127.0.0.1",resolve));
   try {
     const port=server.address().port;
-    const output=powershell([
+    const output=await powershellAsync([
       ["ProgramFiles(x86)",null], ["ProgramFiles",null], ["LOCALAPPDATA",null],
       ["ORCHESTRATOR_BROWSER_PROFILE",null]
     ],`-Port '${port}'`);
     assert.equal(output,"");
-  } finally { server.close(); }
+    assert.equal(requests,1);
+  } finally { await new Promise(resolve=>server.close(resolve)); }
 },{skip: process.platform !== "win32"});
 
 for(const missing of ["ProgramFiles(x86)","ProgramFiles","LOCALAPPDATA"]){
