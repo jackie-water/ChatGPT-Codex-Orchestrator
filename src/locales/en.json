@@ -38,6 +38,8 @@
   "repair.not_ready": "Repair cannot start yet because the isolated runtime has not been configured.",
   "repair.failed": "Automatic repair did not finish. I can use the diagnostic details to guide the next single step.",
   "repair.success": "Repair completed. The runner/browser were checked and pending callbacks were retried.",
+  "repair.unresolved_callbacks": "Unresolved pending callbacks remain after safe retry/reconciliation and require separate resolution.",
+  "repair.runtime_unhealthy": "The runtime is still not healthy after repair; no failed component is claimed as repaired.",
   "setup.codex.login": "Codex needs to sign in with your ChatGPT account. Complete only this sign-in step.",
   "setup.codex.trust_sandbox": "Codex needs permission to work in the isolated sandbox folder. Open Codex there, approve trust for that folder, then tell me when it is done.",
   "setup.codex.trust_project": "The sandbox test passed. Now approve Codex trust for your real project folder. Do not give Codex a coding task; only approve the folder.",

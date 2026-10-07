@@ -64,4 +64,6 @@
   "setup.routing_upgrade.failed": "现有安装无法升级到显式 Chat route。系统不会使用 fallback Chat；请先修复这次升级再继续。"
   ,"runtime.refresh.success": "Control runtime 刷新已完成。"
   ,"runtime.refresh.failed": "Control runtime 刷新未完成。"
+  ,"repair.unresolved_callbacks": "安全重试和协调后仍有未解决的 callback，需要单独处理。"
+  ,"repair.runtime_unhealthy": "修复后运行时仍不健康；不会将失败的组件声明为已修复。"
 }

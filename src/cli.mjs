@@ -757,9 +757,9 @@ function repair() {
   }
 
   const runtime=runtimeChecks(state);
-  const health=repairHealth(runtime);
+  const health=repairHealth(runtime,{preflightEstablished:true});
   if(health.status!=="PASS"){
-    return emit({status:health.status,error_id:health.error_id,recoverable:health.recoverable,preferred_language:lang,message:health.message,repaired:health.repaired,runtime},1);
+    return emit({status:health.status,error_id:health.error_id,recoverable:health.recoverable,preferred_language:lang,message:t(lang,health.reason_key),repaired:health.repaired,runtime},1);
   }
   emit({status:"PASS",preferred_language:lang,message:t(lang,"repair.success"),repaired:health.repaired,runtime});
 }

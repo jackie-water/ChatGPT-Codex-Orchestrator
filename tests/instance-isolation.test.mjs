@@ -77,15 +77,22 @@ test("doctor health passes with no pending callbacks and errors when callbacks a
   assert.deepEqual(doctorHealth({...checks,pending_callbacks:2}),{healthy:false,status:"ERROR",error_id:"DOCTOR-001",recoverable:true});
 });
 
-test("repair health passes only when pending callbacks are resolved",()=>{
-  const pass=repairHealth({pending_callbacks:0});
+test("repair health requires every runtime readiness boolean and no pending callbacks",()=>{
+  const healthy={control_repository:true,control_clone:true,project_clone:true,runner_running:true,reviewer_browser:true,codex_authenticated:true};
+  const pass=repairHealth({...healthy,pending_callbacks:0});
   assert.equal(pass.status,"PASS");
-  assert.equal(pass.error_id,null);
   assert.ok(pass.repaired.includes("pending_callbacks"));
 
-  const unresolved=repairHealth({pending_callbacks:2});
-  assert.deepEqual(unresolved,{status:"ERROR",error_id:"REPAIR-001",recoverable:true,
-    message:"Unresolved pending callbacks remain after safe retry/reconciliation and require separate resolution.",
-    repaired:["runner","reviewer_browser","preflight"]});
+  const unresolved=repairHealth({...healthy,pending_callbacks:2});
+  assert.equal(unresolved.status,"ERROR");
+  assert.equal(unresolved.reason_key,"repair.unresolved_callbacks");
   assert.ok(!unresolved.repaired.includes("pending_callbacks"));
+
+  for (const field of ["runner_running","reviewer_browser","codex_authenticated"]) {
+    const failed=repairHealth({...healthy,[field]:false,pending_callbacks:0});
+    assert.equal(failed.status,"ERROR");
+    assert.equal(failed.reason_key,"repair.runtime_unhealthy");
+    if (field === "runner_running") assert.ok(!failed.repaired.includes("runner"));
+    if (field === "reviewer_browser") assert.ok(!failed.repaired.includes("reviewer_browser"));
+  }
 });

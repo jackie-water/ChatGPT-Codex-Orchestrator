@@ -20,3 +20,10 @@ test("runtime refresh messages and error catalog stay covered",()=>{
   assert.match(t("en","runtime.refresh.failed"),/refresh/i);
   assert.equal(ERROR_CATALOG["RUNTIME-REFRESH-001"],"Control runtime refresh failed.");
 });
+
+test("repair health failure reasons are localized",()=>{
+  assert.match(t("en","repair.unresolved_callbacks"),/Unresolved pending callbacks/);
+  assert.doesNotMatch(t("zh-CN","repair.unresolved_callbacks"),/Unresolved pending callbacks/);
+  assert.match(t("en","repair.runtime_unhealthy"),/runtime is still not healthy/);
+  assert.doesNotMatch(t("zh-CN","repair.runtime_unhealthy"),/runtime is still not healthy/);
+});
