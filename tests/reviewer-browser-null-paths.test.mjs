@@ -18,6 +18,14 @@ const powershell=(assignments,args="")=>{
   }
 };
 
+const isolatedPort=async()=>{
+  const server=createServer();
+  await new Promise(resolve=>server.listen(0,"127.0.0.1",resolve));
+  const port=server.address().port;
+  await new Promise(resolve=>server.close(resolve));
+  return port;
+};
+
 test("already-running browser is probed before Edge and profile discovery",()=>{
   assert.ok(source.indexOf('Invoke-RestMethod -Uri "http://127.0.0.1:$Port/json/version"') < source.indexOf('Get-Command msedge.exe'));
   assert.match(source,/Port -notmatch '\^\\d\+\$'/);
@@ -40,25 +48,27 @@ test("already-up debug endpoint succeeds without Edge discovery",async()=>{
 },{skip: process.platform !== "win32"});
 
 for(const missing of ["ProgramFiles(x86)","ProgramFiles","LOCALAPPDATA"]){
-  test(`missing ${missing} does not cause a Join-Path parameter error`,{skip: process.platform !== "win32"},()=>{
+  test(`missing ${missing} does not cause a Join-Path parameter error`,{skip: process.platform !== "win32"},async()=>{
+    const port=await isolatedPort();
     const output=powershell([
       ["ProgramFiles(x86)",missing === "ProgramFiles(x86)" ? null : "C:\\missing-edge-x86"],
       ["ProgramFiles",missing === "ProgramFiles" ? null : "C:\\missing-edge"],
       ["LOCALAPPDATA",missing === "LOCALAPPDATA" ? null : "C:\\missing-localappdata"],
       ["ORCHESTRATOR_BROWSER_PROFILE","C:\\reviewer-profile"]
-    ]);
+    ],`-Port '${port}'`);
     assert.match(output,/Microsoft Edge was not found/);
     assert.doesNotMatch(output,/Cannot bind argument to parameter 'Path' because it is null/);
   });
 }
 
-test("missing LOCALAPPDATA makes the default profile path error explicit",{skip: process.platform !== "win32"},()=>{
+test("missing LOCALAPPDATA makes the default profile path error explicit",{skip: process.platform !== "win32"},async()=>{
+  const port=await isolatedPort();
   const output=powershell([
     ["ProgramFiles(x86)",null],
     ["ProgramFiles",null],
     ["LOCALAPPDATA",null],
     ["ORCHESTRATOR_BROWSER_PROFILE",null]
-  ]);
+  ],`-Port '${port}'`);
   assert.match(output,/A browser profile path is required when LOCALAPPDATA is unavailable/);
   assert.doesNotMatch(output,/Cannot bind argument to parameter 'Path' because it is null/);
 });
