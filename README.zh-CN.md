@@ -2,7 +2,7 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-> **当前为开发预览版，还不能用于正式生产环境。**
+> **v0.1.0 Windows 初始版本准备中。** 本分支用于准备发布元数据和文档。此处的版本标签不表示已经创建 GitHub tag 或 Release，也不表示已经公开下载或发布到 npm。
 
 ChatGPT Codex Orchestrator 的目标，是把你在 ChatGPT 里描述的需求变成一套更安全的自动编程流程。你告诉 ChatGPT 想做什么，ChatGPT 负责理解和规划；Codex 在独立分支里修改代码；自动检查验证结果；必要时再进行独立技术审查。除非你明确批准已经审查过的那个准确版本，否则主分支不会被修改。
 
@@ -142,8 +142,12 @@ Chat 回调               ✓
 
 默认报告不得包含密码、access token、API key、cookies、ChatGPT session、`.env` 内容或项目源代码。
 
-## 当前开发状态
+## v0.1.0 发布准备
 
-v0.1 正在完全独立的 DEV / SANDBOX 环境里开发和测试，不会使用现有生产 Orchestrator 作为试验环境。
+本分支用于准备 v0.1.0 Windows 初始版本。它不会自行创建 GitHub tag 或 Release，也不会公开发布任何内容。支持范围是 Windows v0.1；安装依赖已认证的浏览器/CLI 访问和人工授权。界面消息投递可能需要修复；遇到不明确的投递结果时，不得盲目重发。
 
 请参阅 [AI_INSTALL.md](AI_INSTALL.md)、[SECURITY.md](SECURITY.md) 和 [v0.1 Roadmap](docs/ROADMAP-v0.1.md)。
+
+## 许可证
+
+MIT — Copyright (c) 2026 JZH。详见 [LICENSE](LICENSE)。

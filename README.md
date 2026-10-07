@@ -2,7 +2,7 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-> **Development preview — not ready for production use yet.**
+> **v0.1.0 initial Windows release preparation.** This branch prepares release metadata and documentation. A version label here does not mean that a GitHub tag or release, public download, or npm publication has occurred.
 
 ChatGPT Codex Orchestrator helps turn a ChatGPT conversation into a safer coding workflow. You describe what you want. ChatGPT plans the change. Codex works on a separate branch. Automated checks verify the result. An independent review can look for technical problems. Your main branch is not changed unless you explicitly approve the exact reviewed version.
 
@@ -20,7 +20,7 @@ The preferred setup experience is:
 6. You complete that step and reply.
 7. The AI verifies it and continues.
 
-Windows users will also be able to double-click **Install.cmd**.
+Windows users can also double-click **Install.cmd**.
 
 ## Before you start
 
@@ -136,8 +136,12 @@ Nothing is uploaded automatically. You can review the report and decide whether 
 
 Passwords, access tokens, API keys, cookies, ChatGPT sessions, `.env` values and project source code must not be included by default.
 
-## Current development status
+## v0.1.0 release preparation
 
-v0.1 is being built and tested in a separate development/sandbox environment. Existing production orchestrators are not used as the test environment.
+This branch prepares the v0.1.0 initial Windows release. It does not itself create a GitHub tag or release or publish anything publicly. The supported scope is Windows v0.1; setup depends on authenticated browser/CLI access and human authorization. UI delivery can require repair, and an ambiguous delivery must not be blindly resent.
 
 See [AI_INSTALL.md](AI_INSTALL.md), [SECURITY.md](SECURITY.md), and [the v0.1 roadmap](docs/ROADMAP-v0.1.md).
+
+## License
+
+MIT — Copyright (c) 2026 JZH. See [LICENSE](LICENSE).
