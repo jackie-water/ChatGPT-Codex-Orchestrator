@@ -17,7 +17,7 @@ const powershell=(assignments)=>{
 };
 
 for(const missing of ["ProgramFiles(x86)","ProgramFiles","LOCALAPPDATA"]){
-  test(`missing ${missing} does not cause a Join-Path parameter error`,()=>{
+  test(`missing ${missing} does not cause a Join-Path parameter error`,{skip: process.platform !== "win32"},()=>{
     const output=powershell([
       ["ProgramFiles(x86)",missing === "ProgramFiles(x86)" ? null : "C:\\missing-edge-x86"],
       ["ProgramFiles",missing === "ProgramFiles" ? null : "C:\\missing-edge"],
@@ -29,7 +29,7 @@ for(const missing of ["ProgramFiles(x86)","ProgramFiles","LOCALAPPDATA"]){
   });
 }
 
-test("missing LOCALAPPDATA makes the default profile path error explicit",()=>{
+test("missing LOCALAPPDATA makes the default profile path error explicit",{skip: process.platform !== "win32"},()=>{
   const output=powershell([
     ["ProgramFiles(x86)",null],
     ["ProgramFiles",null],
