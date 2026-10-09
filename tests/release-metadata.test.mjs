@@ -14,6 +14,7 @@ test("release metadata is prepared for v0.1.0", async () => {
   assert.equal(packageJson.private, true);
   assert.equal(productJson.version, "0.1.0");
   assert.equal(productJson.release_channel, "stable");
+  assert.equal(productJson.feedback_repository, "jackie-water/ChatGPT-Codex-Orchestrator");
 });
 
 test("license text and README license links exist", async () => {

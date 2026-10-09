@@ -2,5 +2,5 @@
   "name": "ChatGPT Codex Orchestrator",
   "version": "0.1.0",
   "release_channel": "stable",
-  "feedback_repository": "jackie-water/ChatGPT-Codex-Orchestrator-Dev"
+  "feedback_repository": "jackie-water/ChatGPT-Codex-Orchestrator"
 }
