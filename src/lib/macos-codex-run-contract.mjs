@@ -132,3 +132,10 @@ export function recordMacosPreflightFailure({ planned, controlRoot, trustedGithu
   const { context, failure } = prepareFailure({ event: snapshot.event, controlRoot: snapshot.controlRoot, trustedGithubUsername: snapshot.trustedGithubUsername, stage: "preflight", code });
   return persistFailure({ context, failure });
 }
+
+// Deliberately exposes only the immutable authorization snapshot, not a mutable plan.
+export function getValidatedMacosCodexPlan(planned) {
+  const snapshot = planned && typeof planned === "object" ? validatedPlans.get(planned) : undefined;
+  if (!snapshot) fail("A validated plan is required");
+  return snapshot;
+}
