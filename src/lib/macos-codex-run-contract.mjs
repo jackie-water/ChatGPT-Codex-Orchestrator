@@ -25,7 +25,11 @@ function sameTrustedUsers(expected, actual) {
 function bodyOf(event) { try { return JSON.parse(event.issue.body); } catch { fail("Malformed normalized issue body"); } }
 function configuredSteps(project) {
   const profile = project.validation_profile || project.validationProfile || {};
-  const allow = profile.allowed_executables || project.allowed_validation_executables || [];
+  const allow = Object.prototype.hasOwnProperty.call(profile, "allowed_executables")
+    ? profile.allowed_executables
+    : Object.prototype.hasOwnProperty.call(project, "allowed_validation_executables")
+      ? project.allowed_validation_executables
+      : ["git"];
   const steps = profile.validation_steps || project.default_validation_steps || [];
   if (!Array.isArray(allow) || !allow.every(x => isSafeRef(x))) fail("Invalid validation executable allowlist");
   if (!Array.isArray(steps)) fail("Validation steps must be structured");

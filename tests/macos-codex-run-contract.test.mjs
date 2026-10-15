@@ -93,6 +93,31 @@ test("default validation steps remain and user argv is appended and deduped", ()
   assert.throws(() => withHome(f.home, () => planMacosCodexRun({ event: f.event({ validation_steps: [{ name: "bad", command: "npm", arguments: ["test; rm -rf /"] }] }), controlRoot: f.control, controlRepository: "jackie-water/control-private", trustedGithubUsername: ["trusted"] })));
 });
 
+test("validation executable allowlist defaults only when omitted", () => {
+  const configure = (f, allow, steps) => {
+    const projects = JSON.parse(fs.readFileSync(path.join(f.control, "projects.json"), "utf8"));
+    if (allow === "omitted") delete projects.projects.demo.allowed_validation_executables;
+    else projects.projects.demo.allowed_validation_executables = allow;
+    projects.projects.demo.default_validation_steps = steps;
+    fs.writeFileSync(path.join(f.control, "projects.json"), JSON.stringify(projects));
+  };
+  const plan = (f, body = {}) => withHome(f.home, () => planMacosCodexRun({ event: f.event(body), controlRoot: f.control, controlRepository: "jackie-water/control-private", trustedGithubUsername: ["trusted"] }));
+
+  let f = fixture(); configure(f, "omitted", [{ name: "git", command: "git", arguments: ["status", "--short"] }]);
+  assert.doesNotThrow(() => plan(f));
+
+  f = fixture(); configure(f, [], [{ name: "git", command: "git", arguments: ["status", "--short"] }]);
+  assert.throws(() => plan(f), /Validation executable is not allowed/);
+
+  f = fixture(); configure(f, ["node"], [{ name: "node", command: "node", arguments: ["--version"] }]);
+  assert.doesNotThrow(() => plan(f));
+  f = fixture(); configure(f, ["node"], [{ name: "git", command: "git", arguments: ["status", "--short"] }]);
+  assert.throws(() => plan(f), /Validation executable is not allowed/);
+
+  f = fixture(); configure(f, ["node"], [{ name: "node", command: "node", arguments: ["--version"] }]);
+  assert.deepEqual(plan(f).plan.validation_steps, [{ name: "node", command: "node", arguments: ["--version"] }]);
+});
+
 test("unsafe inputs reject before callback creation", () => {
   const f = fixture(); for (const body of [{ target_branch: "main" }, { iteration: 6 }, { prompt: "run bash -c evil" }, { validation_steps: [{ name: "x", command: "sh", arguments: ["-c", "evil"] }] }]) assert.throws(() => withHome(f.home, () => planMacosCodexRun({ event: f.event(body), controlRoot: f.control, controlRepository: "jackie-water/control-private", trustedGithubUsername: ["trusted"] })));
   assert.equal(fs.existsSync(path.join(f.home, ".chatgpt-codex-orchestrator", "instances", "test-instance", "failure-outbox")), false);
