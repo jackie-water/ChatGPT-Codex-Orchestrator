@@ -62,7 +62,7 @@ test("already-up debug endpoint succeeds without Edge discovery",async()=>{
 },{skip: process.platform !== "win32"});
 
 for(const missing of ["ProgramFiles(x86)","ProgramFiles","LOCALAPPDATA"]){
-  test(`missing ${missing} does not cause a Join-Path parameter error`,{skip: process.platform !== "win32"},async()=>{
+  test(`missing ${missing} does not cause a Join-Path parameter error`,async()=>{
     const port=await isolatedPort();
     const output=powershell([
       ["ProgramFiles(x86)",missing === "ProgramFiles(x86)" ? null : "C:\\missing-edge-x86"],
@@ -72,7 +72,7 @@ for(const missing of ["ProgramFiles(x86)","ProgramFiles","LOCALAPPDATA"]){
     ],`-Port '${port}'`);
     assert.match(output,/Microsoft Edge was not found/);
     assert.doesNotMatch(output,/Cannot bind argument to parameter 'Path' because it is null/);
-  });
+  },{skip: process.platform !== "win32"});
 }
 
 test("missing LOCALAPPDATA makes the default profile path error explicit",{skip: process.platform !== "win32"},async()=>{
