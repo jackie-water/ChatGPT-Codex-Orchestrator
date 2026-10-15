@@ -33,6 +33,29 @@ test("verified bare remote checkout executes once and records unvalidated succes
   } finally { process.env.HOME = old; }
 });
 
+test("trusted Codex symlink resolves to the executable target", async () => {
+  const f = fixture(); const old = process.env.HOME; process.env.HOME = f.home;
+  const link = path.join(f.root, "codex-link"); fs.symlinkSync(f.codex, link);
+  try {
+    const planned = planMacosCodexRun({ event: f.event(), controlRoot: f.control, controlRepository: "control/private", trustedGithubUsername: ["trusted"] });
+    const result = await executeMacosCodexRun({ planned, repoPath: f.repo, codexExecutable: link, controlRoot: f.control, trustedGithubUsername: ["trusted"], timeoutMs: 5000 });
+    assert.equal(result.execution_state, "EXECUTED_UNVALIDATED");
+  } finally { process.env.HOME = old; }
+});
+
+test("rejects dangling and directory Codex symlinks before spawn", async () => {
+  for (const target of ["dangling", "directory"]) {
+    const f = fixture(); const old = process.env.HOME; process.env.HOME = f.home;
+    const link = path.join(f.root, "codex-link"); const destination = path.join(f.root, target);
+    if (target === "directory") fs.mkdirSync(destination); fs.symlinkSync(destination, link);
+    try {
+      const planned = planMacosCodexRun({ event: f.event(), controlRoot: f.control, controlRepository: "control/private", trustedGithubUsername: ["trusted"] });
+      await assert.rejects(() => executeMacosCodexRun({ planned, repoPath: f.repo, codexExecutable: link, controlRoot: f.control, trustedGithubUsername: ["trusted"], timeoutMs: 5000 }), /trusted/);
+      assert.equal(fs.existsSync(path.join(f.repo, "argv")), false);
+    } finally { process.env.HOME = old; }
+  }
+});
+
 test("nonzero Codex and timeout persist safe P1 failures", async () => {
   for (const mode of ["nonzero", "timeout"]) {
     const f = fixture(); const old = process.env.HOME; process.env.HOME = f.home;
@@ -126,6 +149,32 @@ test("queues nonzero Codex failure to the original authorized instance after Con
     assert.equal(result.failure.callback_id, "failure-demo-200-1"); assert.equal(result.failure.callback.chat_url, "https://chatgpt.com/c/chat-165"); assert.equal(result.failure.callback.delivery_state, "PENDING"); assert.equal(result.failure.source_commit, null);
     const outbox = path.join(f.home, ".chatgpt-codex-orchestrator/instances/exec-test/failure-outbox/failure-demo-200-1.json"); assert.equal(fs.existsSync(outbox), true); assert.equal(JSON.parse(fs.readFileSync(outbox)).callback_id, "failure-demo-200-1");
     assert.equal(fs.existsSync(path.join(f.home, ".chatgpt-codex-orchestrator/instances/foreign-instance")), false);
+    await assert.rejects(() => executeMacosCodexRun({ planned, repoPath: f.repo, codexExecutable: f.codex, controlRoot: f.control, trustedGithubUsername: ["trusted"], timeoutMs: 5000 }), /claimed|uncertain|Duplicate/);
+  } finally { process.env.HOME = old; }
+});
+
+test("queues nonzero Codex failure after replacing and mutating public normalized authorization", async () => {
+  const f = fixture(); const old = process.env.HOME; process.env.HOME = f.home;
+  try {
+    fs.writeFileSync(f.codex, "#!/bin/sh\ncat >/dev/null\nexit 9\n"); fs.chmodSync(f.codex, 0o700);
+    const planned = planMacosCodexRun({ event: f.event(), controlRoot: f.control, controlRepository: "control/private", trustedGithubUsername: ["trusted"] });
+    const originalNormalized = planned.normalized;
+    planned.normalized.context.authorized_source.project = "foreign";
+    planned.normalized.context.authorized_source.review_route = "foreign-route";
+    planned.normalized = { context: { authorized_source: { project: "attacker", review_route: "attacker-route" } } };
+    const result = await executeMacosCodexRun({ planned, repoPath: f.repo, codexExecutable: f.codex, controlRoot: f.control, trustedGithubUsername: ["trusted"], timeoutMs: 5000 });
+    assert.equal(result.failure.callback_id, "failure-demo-200-1");
+    assert.equal(result.failure.callback.chat_url, "https://chatgpt.com/c/chat-165");
+    assert.equal(result.failure.project, "demo"); assert.equal(result.failure.issue, 200); assert.equal(result.failure.iteration, 1);
+    assert.equal(result.failure.callback.delivery_state, "PENDING"); assert.equal(result.failure.source_commit, null);
+    const outbox = path.join(f.home, ".chatgpt-codex-orchestrator/instances/exec-test/failure-outbox/failure-demo-200-1.json");
+    assert.equal(fs.existsSync(outbox), true);
+    const persisted = JSON.parse(fs.readFileSync(outbox, "utf8"));
+    assert.equal(persisted.source_commit, null); assert.equal(persisted.callback.delivery_state, "PENDING");
+    assert.equal(persisted.callback_id, "failure-demo-200-1"); assert.equal(persisted.project, "demo");
+    assert.equal(persisted.callback.chat_url, "https://chatgpt.com/c/chat-165");
+    assert.equal(fs.existsSync(path.join(f.home, ".chatgpt-codex-orchestrator/instances/foreign-instance")), false);
+    assert.equal(originalNormalized.context.authorized_source.project, "foreign");
     await assert.rejects(() => executeMacosCodexRun({ planned, repoPath: f.repo, codexExecutable: f.codex, controlRoot: f.control, trustedGithubUsername: ["trusted"], timeoutMs: 5000 }), /claimed|uncertain|Duplicate/);
   } finally { process.env.HOME = old; }
 });

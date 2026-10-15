@@ -3,7 +3,6 @@ import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { getValidatedMacosCodexPlan } from "./macos-codex-run-contract.mjs";
 import { prepareFailureForAuthorizedSnapshot, persistFailure } from "./run-failure-state.mjs";
-import { getAuthorizedSnapshot } from "./control-event-normalizer.mjs";
 
 const SHA = /^[0-9a-f]{40}$/;
 const BRANCH = /^(codex|chore|fix|feat|refactor|test|docs|spike)\/[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
@@ -41,9 +40,17 @@ function git(repo, args) {
   if (result.error || result.status !== 0) throw new Error(`Git ${args[0]} failed`);
   return result.stdout.trim();
 }
+function trustedCodexExecutable(executable) {
+  if (!path.isAbsolute(executable)) throw new Error("Codex executable is not trusted");
+  let resolved; let stat;
+  try { resolved = fs.realpathSync(executable); stat = fs.statSync(resolved); } catch { throw new Error("Codex executable is not trusted"); }
+  const uid = typeof process.getuid === "function" ? process.getuid() : stat.uid;
+  if (!stat.isFile() || (stat.mode & 0o111) === 0 || (stat.mode & 0o022) !== 0 || (stat.uid !== uid && stat.uid !== 0)) throw new Error("Codex executable is not trusted");
+  return resolved;
+}
 function failure(planned, stage, code, exitCode) {
   const snapshot = getValidatedMacosCodexPlan(planned);
-  const authorization = getAuthorizedSnapshot(planned.normalized);
+  const authorization = snapshot.authorization;
   const { context, failure: state } = prepareFailureForAuthorizedSnapshot({ authorization, stage, code, exitCode });
   return persistFailure({ context, failure: state });
 }
@@ -84,14 +91,14 @@ export async function executeMacosCodexRun({ planned, repoPath, codexExecutable,
   const base = privateDir(path.join(HOME(), ".chatgpt-codex-orchestrator", "instances", snapshot.instance_id));
   const automationRoot = privateDir(path.join(base, "automation"));
   const repo = trustedPath(repoPath, automationRoot);
-  const executableStat = fs.lstatSync(codexExecutable); if (!path.isAbsolute(codexExecutable) || executableStat.isSymbolicLink() || !executableStat.isFile() || (executableStat.mode & 0o111) === 0) throw new Error("Codex executable is not trusted");
+  const trustedExecutable = trustedCodexExecutable(codexExecutable);
   const id = `${plan.project}-${issue}-${plan.iteration}`; const ledgerFile = path.join(base, "macos-execution-ledger", `${id}.json`);
   const ledger = { version: 1, execution_state: "CLAIMED", project: plan.project, issue, iteration: plan.iteration, claimed_at_utc: new Date().toISOString() };
   claim(ledgerFile, ledger);
   const logs = privateDir(path.join(base, "macos-execution-logs"));
   try {
     const observed = validateClone(repo, plan);
-    const result = await runCodex(codexExecutable, repo, JSON.parse(snapshot.event.issue.body).prompt, timeoutMs, path.join(logs, `${id}.json`));
+    const result = await runCodex(trustedExecutable, repo, JSON.parse(snapshot.event.issue.body).prompt, timeoutMs, path.join(logs, `${id}.json`));
     if (result.code !== 0) { const saved = failure(planned, result.timedOut ? "timeout" : "codex", result.timedOut ? "CODEX_TIMEOUT" : (result.error ? "CODEX_SPAWN_FAILED" : "CODEX_NONZERO"), result.code ?? undefined); atomic(ledgerFile, { ...ledger, execution_state: "TERMINAL_FAILURE", callback_id: saved.state.callback_id }); return { state: "TERMINAL_FAILURE", failure: saved.state }; }
     const done = { ...ledger, execution_state: "EXECUTED_UNVALIDATED", observed_branch: observed.branch, observed_repository: plan.repository, observed_head: observed.head, exit_code: 0, validation_state: "NOT_RUN", success_callback_state: "NOT_IMPLEMENTED", completed_at_utc: new Date().toISOString() }; atomic(ledgerFile, done); return done;
   } catch (error) {
