@@ -13,7 +13,7 @@ function fixture() {
   fs.writeFileSync(path.join(control, "projects.json"), JSON.stringify({ projects: { demo: { repository: "jackie-water/ChatGPT-Codex-Orchestrator", enabled: true } } }));
   const route = path.join(home, ".chatgpt-codex-orchestrator/instances/test-instance"); fs.mkdirSync(route, { recursive: true }); fs.chmodSync(route, 0o700);
   fs.writeFileSync(path.join(route, "chat-routes.json"), JSON.stringify({ version: 1, routes: [{ project: "demo", route: "chat-165", chat_url: "https://chatgpt.com/c/abc", status: "active" }] }));
-  const event = { repository: { full_name: "jackie-water/control-private" }, issue: { number: 7, title: "[CODEX-RUN] native adapter", user: { login: "jackie" }, body: JSON.stringify({ project: "demo", iteration: 1, review_route: "chat-165" }) } };
+  const event = { repository: { full_name: "jackie-water/control-private" }, issue: { number: 7, title: "[CODEX-RUN] native adapter", user: { login: "jackie" }, body: JSON.stringify({ project: "demo", iteration: 1, max_iterations: 5, review_route: "chat-165" }) } };
   return { home, control, event };
 }
 
