@@ -43,7 +43,7 @@ test("already-running browser is probed before Edge and profile discovery",()=>{
   assert.match(source,/Port -notmatch '\^\\d\+\$'/);
 });
 
-test("already-up debug endpoint succeeds without Edge discovery",async()=>{
+test("already-up debug endpoint succeeds without Edge discovery",{skip: process.platform !== "win32"},async()=>{
   let requests=0;
   const server=createServer((request,response)=>{
     if(request.url === "/json/version") { requests++; response.end('{"Browser":"Edge/1"}'); return; }
@@ -59,7 +59,7 @@ test("already-up debug endpoint succeeds without Edge discovery",async()=>{
     assert.equal(output,"");
     assert.equal(requests,1);
   } finally { await new Promise(resolve=>server.close(resolve)); }
-},{skip: process.platform !== "win32"});
+});
 
 for(const missing of ["ProgramFiles(x86)","ProgramFiles","LOCALAPPDATA"]){
   test(`missing ${missing} does not cause a Join-Path parameter error`,{skip: process.platform !== "win32"},async()=>{
