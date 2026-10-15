@@ -2,14 +2,21 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { getValidatedMacosCodexPlan } from "./macos-codex-run-contract.mjs";
-import { prepareFailure, persistFailure } from "./run-failure-state.mjs";
+import { prepareFailureForAuthorizedSnapshot, persistFailure } from "./run-failure-state.mjs";
+import { getAuthorizedSnapshot } from "./control-event-normalizer.mjs";
 
 const SHA = /^[0-9a-f]{40}$/;
 const BRANCH = /^(codex|chore|fix|feat|refactor|test|docs|spike)\/[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
 const HOME = () => process.env.HOME || process.env.USERPROFILE || "/tmp";
 const MAX_TIMEOUT = 30 * 60 * 1000;
 const safe = p => path.resolve(p);
-function privateDir(p) { fs.mkdirSync(p, { recursive: true, mode: 0o700 }); fs.chmodSync(p, 0o700); return p; }
+function privateDir(p) {
+  const absolute = safe(p); const root = path.parse(absolute).root; let current = root;
+  for (const part of absolute.slice(root.length).split(path.sep).filter(Boolean)) { current = path.join(current, part); try { const st = fs.lstatSync(current); const allowedSystemLink = st.isSymbolicLink() && ["/tmp", "/var"].includes(current); if ((!allowedSystemLink && st.isSymbolicLink()) || (!allowedSystemLink && !st.isDirectory())) throw new Error("Unsafe preexisting state directory"); } catch (e) { if (e.code !== "ENOENT") throw e; } }
+  fs.mkdirSync(absolute, { recursive: true, mode: 0o700 });
+  current = root; for (const part of absolute.slice(root.length).split(path.sep).filter(Boolean)) { current = path.join(current, part); const st = fs.lstatSync(current); const allowedSystemLink = st.isSymbolicLink() && ["/tmp", "/var"].includes(current); if ((!allowedSystemLink && st.isSymbolicLink()) || (!allowedSystemLink && !st.isDirectory())) throw new Error("Unsafe state directory"); }
+  fs.chmodSync(absolute, 0o700); return absolute;
+}
 function trustedPath(p, root) {
   const absolute = safe(p); const trusted = safe(root);
   if (absolute !== trusted && !absolute.startsWith(`${trusted}${path.sep}`)) throw new Error("Path is outside the trusted automation root");
@@ -34,9 +41,10 @@ function git(repo, args) {
   if (result.error || result.status !== 0) throw new Error(`Git ${args[0]} failed`);
   return result.stdout.trim();
 }
-function failure(planned, controlRoot, trusted, stage, code, exitCode) {
+function failure(planned, stage, code, exitCode) {
   const snapshot = getValidatedMacosCodexPlan(planned);
-  const { context, failure: state } = prepareFailure({ event: snapshot.event, controlRoot, trustedGithubUsername: trusted, stage, code, exitCode });
+  const authorization = getAuthorizedSnapshot(planned.normalized);
+  const { context, failure: state } = prepareFailureForAuthorizedSnapshot({ authorization, stage, code, exitCode });
   return persistFailure({ context, failure: state });
 }
 function validateClone(repo, plan) {
@@ -84,9 +92,9 @@ export async function executeMacosCodexRun({ planned, repoPath, codexExecutable,
   try {
     const observed = validateClone(repo, plan);
     const result = await runCodex(codexExecutable, repo, JSON.parse(snapshot.event.issue.body).prompt, timeoutMs, path.join(logs, `${id}.json`));
-    if (result.code !== 0) { const saved = failure(planned, controlRoot, trustedGithubUsername, result.timedOut ? "timeout" : "codex", result.timedOut ? "CODEX_TIMEOUT" : (result.error ? "CODEX_SPAWN_FAILED" : "CODEX_NONZERO"), result.code ?? undefined); atomic(ledgerFile, { ...ledger, execution_state: "TERMINAL_FAILURE", callback_id: saved.state.callback_id }); return { state: "TERMINAL_FAILURE", failure: saved.state }; }
+    if (result.code !== 0) { const saved = failure(planned, result.timedOut ? "timeout" : "codex", result.timedOut ? "CODEX_TIMEOUT" : (result.error ? "CODEX_SPAWN_FAILED" : "CODEX_NONZERO"), result.code ?? undefined); atomic(ledgerFile, { ...ledger, execution_state: "TERMINAL_FAILURE", callback_id: saved.state.callback_id }); return { state: "TERMINAL_FAILURE", failure: saved.state }; }
     const done = { ...ledger, execution_state: "EXECUTED_UNVALIDATED", observed_branch: observed.branch, observed_repository: plan.repository, observed_head: observed.head, exit_code: 0, validation_state: "NOT_RUN", success_callback_state: "NOT_IMPLEMENTED", completed_at_utc: new Date().toISOString() }; atomic(ledgerFile, done); return done;
   } catch (error) {
-    let saved; try { saved = failure(planned, controlRoot, trustedGithubUsername, error.message.includes("Codex") ? "codex" : "git", error.message.includes("Codex") ? "CODEX_PREP_FAILED" : "EXECUTION_PREP_FAILED"); } catch { atomic(ledgerFile, { ...ledger, execution_state: "UNKNOWN" }); throw error; } atomic(ledgerFile, { ...ledger, execution_state: "TERMINAL_FAILURE", callback_id: saved.state.callback_id }); return { state: "TERMINAL_FAILURE", failure: saved.state };
+    let saved; try { saved = failure(planned, error.message.includes("Codex") ? "codex" : "git", error.message.includes("Codex") ? "CODEX_PREP_FAILED" : "EXECUTION_PREP_FAILED"); } catch { atomic(ledgerFile, { ...ledger, execution_state: "UNKNOWN" }); throw error; } atomic(ledgerFile, { ...ledger, execution_state: "TERMINAL_FAILURE", callback_id: saved.state.callback_id }); return { state: "TERMINAL_FAILURE", failure: saved.state };
   }
 }

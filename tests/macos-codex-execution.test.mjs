@@ -6,6 +6,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { planMacosCodexRun } from "../src/lib/macos-codex-run-contract.mjs";
 import { executeMacosCodexRun } from "../src/lib/macos-codex-execution.mjs";
+import { prepareFailureForAuthorizedSnapshot } from "../src/lib/run-failure-state.mjs";
 
 const sh = (cwd, ...args) => execFileSync("git", ["-C", cwd, ...args], { stdio: "pipe" }).toString().trim();
 function fixture() {
@@ -99,4 +100,38 @@ test("execution keeps the authorized instance when instance metadata changes", a
     assert.equal(fs.existsSync(path.join(f.home, ".chatgpt-codex-orchestrator/instances/exec-test/macos-execution-ledger/demo-200-1.json")), true);
     assert.equal(fs.existsSync(path.join(f.home, ".chatgpt-codex-orchestrator/instances/foreign-instance")), false);
   } finally { process.env.HOME = old; }
+});
+
+test("rejects a symlinked preexisting private instance state before chmod or Codex", async () => {
+  const f = fixture(); const old = process.env.HOME; process.env.HOME = f.home;
+  const state = path.join(f.home, ".chatgpt-codex-orchestrator/instances/exec-test");
+  const sentinel = path.join(f.root, "sentinel"); fs.mkdirSync(sentinel); const sentinelFile = path.join(sentinel, "sentinel.bin");
+  fs.writeFileSync(sentinelFile, "do-not-touch\n"); fs.chmodSync(sentinel, 0o755); const before = fs.statSync(sentinel);
+  try {
+    const planned = planMacosCodexRun({ event: f.event(), controlRoot: f.control, controlRepository: "control/private", trustedGithubUsername: ["trusted"] });
+    fs.rmSync(state, { recursive: true }); fs.symlinkSync(sentinel, state, "dir");
+    await assert.rejects(() => executeMacosCodexRun({ planned, repoPath: f.repo, codexExecutable: f.codex, controlRoot: f.control, trustedGithubUsername: ["trusted"], timeoutMs: 5000 }), /Unsafe/);
+    assert.equal(fs.readFileSync(sentinelFile, "utf8"), "do-not-touch\n"); assert.equal(fs.statSync(sentinel).mode & 0o777, before.mode & 0o777);
+    assert.equal(fs.existsSync(path.join(sentinel, "macos-execution-ledger")), false); assert.equal(fs.existsSync(path.join(sentinel, "macos-execution-logs")), false); assert.equal(fs.existsSync(path.join(f.repo, "argv")), false);
+  } finally { process.env.HOME = old; }
+});
+
+test("queues nonzero Codex failure to the original authorized instance after Control metadata changes", async () => {
+  const f = fixture(); const old = process.env.HOME; process.env.HOME = f.home;
+  try {
+    const planned = planMacosCodexRun({ event: f.event(), controlRoot: f.control, controlRepository: "control/private", trustedGithubUsername: ["trusted"] });
+    fs.writeFileSync(f.codex, "#!/bin/sh\ncat >/dev/null\nexit 9\n"); fs.chmodSync(f.codex, 0o700);
+    fs.writeFileSync(path.join(f.control, "instance.json"), JSON.stringify({ instance_id: "foreign-instance" }));
+    const result = await executeMacosCodexRun({ planned, repoPath: f.repo, codexExecutable: f.codex, controlRoot: f.control, trustedGithubUsername: ["trusted"], timeoutMs: 5000 });
+    assert.equal(result.failure.callback_id, "failure-demo-200-1"); assert.equal(result.failure.callback.chat_url, "https://chatgpt.com/c/chat-165"); assert.equal(result.failure.callback.delivery_state, "PENDING"); assert.equal(result.failure.source_commit, null);
+    const outbox = path.join(f.home, ".chatgpt-codex-orchestrator/instances/exec-test/failure-outbox/failure-demo-200-1.json"); assert.equal(fs.existsSync(outbox), true); assert.equal(JSON.parse(fs.readFileSync(outbox)).callback_id, "failure-demo-200-1");
+    assert.equal(fs.existsSync(path.join(f.home, ".chatgpt-codex-orchestrator/instances/foreign-instance")), false);
+    await assert.rejects(() => executeMacosCodexRun({ planned, repoPath: f.repo, codexExecutable: f.codex, controlRoot: f.control, trustedGithubUsername: ["trusted"], timeoutMs: 5000 }), /claimed|uncertain|Duplicate/);
+  } finally { process.env.HOME = old; }
+});
+
+test("rejects forged authorization snapshots without file side effects", () => {
+  const f = fixture(); const old = process.env.HOME; process.env.HOME = f.home; const before = fs.readdirSync(f.home);
+  try { assert.throws(() => prepareFailureForAuthorizedSnapshot({ authorization: { instance_id: "exec-test", project: "demo", repository: "owner/repo", issue: 200, iteration: 1, author: "trusted", chat_url: "https://chatgpt.com/c/chat-165", configuration: {} }, stage: "codex", code: "CODEX_NONZERO" }), /genuine authorization snapshot/); assert.deepEqual(fs.readdirSync(f.home), before); }
+  finally { process.env.HOME = old; }
 });

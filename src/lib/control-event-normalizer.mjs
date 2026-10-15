@@ -6,6 +6,7 @@ const ID = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const ROUTE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const authorizedSnapshots = new WeakMap();
+const authorizedSnapshotObjects = new WeakSet();
 
 function safePath(value, allowMissing = false) {
   const absolute = path.resolve(String(value));
@@ -36,6 +37,7 @@ export function getAuthorizedSnapshot(normalized) {
   if (!snapshot) fail("A normalized event authorization snapshot is required");
   return snapshot;
 }
+export function isAuthorizedSnapshot(value) { return authorizedSnapshotObjects.has(value); }
 
 export function normalizeControlEvent({event, controlRoot, controlRepository, trustedGithubUsername}) {
   if (!Array.isArray(trustedGithubUsername) || trustedGithubUsername.length === 0 || trustedGithubUsername.some(name => typeof name !== "string" || !name)) fail("trustedGithubUsername must be a nonempty array of usernames");
@@ -64,7 +66,9 @@ export function normalizeControlEvent({event, controlRoot, controlRepository, tr
   const digest = crypto.createHash("sha256").update(canonical(raw)).digest("hex");
   const normalizedEvent = { repository: { full_name: configured.repository }, issue: { title: raw.issue.title, number: issue, user: { login: author }, body: JSON.stringify({ ...body, project, iteration, review_route: route, target_repo: configured.repository }) } };
   const normalized = { event: normalizedEvent, context: { control_provenance: { repository: controlRepository, issue_number: issue, author, event_digest_sha256: digest }, authorized_source: { project, repository: configured.repository, review_route: route, iteration } } };
-  authorizedSnapshots.set(normalized, immutableClone({ instance_id: instance.instance_id, project, configuration: projects.projects[project] }));
+  const snapshot = immutableClone({ instance_id: instance.instance_id, project, repository: configured.repository, issue, iteration, author, review_route: route, chat_url: record.chat_url, configuration: projects.projects[project] });
+  authorizedSnapshots.set(normalized, snapshot);
+  authorizedSnapshotObjects.add(snapshot);
   return normalized;
 }
 
