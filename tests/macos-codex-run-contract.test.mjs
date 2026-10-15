@@ -36,6 +36,50 @@ test("iteration controls request kind and prompt limit", () => {
   assert.throws(() => withHome(f.home, () => planMacosCodexRun({ event: f.event({ iteration: 2, max_iterations: 1, request: "revise", prompt: "x" }), controlRoot: f.control, controlRepository: "jackie-water/control-private", trustedGithubUsername: ["trusted"] })));
 });
 
+test("configured prompt limits require Windows-compatible bounds and ordering", () => {
+  for (const prompt_limits of [
+    { initial_max_chars: 1, revise_max_chars: 1000 },
+    { initial_max_chars: 12000, revise_max_chars: 999 },
+    { initial_max_chars: 2000, revise_max_chars: 2500 },
+    {},
+    { initial_max_chars: 1000 },
+    { revise_max_chars: 1000 },
+    [],
+    "invalid",
+    1000
+  ]) {
+    const f = fixture(); const projects = JSON.parse(fs.readFileSync(path.join(f.control, "projects.json"), "utf8"));
+    projects.projects.demo.prompt_limits = prompt_limits; fs.writeFileSync(path.join(f.control, "projects.json"), JSON.stringify(projects));
+    assert.throws(() => withHome(f.home, () => planMacosCodexRun({ event: f.event({}), controlRoot: f.control, controlRepository: "jackie-water/control-private", trustedGithubUsername: ["trusted"] })), /Invalid configured prompt limits/);
+    assert.equal(fs.existsSync(path.join(f.home, ".chatgpt-codex-orchestrator", "instances", "test-instance", "failure-outbox")), false);
+  }
+});
+
+test("absent and null prompt limits retain defaults", () => {
+  for (const prompt_limits of ["omitted", null]) {
+    const f = fixture();
+    if (prompt_limits !== "omitted") {
+      const projects = JSON.parse(fs.readFileSync(path.join(f.control, "projects.json"), "utf8"));
+      projects.projects.demo.prompt_limits = prompt_limits; fs.writeFileSync(path.join(f.control, "projects.json"), JSON.stringify(projects));
+    }
+    assert.doesNotThrow(() => withHome(f.home, () => planMacosCodexRun({ event: f.event({ prompt: "x" }), controlRoot: f.control, controlRepository: "jackie-water/control-private", trustedGithubUsername: ["trusted"] })));
+    assert.doesNotThrow(() => withHome(f.home, () => planMacosCodexRun({ event: f.event({ iteration: 2, request: "revise", prompt: "x" }), controlRoot: f.control, controlRepository: "jackie-water/control-private", trustedGithubUsername: ["trusted"] })));
+  }
+});
+
+test("configured prompt limits accept the boundary and preserve selection", () => {
+  for (const prompt_limits of [
+    { initial_max_chars: 1000, revise_max_chars: 1000 },
+    { initial_max_chars: 12000, revise_max_chars: 6000 }
+  ]) {
+    const f = fixture(); const projects = JSON.parse(fs.readFileSync(path.join(f.control, "projects.json"), "utf8"));
+    projects.projects.demo.prompt_limits = prompt_limits; fs.writeFileSync(path.join(f.control, "projects.json"), JSON.stringify(projects));
+    assert.doesNotThrow(() => withHome(f.home, () => planMacosCodexRun({ event: f.event({ prompt: "x" }), controlRoot: f.control, controlRepository: "jackie-water/control-private", trustedGithubUsername: ["trusted"] })));
+    const revise = f.event({ iteration: 2, request: "revise", prompt: "x" });
+    assert.doesNotThrow(() => withHome(f.home, () => planMacosCodexRun({ event: revise, controlRoot: f.control, controlRepository: "jackie-water/control-private", trustedGithubUsername: ["trusted"] })));
+  }
+});
+
 test("Git-invalid dotted and lock branch components reject while valid components succeed", () => {
   const f = fixture();
   for (const target_branch of ["feat/task/.hidden", "feat/a/.dot", "feat/.hidden", "feat/a..b", "feat/a.lock", "feat/a."]) assert.throws(() => withHome(f.home, () => planMacosCodexRun({ event: f.event({ target_branch }), controlRoot: f.control, controlRepository: "jackie-water/control-private", trustedGithubUsername: ["trusted"] })));

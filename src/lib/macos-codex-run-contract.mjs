@@ -88,10 +88,16 @@ export function planMacosCodexRun({ event, controlRoot, controlRepository, trust
   const iteration = Number(b.iteration); if (iteration < 1 || iteration > effectiveMax) fail("Iteration exceeds project limit");
   const request = String(b.request || b.request_type || (iteration === 1 ? "initial" : "revise")).toLowerCase();
   const expected = iteration === 1 ? "initial" : "revise"; if (request !== expected) fail("Request type does not match iteration");
-  const configuredLimits = project.prompt_limits || {};
-  const initialLimit = configuredLimits.initial_max_chars === undefined ? 12000 : configuredLimits.initial_max_chars;
-  const reviseLimit = configuredLimits.revise_max_chars === undefined ? 6000 : configuredLimits.revise_max_chars;
-  if (!Number.isInteger(initialLimit) || initialLimit < 1 || !Number.isInteger(reviseLimit) || reviseLimit < 1) fail("Invalid configured prompt limits");
+  const configuredLimits = project.prompt_limits;
+  const initialLimit = configuredLimits == null ? 12000 : configuredLimits.initial_max_chars;
+  const reviseLimit = configuredLimits == null ? 6000 : configuredLimits.revise_max_chars;
+  if (configuredLimits !== undefined && configuredLimits !== null
+    && (typeof configuredLimits !== "object" || Array.isArray(configuredLimits)
+      || Object.getPrototypeOf(configuredLimits) !== Object.prototype
+      || !Object.prototype.hasOwnProperty.call(configuredLimits, "initial_max_chars")
+      || !Object.prototype.hasOwnProperty.call(configuredLimits, "revise_max_chars")
+      || !Number.isInteger(initialLimit) || initialLimit < 1000
+      || !Number.isInteger(reviseLimit) || reviseLimit < 1000 || reviseLimit > initialLimit)) fail("Invalid configured prompt limits");
   const prompt = typeof b.prompt === "string" ? b.prompt : ""; const limit = iteration === 1 ? Math.min(12000, initialLimit) : Math.min(6000, reviseLimit);
   if (!prompt.trim() || prompt.length > limit) fail("Prompt is empty or exceeds configured limit");
   if (prompt.split(/\r?\n/).some(line => SHELL_LINE.test(line.trim()))) fail("Routine validation shell line is prohibited");
