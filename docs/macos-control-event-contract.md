@@ -1,0 +1,7 @@
+# P2.1 macOS Control-event contract
+
+P2.1 provides a read-only, testable Node adapter for a real `CODEX-RUN` issue event from the private Control repository. It verifies the exact Control repository, issue author, strict title, JSON project/iteration, enabled local project registry entry, and the project’s active exact `review_route`. An optional `target_repo` must match the registry. The adapter never discovers or accepts a Chat URL from the issue body.
+
+The normalized execution context separates Control provenance (repository, issue number, author, and canonical event digest) from the registry-authorized source repository. The normalized event is minimal: it contains only the verified title, number, trusted author, and validated body, plus registry-derived source repository.full_name; raw Control repository metadata never enters fabricated source metadata. Output must be directly under $HOME/.chatgpt-codex-orchestrator/instances/<validated-instance-id>/normalized-control-events/. Existing insecure or outside paths are rejected; private directories and 0600 outputs are used, and repeats are accepted only when deterministically equivalent.
+
+P2.1 does not invoke a runner, browser, Chrome/CDP, Codex, or a target repository, and does not modify route registries. P2.2 must add the Mac runner wrapper integration, securely pass the trusted Control repository and users from runner configuration, invoke P1 failure handling, and preserve the same provenance/authorization boundary. Full E2E and target activation are outside this package.
