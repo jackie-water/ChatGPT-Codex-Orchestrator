@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { planMacosCodexRun, recordMacosPreflightFailure } from "../src/lib/macos-codex-run-contract.mjs";
+import { getAuthorizedSnapshot } from "../src/lib/control-event-normalizer.mjs";
 
 function fixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "macos-preflight-"));
@@ -12,7 +13,7 @@ function fixture() {
   fs.writeFileSync(path.join(control, "projects.json"), JSON.stringify({ projects: { demo: { enabled: true, repository: "jackie-water/ChatGPT-Codex-Orchestrator", default_branch: "main", max_iterations: 5, allowed_validation_executables: ["node"], default_validation_steps: [{ name: "tests", command: "node", arguments: ["--test"] }] } } }));
   const state = path.join(home, ".chatgpt-codex-orchestrator", "instances", "test-instance"); fs.mkdirSync(state, { recursive: true });
   fs.writeFileSync(path.join(state, "chat-routes.json"), JSON.stringify({ routes: [{ project: "demo", route: "chat-165", status: "active", chat_url: "https://chatgpt.com/c/chat-165" }] }));
-  const event = body => ({ repository: { full_name: "jackie-water/control-private" }, issue: { title: "[CODEX-RUN] demo", number: 165, user: { login: "trusted" }, body: JSON.stringify({ project: "demo", iteration: 1, review_route: "chat-165", prompt: "Implement the task", target_branch: "feat/task", ...body }) } });
+  const event = body => ({ repository: { full_name: "jackie-water/control-private" }, issue: { title: "[CODEX-RUN] demo", number: 165, user: { login: "trusted" }, body: JSON.stringify({ project: "demo", iteration: 1, max_iterations: 5, review_route: "chat-165", prompt: "Implement the task", target_branch: "feat/task", ...body }) } });
   return { root, home, control, event };
 }
 function withHome(home, fn) { const old = process.env.HOME; process.env.HOME = home; try { return fn(); } finally { process.env.HOME = old; } }
@@ -20,6 +21,49 @@ function withHome(home, fn) { const old = process.env.HOME; process.env.HOME = h
 test("good event plans without filesystem side effects", () => {
   const f = fixture(); const before = fs.readdirSync(f.home); const p = withHome(f.home, () => planMacosCodexRun({ event: f.event({}), controlRoot: f.control, controlRepository: "jackie-water/control-private", trustedGithubUsername: ["trusted"] }));
   assert.equal(p.plan.repository, "jackie-water/ChatGPT-Codex-Orchestrator"); assert.equal(p.plan.review_route, "chat-165"); assert.deepEqual(fs.readdirSync(f.home), before);
+});
+
+test("registry substitution after authorization cannot change the plan", () => {
+  const f = fixture();
+  const projects = path.join(f.control, "projects.json");
+  const original = path.join(f.control, "projects.authorized.json");
+  const foreign = path.join(f.root, "foreign-projects.json");
+  const oldHome = process.env.HOME;
+  fs.writeFileSync(foreign, JSON.stringify({ projects: { demo: {
+    enabled: true,
+    repository: "attacker/foreign-repository",
+    default_branch: "develop",
+    max_iterations: 5,
+    allowed_validation_executables: ["sh"],
+    default_validation_steps: [{ name: "foreign", command: "sh", arguments: ["--version"] }]
+  } } }));
+  const realReadFileSync = fs.readFileSync;
+  let swapped = false;
+  fs.readFileSync = function (...args) {
+    const result = realReadFileSync.apply(this, args);
+    if (!swapped && path.resolve(String(args[0])) === path.resolve(projects)) {
+      swapped = true;
+      fs.renameSync(projects, original);
+      fs.symlinkSync(foreign, projects);
+    }
+    return result;
+  };
+  const outbox = path.join(f.home, ".chatgpt-codex-orchestrator", "instances", "test-instance", "failure-outbox");
+  try {
+    const planned = withHome(f.home, () => planMacosCodexRun({ event: f.event({}), controlRoot: f.control, controlRepository: "jackie-water/control-private", trustedGithubUsername: ["trusted"] }));
+    assert.equal(swapped, true);
+    assert.equal(planned.plan.repository, "jackie-water/ChatGPT-Codex-Orchestrator");
+    assert.equal(planned.plan.default_branch, "main");
+    assert.deepEqual(planned.plan.validation_steps, [{ name: "tests", command: "node", arguments: ["--test"] }]);
+    assert.equal(fs.existsSync(outbox), false);
+    assert.throws(() => getAuthorizedSnapshot({ context: {} }), /authorization snapshot/);
+  } finally {
+    fs.readFileSync = realReadFileSync;
+    if (fs.existsSync(projects) && fs.lstatSync(projects).isSymbolicLink()) fs.unlinkSync(projects);
+    if (fs.existsSync(original)) fs.renameSync(original, projects);
+    process.env.HOME = oldHome;
+    fs.rmSync(f.home, { recursive: true, force: true });
+  }
 });
 
 test("normal prose punctuation is allowed but executable routine lines are rejected", () => {
@@ -34,6 +78,21 @@ test("iteration controls request kind and prompt limit", () => {
   assert.throws(() => withHome(f.home, () => planMacosCodexRun({ event: f.event({ max_iterations: 6 }), controlRoot: f.control, controlRepository: "jackie-water/control-private", trustedGithubUsername: ["trusted"] })));
   assert.throws(() => withHome(f.home, () => planMacosCodexRun({ event: f.event({ max_iterations: 0 }), controlRoot: f.control, controlRepository: "jackie-water/control-private", trustedGithubUsername: ["trusted"] })));
   assert.throws(() => withHome(f.home, () => planMacosCodexRun({ event: f.event({ iteration: 2, max_iterations: 1, request: "revise", prompt: "x" }), controlRoot: f.control, controlRepository: "jackie-water/control-private", trustedGithubUsername: ["trusted"] })));
+});
+
+test("max_iterations is required, integral, and bounded", () => {
+  const invalid = [{ max_iterations: undefined }, { max_iterations: null }, { max_iterations: 0 }, { max_iterations: 1.5 }, { max_iterations: 6 }];
+  for (const body of invalid) {
+    const f = fixture();
+    const request = f.event(body);
+    if (body.max_iterations === undefined) delete JSON.parse(request.issue.body).max_iterations;
+    if (body.max_iterations === undefined) request.issue.body = JSON.stringify({ project: "demo", iteration: 1, review_route: "chat-165", prompt: "Implement the task", target_branch: "feat/task" });
+    assert.throws(() => withHome(f.home, () => planMacosCodexRun({ event: request, controlRoot: f.control, controlRepository: "jackie-water/control-private", trustedGithubUsername: ["trusted"] })));
+  }
+  for (const max_iterations of [1, 5]) {
+    const f = fixture();
+    assert.doesNotThrow(() => withHome(f.home, () => planMacosCodexRun({ event: f.event({ max_iterations }), controlRoot: f.control, controlRepository: "jackie-water/control-private", trustedGithubUsername: ["trusted"] })));
+  }
 });
 
 test("configured prompt limits require Windows-compatible bounds and ordering", () => {
@@ -120,7 +179,7 @@ test("configured max_iterations is limited to 20", () => {
   }
   const f = fixture(); const projects = JSON.parse(fs.readFileSync(path.join(f.control, "projects.json"), "utf8"));
   projects.projects.demo.max_iterations = 20; fs.writeFileSync(path.join(f.control, "projects.json"), JSON.stringify(projects));
-  assert.doesNotThrow(() => withHome(f.home, () => planMacosCodexRun({ event: f.event({ iteration: 20, request: "revise" }), controlRoot: f.control, controlRepository: "jackie-water/control-private", trustedGithubUsername: ["trusted"] })));
+  assert.doesNotThrow(() => withHome(f.home, () => planMacosCodexRun({ event: f.event({ iteration: 20, max_iterations: 20, request: "revise" }), controlRoot: f.control, controlRepository: "jackie-water/control-private", trustedGithubUsername: ["trusted"] })));
 });
 
 test("matching completed or malformed run state is never rerun", () => {

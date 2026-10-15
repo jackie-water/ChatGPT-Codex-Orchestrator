@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { normalizeControlEvent } from "./control-event-normalizer.mjs";
+import { normalizeControlEvent, getAuthorizedSnapshot } from "./control-event-normalizer.mjs";
 import { prepareFailure, persistFailure } from "./run-failure-state.mjs";
 
 const BRANCH = /^(codex|chore|fix|feat|refactor|test|docs|spike)\/[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
@@ -79,12 +79,13 @@ function duplicateState(controlRoot, instanceId, project, issue, iteration) {
 
 export function planMacosCodexRun({ event, controlRoot, controlRepository, trustedGithubUsername }) {
   const normalized = normalizeControlEvent({ event, controlRoot, controlRepository, trustedGithubUsername });
+  const snapshot = getAuthorizedSnapshot(normalized);
   const b = bodyOf(normalized.event); const issue = normalized.context.control_provenance.issue_number;
-  const registry = json(path.join(controlRoot, "projects.json")); const project = registry.projects[normalized.context.authorized_source.project];
+  const project = snapshot.configuration;
   const max = project.max_iterations === undefined ? 5 : project.max_iterations;
   if (!Number.isInteger(max) || max < 1 || max > 20) fail("Invalid configured max_iterations");
-  let effectiveMax = max;
-  if (b.max_iterations !== undefined) { if (!Number.isInteger(b.max_iterations) || b.max_iterations < 1 || b.max_iterations > max) fail("Requested max_iterations exceeds project limit"); effectiveMax = b.max_iterations; }
+  if (!Object.prototype.hasOwnProperty.call(b, "max_iterations") || !Number.isInteger(b.max_iterations) || b.max_iterations < 1 || b.max_iterations > max) fail("Requested max_iterations exceeds project limit");
+  const effectiveMax = b.max_iterations;
   const iteration = Number(b.iteration); if (iteration < 1 || iteration > effectiveMax) fail("Iteration exceeds project limit");
   const request = String(b.request || b.request_type || (iteration === 1 ? "initial" : "revise")).toLowerCase();
   const expected = iteration === 1 ? "initial" : "revise"; if (request !== expected) fail("Request type does not match iteration");
@@ -105,7 +106,7 @@ export function planMacosCodexRun({ event, controlRoot, controlRepository, trust
   if (typeof defaultBranch !== "string" || !isSafeRef(defaultBranch)) fail("Invalid configured default branch");
   if (typeof target !== "string" || !BRANCH.test(target) || !isSafeRef(target) || ["main", "master", defaultBranch].includes(target)) fail("Prohibited or unsafe task branch");
   const validation = validateSteps(b, project);
-  duplicateState(controlRoot, normalized.context.instance?.instance_id || json(path.join(controlRoot, "instance.json")).instance_id, normalized.context.authorized_source.project, issue, iteration);
+  duplicateState(controlRoot, snapshot.instance_id, normalized.context.authorized_source.project, issue, iteration);
   const planned = { normalized, plan: { project: normalized.context.authorized_source.project, issue, iteration, repository: project.repository, default_branch: defaultBranch, target_branch: target, review_route: normalized.context.authorized_source.review_route, validation_steps: validation, run_id: `codex-${normalized.context.authorized_source.project}-${issue}-${iteration}` } };
   validatedPlans.set(planned, immutableClone({
     event: normalized.event,
