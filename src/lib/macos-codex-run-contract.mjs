@@ -7,9 +7,18 @@ const BRANCH = /^(codex|chore|fix|feat|refactor|test|docs|spike)\/[A-Za-z0-9][A-
 const SAFE_REF = /^(?!.*(?:^|\/)(?:\.|\.\.|\.git)(?:$|\/))(?!.*(?:^|\/)[^.\/]*\.\.[^.\/]*(?:\/|$))(?!.*(?:^|\/)[A-Za-z0-9._-]+\.lock(?:\/|$))(?!.*\.\.?$)(?!.*[\\~^:?*\[\]@{} ])(?!.*\/\/)(?!.*\/$)[A-Za-z0-9._/-]+$/;
 const SHELL_LINE = /^(?:[-*+]\s+|`+\s*)?(?:run\s+)?(?:npm\s+(?:test|run\s+(?:build|lint|test))|git\s+diff\s+--check|node\s+--check|(?:bash|sh)\s+-c)\b/i;
 const SHELL_META = /[;&|`$()<>]/;
+const validatedPlans = new WeakMap();
 
 const fail = message => { throw new Error(message); };
 const json = file => JSON.parse(fs.readFileSync(file, "utf8").replace(/^\uFEFF/, ""));
+function immutableClone(value) {
+  if (value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) return Object.freeze(value.map(immutableClone));
+  return Object.freeze(Object.fromEntries(Object.entries(value).map(([key, item]) => [key, immutableClone(item)])));
+}
+function sameTrustedUsers(expected, actual) {
+  return Array.isArray(actual) && expected.length === actual.length && expected.every((name, index) => actual[index] === name);
+}
 function bodyOf(event) { try { return JSON.parse(event.issue.body); } catch { fail("Malformed normalized issue body"); } }
 function configuredSteps(project) {
   const profile = project.validation_profile || project.validationProfile || {};
@@ -84,11 +93,28 @@ export function planMacosCodexRun({ event, controlRoot, controlRepository, trust
   if (typeof target !== "string" || !BRANCH.test(target) || !SAFE_REF.test(target) || ["main", "master", defaultBranch].includes(target)) fail("Prohibited or unsafe task branch");
   const validation = validateSteps(b, project);
   duplicateState(controlRoot, normalized.context.instance?.instance_id || json(path.join(controlRoot, "instance.json")).instance_id, normalized.context.authorized_source.project, issue, iteration);
-  return { normalized, plan: { project: normalized.context.authorized_source.project, issue, iteration, repository: project.repository, default_branch: defaultBranch, target_branch: target, review_route: normalized.context.authorized_source.review_route, validation_steps: validation, run_id: `codex-${normalized.context.authorized_source.project}-${issue}-${iteration}` } };
+  const planned = { normalized, plan: { project: normalized.context.authorized_source.project, issue, iteration, repository: project.repository, default_branch: defaultBranch, target_branch: target, review_route: normalized.context.authorized_source.review_route, validation_steps: validation, run_id: `codex-${normalized.context.authorized_source.project}-${issue}-${iteration}` } };
+  validatedPlans.set(planned, immutableClone({
+    event: normalized.event,
+    controlRoot,
+    trustedGithubUsername,
+    identity: {
+      project: normalized.context.authorized_source.project,
+      issue,
+      iteration,
+      review_route: normalized.context.authorized_source.review_route,
+      author: normalized.context.control_provenance.author,
+      repository: normalized.context.authorized_source.repository
+    }
+  }));
+  return planned;
 }
 
 export function recordMacosPreflightFailure({ planned, controlRoot, trustedGithubUsername, code }) {
-  if (!planned?.normalized?.event) fail("A validated preflight plan is required");
-  const { context, failure } = prepareFailure({ event: planned.normalized.event, controlRoot, trustedGithubUsername, stage: "preflight", code });
+  const snapshot = planned && typeof planned === "object" ? validatedPlans.get(planned) : undefined;
+  if (!snapshot) fail("A validated preflight plan is required");
+  if (controlRoot !== snapshot.controlRoot) fail("Preflight controlRoot does not match the validated plan");
+  if (!sameTrustedUsers(snapshot.trustedGithubUsername, trustedGithubUsername)) fail("Preflight trusted users do not match the validated plan");
+  const { context, failure } = prepareFailure({ event: snapshot.event, controlRoot: snapshot.controlRoot, trustedGithubUsername: snapshot.trustedGithubUsername, stage: "preflight", code });
   return persistFailure({ context, failure });
 }

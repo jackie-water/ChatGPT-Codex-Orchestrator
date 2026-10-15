@@ -94,6 +94,28 @@ test("trusted preflight failure is durable and idempotent without source SHA", (
   const f = fixture(); withHome(f.home, () => { const p = planMacosCodexRun({ event: f.event({}), controlRoot: f.control, controlRepository: "jackie-water/control-private", trustedGithubUsername: ["trusted"] }); const a = recordMacosPreflightFailure({ planned: p, controlRoot: f.control, trustedGithubUsername: ["trusted"], code: "SAFE_PREFLIGHT" }); const b = recordMacosPreflightFailure({ planned: p, controlRoot: f.control, trustedGithubUsername: ["trusted"], code: "SAFE_PREFLIGHT" }); assert.equal(a.state.callback.delivery_state, "PENDING"); assert.equal(a.state.source_commit, null); assert.equal(b.reused, true); });
 });
 
+test("preflight recording requires the private validated plan binding", () => {
+  const f = fixture(); withHome(f.home, () => {
+    const args = { controlRoot: f.control, trustedGithubUsername: ["trusted"], code: "SAFE_PREFLIGHT" };
+    assert.throws(() => recordMacosPreflightFailure({ planned: { normalized: { event: f.event({ target_branch: "main", prompt: "npm test" }) } }, ...args }));
+    assert.equal(fs.existsSync(path.join(f.home, ".chatgpt-codex-orchestrator", "instances", "test-instance", "failure-outbox")), false);
+  });
+});
+
+test("preflight recording uses the immutable authorized snapshot and rejects mismatched authority", () => {
+  const f = fixture(); withHome(f.home, () => {
+    const p = planMacosCodexRun({ event: f.event({}), controlRoot: f.control, controlRepository: "jackie-water/control-private", trustedGithubUsername: ["trusted"] });
+    p.normalized.event.issue.body = JSON.stringify({ project: "demo", iteration: 1, review_route: "chat-165", target_branch: "main", prompt: "npm test" });
+    p.plan.project = "forged";
+    assert.throws(() => recordMacosPreflightFailure({ planned: p, controlRoot: f.control, trustedGithubUsername: ["other"], code: "SAFE_PREFLIGHT" }));
+    assert.throws(() => recordMacosPreflightFailure({ planned: p, controlRoot: path.join(f.control, "other"), trustedGithubUsername: ["trusted"], code: "SAFE_PREFLIGHT" }));
+    const result = recordMacosPreflightFailure({ planned: p, controlRoot: f.control, trustedGithubUsername: ["trusted"], code: "SAFE_PREFLIGHT" });
+    assert.equal(result.state.project, "demo");
+    assert.equal(result.state.source_commit, null);
+    assert.equal(recordMacosPreflightFailure({ planned: p, controlRoot: f.control, trustedGithubUsername: ["trusted"], code: "SAFE_PREFLIGHT" }).reused, true);
+  });
+});
+
 test("failure outbox and prepared journals suppress only the exact instance task", () => {
   const f = fixture(); withHome(f.home, () => {
     const p = planMacosCodexRun({ event: f.event({}), controlRoot: f.control, controlRepository: "jackie-water/control-private", trustedGithubUsername: ["trusted"] });
