@@ -8,7 +8,17 @@ const ID = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const CODE = /^[A-Z][A-Z0-9_]{0,63}$/;
 const SHA = /^[0-9a-f]{40}$/;
 const IMMUTABLE = ["project", "issue", "iteration", "stage", "code", "source_commit", "exit_code", "callback_id", "chat_url", "message"];
-const TRUSTED_DELIVERY = new Set(["committed-user-turn", "existing-user-message", "submission-confirmed"]);
+const TRUSTED_DELIVERY = new Set(["committed-user-turn", "existing-user-message"]);
+
+export function canonicalDeliveryState(state) {
+  const value = state?.delivery_state;
+  if (!DELIVERY_STATES.has(value)) throw new Error("Invalid failure delivery state");
+  return value;
+}
+
+export function hasTrustedDeliveryProof(state) {
+  return canonicalDeliveryState(state) === "DELIVERED" && TRUSTED_DELIVERY.has(state?.verified_by);
+}
 
 export function safeChatUrl(value) {
   try { const u = new URL(String(value)); if (u.origin !== "https://chatgpt.com" || !/^\/(?:g\/[^/]+\/)?c\/[A-Za-z0-9-]+\/?$/.test(u.pathname)) throw 0; return `${u.origin}${u.pathname}`.replace(/\/$/, ""); } catch { throw new Error("Malformed Chat URL"); }
