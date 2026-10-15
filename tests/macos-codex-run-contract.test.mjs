@@ -70,3 +70,18 @@ test("unsafe inputs reject before callback creation", () => {
 test("trusted preflight failure is durable and idempotent without source SHA", () => {
   const f = fixture(); withHome(f.home, () => { const p = planMacosCodexRun({ event: f.event({}), controlRoot: f.control, controlRepository: "jackie-water/control-private", trustedGithubUsername: ["trusted"] }); const a = recordMacosPreflightFailure({ planned: p, controlRoot: f.control, trustedGithubUsername: ["trusted"], code: "SAFE_PREFLIGHT" }); const b = recordMacosPreflightFailure({ planned: p, controlRoot: f.control, trustedGithubUsername: ["trusted"], code: "SAFE_PREFLIGHT" }); assert.equal(a.state.callback.delivery_state, "PENDING"); assert.equal(a.state.source_commit, null); assert.equal(b.reused, true); });
 });
+
+test("failure outbox and prepared journals suppress only the exact instance task", () => {
+  const f = fixture(); withHome(f.home, () => {
+    const p = planMacosCodexRun({ event: f.event({}), controlRoot: f.control, controlRepository: "jackie-water/control-private", trustedGithubUsername: ["trusted"] });
+    recordMacosPreflightFailure({ planned: p, controlRoot: f.control, trustedGithubUsername: ["trusted"], code: "SAFE_PREFLIGHT" });
+    assert.throws(() => planMacosCodexRun({ event: f.event({}), controlRoot: f.control, controlRepository: "jackie-water/control-private", trustedGithubUsername: ["trusted"] }));
+    const base = path.join(f.home, ".chatgpt-codex-orchestrator", "instances", "test-instance", "failure-outbox"); fs.rmSync(base, { recursive: true }); fs.mkdirSync(base, { recursive: true });
+    const failure = { execution_state: "TERMINAL_FAILURE", project: "demo", issue: 165, iteration: 1, callback_id: "failure-demo-165-1", callback: { callback_id: "failure-demo-165-1", delivery_state: "PENDING" } };
+    fs.writeFileSync(path.join(base, "failure-demo-165-1.journal.json"), JSON.stringify({ version: 1, phase: "prepared", callback_id: failure.callback_id, failure }));
+    assert.throws(() => planMacosCodexRun({ event: f.event({}), controlRoot: f.control, controlRepository: "jackie-water/control-private", trustedGithubUsername: ["trusted"] }));
+    fs.rmSync(path.join(base, "failure-demo-165-1.journal.json")); fs.writeFileSync(path.join(base, "other.json"), JSON.stringify({ execution_state: "TERMINAL_FAILURE", project: "demo", issue: 999, iteration: 1, callback_id: "failure-demo-999-1", callback: { callback_id: "failure-demo-999-1", delivery_state: "DELIVERED" } }));
+    assert.doesNotThrow(() => planMacosCodexRun({ event: f.event({}), controlRoot: f.control, controlRepository: "jackie-water/control-private", trustedGithubUsername: ["trusted"] }));
+    fs.writeFileSync(path.join(base, "bad.json"), "not-json"); assert.throws(() => planMacosCodexRun({ event: f.event({}), controlRoot: f.control, controlRepository: "jackie-water/control-private", trustedGithubUsername: ["trusted"] }));
+  });
+});

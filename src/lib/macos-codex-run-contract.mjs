@@ -35,14 +35,22 @@ function validateSteps(body, project) {
 function duplicateState(controlRoot, instanceId, project, issue, iteration) {
   const home = process.env.HOME || process.env.USERPROFILE || "/tmp";
   const base = path.join(home, ".chatgpt-codex-orchestrator", "instances", instanceId);
-  for (const dir of ["codex-runs", "run-state", "runs"]) {
+  for (const dir of ["codex-runs", "run-state", "runs", "failure-outbox"]) {
     const folder = path.join(base, dir); if (!fs.existsSync(folder)) continue;
     for (const name of fs.readdirSync(folder)) {
       if (!/\.json$/.test(name)) continue;
       const file = path.join(folder, name); let st; try { st = fs.lstatSync(file); } catch { fail("Uncertain existing run state"); }
       if (st.isSymbolicLink() || !st.isFile()) fail("Uncertain existing run state");
       let value; try { value = json(file); } catch { fail("Uncertain existing run state"); }
+      if (dir === "failure-outbox") {
+        const journal = name.endsWith(".journal.json");
+        const failure = journal ? value?.failure : value;
+        if (journal && (value?.version !== 1 || value?.phase !== "prepared" || typeof value.callback_id !== "string")) fail("Uncertain existing run state");
+        if (!failure || typeof failure !== "object" || Array.isArray(failure) || failure.execution_state !== "TERMINAL_FAILURE" || typeof failure.project !== "string" || !Number.isInteger(failure.issue) || failure.issue < 1 || !Number.isInteger(failure.iteration) || failure.iteration < 1 || typeof failure.callback_id !== "string" || failure.callback_id !== `failure-${failure.project}-${failure.issue}-${failure.iteration}` || !failure.callback || typeof failure.callback !== "object" || !["PENDING", "DRAFT_INSERTED", "SUBMISSION_ATTEMPTED", "DELIVERED"].includes(failure.callback.delivery_state) || failure.callback.callback_id !== failure.callback_id) fail("Uncertain existing run state");
+      }
       if (value.project === project && Number(value.issue) === issue && Number(value.iteration) === iteration) fail("Duplicate run state exists");
+      const failure = dir === "failure-outbox" ? (name.endsWith(".journal.json") ? value.failure : value) : null;
+      if (failure && failure.project === project && failure.issue === issue && failure.iteration === iteration) fail("Duplicate run state exists");
     }
   }
 }
