@@ -110,8 +110,10 @@ export function planMacosCodexRun({ event, controlRoot, controlRepository, trust
   const planned = { normalized, plan: { project: normalized.context.authorized_source.project, issue, iteration, repository: project.repository, default_branch: defaultBranch, target_branch: target, review_route: normalized.context.authorized_source.review_route, validation_steps: validation, run_id: `codex-${normalized.context.authorized_source.project}-${issue}-${iteration}` } };
   validatedPlans.set(planned, immutableClone({
     event: normalized.event,
+    plan: planned.plan,
     controlRoot,
     trustedGithubUsername,
+    instance_id: snapshot.instance_id,
     identity: {
       project: normalized.context.authorized_source.project,
       issue,

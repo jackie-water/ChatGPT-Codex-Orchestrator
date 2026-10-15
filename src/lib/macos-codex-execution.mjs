@@ -17,7 +17,6 @@ function trustedPath(p, root) {
   for (const part of absolute.slice(current.length).split(path.sep).filter(Boolean)) { current = path.join(current, part); const st = fs.lstatSync(current); if (st.isSymbolicLink() && !["/tmp", "/var"].includes(current)) throw new Error("Trusted path contains a symlink"); }
   return absolute;
 }
-function read(file) { return JSON.parse(fs.readFileSync(file, "utf8")); }
 function atomic(file, value) {
   privateDir(path.dirname(file));
   const temp = `${file}.${process.pid}.${Math.random().toString(16).slice(2)}.tmp`;
@@ -73,8 +72,8 @@ export async function executeMacosCodexRun({ planned, repoPath, codexExecutable,
   const snapshot = getValidatedMacosCodexPlan(planned);
   if (controlRoot !== snapshot.controlRoot || JSON.stringify(trustedGithubUsername) !== JSON.stringify(snapshot.trustedGithubUsername) || typeof repoPath !== "string" || typeof codexExecutable !== "string") throw new Error("Execution authority does not match the validated plan");
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > MAX_TIMEOUT) throw new Error("Invalid execution timeout");
-  const { normalized, identity } = snapshot; const plan = planned.plan; const issue = identity.issue; const instance = read(path.join(controlRoot, "instance.json"));
-  const base = privateDir(path.join(HOME(), ".chatgpt-codex-orchestrator", "instances", instance.instance_id));
+  const { plan, identity } = snapshot; const issue = identity.issue;
+  const base = privateDir(path.join(HOME(), ".chatgpt-codex-orchestrator", "instances", snapshot.instance_id));
   const automationRoot = privateDir(path.join(base, "automation"));
   const repo = trustedPath(repoPath, automationRoot);
   const executableStat = fs.lstatSync(codexExecutable); if (!path.isAbsolute(codexExecutable) || executableStat.isSymbolicLink() || !executableStat.isFile() || (executableStat.mode & 0o111) === 0) throw new Error("Codex executable is not trusted");

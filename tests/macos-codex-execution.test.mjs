@@ -73,3 +73,30 @@ test("unvalidated plan objects and symlinked clones fail closed", async () => {
     await assert.rejects(() => executeMacosCodexRun({ planned, repoPath: link, codexExecutable: f.codex, controlRoot: f.control, trustedGithubUsername: ["trusted"], timeoutMs: 5000 }));
   } finally { process.env.HOME = old; }
 });
+
+test("execution uses the immutable authorized plan after caller mutation", async () => {
+  const f = fixture(); const old = process.env.HOME; process.env.HOME = f.home;
+  try {
+    const planned = planMacosCodexRun({ event: f.event(), controlRoot: f.control, controlRepository: "control/private", trustedGithubUsername: ["trusted"] });
+    planned.plan.project = "foreign";
+    planned.plan.repository = "attacker/repo";
+    planned.plan.target_branch = "feat/foreign";
+    planned.plan.iteration = 99;
+    const result = await executeMacosCodexRun({ planned, repoPath: f.repo, codexExecutable: f.codex, controlRoot: f.control, trustedGithubUsername: ["trusted"], timeoutMs: 5000 });
+    assert.equal(result.execution_state, "EXECUTED_UNVALIDATED");
+    assert.equal(result.project, "demo"); assert.equal(result.iteration, 1);
+    assert.equal(fs.existsSync(path.join(f.home, ".chatgpt-codex-orchestrator/instances/exec-test/macos-execution-ledger/foreign-200-99.json")), false);
+  } finally { process.env.HOME = old; }
+});
+
+test("execution keeps the authorized instance when instance metadata changes", async () => {
+  const f = fixture(); const old = process.env.HOME; process.env.HOME = f.home;
+  try {
+    const planned = planMacosCodexRun({ event: f.event(), controlRoot: f.control, controlRepository: "control/private", trustedGithubUsername: ["trusted"] });
+    fs.writeFileSync(path.join(f.control, "instance.json"), JSON.stringify({ instance_id: "foreign-instance" }));
+    const result = await executeMacosCodexRun({ planned, repoPath: f.repo, codexExecutable: f.codex, controlRoot: f.control, trustedGithubUsername: ["trusted"], timeoutMs: 5000 });
+    assert.equal(result.execution_state, "EXECUTED_UNVALIDATED");
+    assert.equal(fs.existsSync(path.join(f.home, ".chatgpt-codex-orchestrator/instances/exec-test/macos-execution-ledger/demo-200-1.json")), true);
+    assert.equal(fs.existsSync(path.join(f.home, ".chatgpt-codex-orchestrator/instances/foreign-instance")), false);
+  } finally { process.env.HOME = old; }
+});
