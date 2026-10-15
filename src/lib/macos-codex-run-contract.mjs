@@ -36,7 +36,13 @@ function duplicateState(controlRoot, instanceId, project, issue, iteration) {
   const home = process.env.HOME || process.env.USERPROFILE || "/tmp";
   const base = path.join(home, ".chatgpt-codex-orchestrator", "instances", instanceId);
   for (const dir of ["codex-runs", "run-state", "runs", "failure-outbox"]) {
-    const folder = path.join(base, dir); if (!fs.existsSync(folder)) continue;
+    const folder = path.join(base, dir);
+    let folderStat;
+    try { folderStat = fs.lstatSync(folder); } catch (error) {
+      if (error?.code === "ENOENT") continue;
+      fail("Uncertain existing run state");
+    }
+    if (folderStat.isSymbolicLink() || !folderStat.isDirectory()) fail("Uncertain existing run state");
     for (const name of fs.readdirSync(folder)) {
       if (!/\.json$/.test(name)) continue;
       const file = path.join(folder, name); let st; try { st = fs.lstatSync(file); } catch { fail("Uncertain existing run state"); }
@@ -60,7 +66,7 @@ export function planMacosCodexRun({ event, controlRoot, controlRepository, trust
   const b = bodyOf(normalized.event); const issue = normalized.context.control_provenance.issue_number;
   const registry = json(path.join(controlRoot, "projects.json")); const project = registry.projects[normalized.context.authorized_source.project];
   const max = project.max_iterations === undefined ? 5 : project.max_iterations;
-  if (!Number.isInteger(max) || max < 1) fail("Invalid configured max_iterations");
+  if (!Number.isInteger(max) || max < 1 || max > 20) fail("Invalid configured max_iterations");
   let effectiveMax = max;
   if (b.max_iterations !== undefined) { if (!Number.isInteger(b.max_iterations) || b.max_iterations < 1 || b.max_iterations > max) fail("Requested max_iterations exceeds project limit"); effectiveMax = b.max_iterations; }
   const iteration = Number(b.iteration); if (iteration < 1 || iteration > effectiveMax) fail("Iteration exceeds project limit");

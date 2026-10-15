@@ -48,6 +48,29 @@ test("corrupt unrelated and symlinked run state fails closed", () => {
   assert.throws(() => withHome(f.home, () => planMacosCodexRun({ event: f.event({}), controlRoot: f.control, controlRepository: "jackie-water/control-private", trustedGithubUsername: ["trusted"] })));
 });
 
+test("symlinked state directories fail closed before traversal", () => {
+  const f = fixture(); const base = path.join(f.home, ".chatgpt-codex-orchestrator", "instances", "test-instance");
+  for (const dir of ["codex-runs", "run-state", "runs", "failure-outbox"]) {
+    fs.symlinkSync(path.join(f.root, `unrelated-${dir}`), path.join(base, dir), "dir");
+    assert.throws(() => withHome(f.home, () => planMacosCodexRun({ event: f.event({}), controlRoot: f.control, controlRepository: "jackie-water/control-private", trustedGithubUsername: ["trusted"] })));
+    fs.unlinkSync(path.join(base, dir));
+  }
+  const failure = path.join(base, "failure-outbox"); fs.mkdirSync(failure);
+  fs.writeFileSync(path.join(failure, "failure-demo-165-1.json"), JSON.stringify({ execution_state: "TERMINAL_FAILURE", project: "demo", issue: 165, iteration: 1, callback_id: "failure-demo-165-1", callback: { callback_id: "failure-demo-165-1", delivery_state: "PENDING" } }));
+  assert.throws(() => withHome(f.home, () => planMacosCodexRun({ event: f.event({}), controlRoot: f.control, controlRepository: "jackie-water/control-private", trustedGithubUsername: ["trusted"] })));
+});
+
+test("configured max_iterations is limited to 20", () => {
+  for (const max_iterations of [21, 30]) {
+    const f = fixture(); const projects = JSON.parse(fs.readFileSync(path.join(f.control, "projects.json"), "utf8"));
+    projects.projects.demo.max_iterations = max_iterations; fs.writeFileSync(path.join(f.control, "projects.json"), JSON.stringify(projects));
+    assert.throws(() => withHome(f.home, () => planMacosCodexRun({ event: f.event({ iteration: 20, request: "revise" }), controlRoot: f.control, controlRepository: "jackie-water/control-private", trustedGithubUsername: ["trusted"] })));
+  }
+  const f = fixture(); const projects = JSON.parse(fs.readFileSync(path.join(f.control, "projects.json"), "utf8"));
+  projects.projects.demo.max_iterations = 20; fs.writeFileSync(path.join(f.control, "projects.json"), JSON.stringify(projects));
+  assert.doesNotThrow(() => withHome(f.home, () => planMacosCodexRun({ event: f.event({ iteration: 20, request: "revise" }), controlRoot: f.control, controlRepository: "jackie-water/control-private", trustedGithubUsername: ["trusted"] })));
+});
+
 test("matching completed or malformed run state is never rerun", () => {
   const f = fixture(); const dir = path.join(f.home, ".chatgpt-codex-orchestrator", "instances", "test-instance", "run-state"); fs.mkdirSync(dir);
   fs.writeFileSync(path.join(dir, "run.json"), JSON.stringify({ project: "demo", issue: 165, iteration: 1, execution_state: "COMPLETED" }));
