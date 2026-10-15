@@ -4,12 +4,15 @@ import { normalizeControlEvent } from "./control-event-normalizer.mjs";
 import { prepareFailure, persistFailure } from "./run-failure-state.mjs";
 
 const BRANCH = /^(codex|chore|fix|feat|refactor|test|docs|spike)\/[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
-const SAFE_REF = /^(?!.*(?:^|\/)(?:\.|\.\.|\.git)(?:$|\/))(?!.*(?:^|\/)[^.\/]*\.\.[^.\/]*(?:\/|$))(?!.*(?:^|\/)[A-Za-z0-9._-]+\.lock(?:\/|$))(?!.*\.\.?$)(?!.*[\\~^:?*\[\]@{} ])(?!.*\/\/)(?!.*\/$)[A-Za-z0-9._/-]+$/;
 const SHELL_LINE = /^(?:[-*+]\s+|`+\s*)?(?:run\s+)?(?:npm\s+(?:test|run\s+(?:build|lint|test))|git\s+diff\s+--check|node\s+--check|(?:bash|sh)\s+-c)\b/i;
 const SHELL_META = /[;&|`$()<>]/;
 const validatedPlans = new WeakMap();
 
 const fail = message => { throw new Error(message); };
+function isSafeRef(value) {
+  if (typeof value !== "string" || !/^[A-Za-z0-9._/-]+$/.test(value) || /\/\/|\/$/.test(value)) return false;
+  return value.split("/").every(component => component.length > 0 && !component.startsWith(".") && !component.endsWith(".") && !component.includes("..") && !component.endsWith(".lock"));
+}
 const json = file => JSON.parse(fs.readFileSync(file, "utf8").replace(/^\uFEFF/, ""));
 function immutableClone(value) {
   if (value === null || typeof value !== "object") return value;
@@ -24,7 +27,7 @@ function configuredSteps(project) {
   const profile = project.validation_profile || project.validationProfile || {};
   const allow = profile.allowed_executables || project.allowed_validation_executables || [];
   const steps = profile.validation_steps || project.default_validation_steps || [];
-  if (!Array.isArray(allow) || !allow.every(x => typeof x === "string" && SAFE_REF.test(x))) fail("Invalid validation executable allowlist");
+  if (!Array.isArray(allow) || !allow.every(x => isSafeRef(x))) fail("Invalid validation executable allowlist");
   if (!Array.isArray(steps)) fail("Validation steps must be structured");
   return { allow, steps };
 }
@@ -36,7 +39,7 @@ function validateSteps(body, project) {
   if (!Array.isArray(steps)) fail("Validation steps must be structured argv");
   return steps.map(step => {
     if (!step || typeof step !== "object" || Array.isArray(step) || typeof step.name !== "string" || typeof step.command !== "string" || !Array.isArray(step.arguments) || !step.arguments.every(x => typeof x === "string" && !SHELL_META.test(x))) fail("Invalid structured validation step");
-    if (!allow.includes(step.command) || !SAFE_REF.test(step.command)) fail("Validation executable is not allowed");
+    if (!allow.includes(step.command) || !isSafeRef(step.command)) fail("Validation executable is not allowed");
     if (SHELL_META.test(step.command) || step.arguments.some(x => SHELL_META.test(x))) fail("Routine validation shell line is prohibited");
     return { name: step.name, command: step.command, arguments: [...step.arguments] };
   }).filter((step, i, all) => all.findIndex(x => x.command === step.command && JSON.stringify(x.arguments) === JSON.stringify(step.arguments)) === i);
@@ -89,8 +92,8 @@ export function planMacosCodexRun({ event, controlRoot, controlRepository, trust
   if (!prompt.trim() || prompt.length > limit) fail("Prompt is empty or exceeds configured limit");
   if (prompt.split(/\r?\n/).some(line => SHELL_LINE.test(line.trim()))) fail("Routine validation shell line is prohibited");
   const target = b.target_branch; const defaultBranch = project.default_branch;
-  if (typeof defaultBranch !== "string" || !SAFE_REF.test(defaultBranch)) fail("Invalid configured default branch");
-  if (typeof target !== "string" || !BRANCH.test(target) || !SAFE_REF.test(target) || ["main", "master", defaultBranch].includes(target)) fail("Prohibited or unsafe task branch");
+  if (typeof defaultBranch !== "string" || !isSafeRef(defaultBranch)) fail("Invalid configured default branch");
+  if (typeof target !== "string" || !BRANCH.test(target) || !isSafeRef(target) || ["main", "master", defaultBranch].includes(target)) fail("Prohibited or unsafe task branch");
   const validation = validateSteps(b, project);
   duplicateState(controlRoot, normalized.context.instance?.instance_id || json(path.join(controlRoot, "instance.json")).instance_id, normalized.context.authorized_source.project, issue, iteration);
   const planned = { normalized, plan: { project: normalized.context.authorized_source.project, issue, iteration, repository: project.repository, default_branch: defaultBranch, target_branch: target, review_route: normalized.context.authorized_source.review_route, validation_steps: validation, run_id: `codex-${normalized.context.authorized_source.project}-${issue}-${iteration}` } };

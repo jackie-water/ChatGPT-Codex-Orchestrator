@@ -36,10 +36,18 @@ test("iteration controls request kind and prompt limit", () => {
   assert.throws(() => withHome(f.home, () => planMacosCodexRun({ event: f.event({ iteration: 2, max_iterations: 1, request: "revise", prompt: "x" }), controlRoot: f.control, controlRepository: "jackie-water/control-private", trustedGithubUsername: ["trusted"] })));
 });
 
-test("Git-invalid dotted and lock branch components reject", () => {
+test("Git-invalid dotted and lock branch components reject while valid components succeed", () => {
   const f = fixture();
-  for (const target_branch of ["feat/a..b", "feat/a.lock", "feat/a."]) assert.throws(() => withHome(f.home, () => planMacosCodexRun({ event: f.event({ target_branch }), controlRoot: f.control, controlRepository: "jackie-water/control-private", trustedGithubUsername: ["trusted"] })));
-  assert.doesNotThrow(() => withHome(f.home, () => planMacosCodexRun({ event: f.event({ target_branch: "feat/a.b/c-d" }), controlRoot: f.control, controlRepository: "jackie-water/control-private", trustedGithubUsername: ["trusted"] })));
+  for (const target_branch of ["feat/task/.hidden", "feat/a/.dot", "feat/.hidden", "feat/a..b", "feat/a.lock", "feat/a."]) assert.throws(() => withHome(f.home, () => planMacosCodexRun({ event: f.event({ target_branch }), controlRoot: f.control, controlRepository: "jackie-water/control-private", trustedGithubUsername: ["trusted"] })));
+  for (const target_branch of ["feat/a/b", "feat/a.b/c-d"]) assert.doesNotThrow(() => withHome(f.home, () => planMacosCodexRun({ event: f.event({ target_branch }), controlRoot: f.control, controlRepository: "jackie-water/control-private", trustedGithubUsername: ["trusted"] })));
+});
+
+test("invalid configured default Git ref fails closed", () => {
+  for (const default_branch of ["main/.hidden", "main/a..b", "main/a.lock", "main/a."]) {
+    const f = fixture(); const projects = JSON.parse(fs.readFileSync(path.join(f.control, "projects.json"), "utf8"));
+    projects.projects.demo.default_branch = default_branch; fs.writeFileSync(path.join(f.control, "projects.json"), JSON.stringify(projects));
+    assert.throws(() => withHome(f.home, () => planMacosCodexRun({ event: f.event({}), controlRoot: f.control, controlRepository: "jackie-water/control-private", trustedGithubUsername: ["trusted"] })));
+  }
 });
 
 test("corrupt unrelated and symlinked run state fails closed", () => {
