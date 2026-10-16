@@ -13,6 +13,7 @@ import { prepareControlEnvironment, activateTargetProject, upgradeControlEnviron
 import { renderProjectInstructions } from "./lib/project-instructions.mjs";
 import { ensureInstallerChatRegistration } from "./lib/chat-registration.mjs";
 import { pendingCallbackCount, doctorHealth, repairHealth } from "./lib/runtime-health.mjs";
+import { macosPrerequisites, migrationPreflight, macosRuntimeAction } from "./lib/macos-platform.mjs";
 import {
   sandboxSmokeStatus,
   startSandboxSmoke,
@@ -90,7 +91,7 @@ function action(state, actionId, messageKey, extra = {}) {
 
 
 function dryRun() {
-  const state=loadState();
+  const state=loadState({create:false});
   const lang=ensureStateLanguage(state);
   const git=commandExists("git");
   const node=commandExists("node");
@@ -98,6 +99,7 @@ function dryRun() {
   const codex=commandExists("codex");
   const ghAuth=gh.ok?commandExists("gh",["auth","status"]):{ok:false};
 
+  const mac=process.platform==="darwin"?macosPrerequisites():null;
   const plan=[
     {
       step:"prerequisites",
@@ -106,7 +108,8 @@ function dryRun() {
         git:git.ok,
         node:node.ok,
         github_cli:gh.ok,
-        codex:codex.ok
+        codex:codex.ok,
+        ...(mac?{node_22_or_newer:mac.node,session_auth:mac.session_auth}: {})
       },
       action:"Install any supported missing prerequisites automatically."
     },
@@ -164,6 +167,7 @@ function dryRun() {
     message:lang==="zh-CN"?"安装预演完成，没有修改任何 GitHub repository、runner 或项目。":"Installation dry-run complete. No GitHub repository, runner or project was modified.",
     dry_run:true,
     mutations_performed:false,
+    migration_preflight:process.platform==="darwin"?migrationPreflight({state}):null,
     plan
   });
 }
@@ -176,7 +180,11 @@ function answer() {
 
   const bool = v => /^(true|yes|y|1|done|completed)$/i.test(String(v || ""));
 
-  if (actionId === "github_plugin_authorization" || actionId === "github_authorization") {
+  if (actionId === "macos_setup_approval") {
+    if (!bool(value)) return emit({status:"ERROR",error_id:"MACOS-APPROVAL-001",recoverable:false,preferred_language:lang,message:"macOS setup approval was not confirmed."},1);
+    state.macos_setup_approved=true;
+    state.current_step="macos_native_activation";
+  } else if (actionId === "github_plugin_authorization" || actionId === "github_authorization") {
     if (!bool(value)) return emit({status:"ERROR",error_id:"AUTH-001",recoverable:true,preferred_language:lang,message:t(lang,"answer.github.invalid")},1);
     state.github_plugin_authorized = true;
   } else if (actionId === "target_repository") {
@@ -224,6 +232,22 @@ function answer() {
 function runSetup() {
   const state = loadState();
   const lang = ensureStateLanguage(state);
+  if(process.platform==="darwin") {
+    const prerequisites=macosPrerequisites();
+    const migration=migrationPreflight({state});
+    const ready=prerequisites.node&&prerequisites.git&&prerequisites.gh&&prerequisites.codex&&prerequisites.session_auth&&migration.status==="READY";
+    if(!ready) return emit({status:"ERROR",error_id:"MACOS-PREREQUISITE-OR-MIGRATION",recoverable:true,preferred_language:lang,mutations_performed:false,message:"macOS preflight found a prerequisite or migration conflict; no installation mutation was performed.",prerequisites,migration},1);
+    if(!state.macos_setup_approved) return emit(action(state,"macos_setup_approval","setup.macos.approval",{mutations_performed:false,details:"Approval is required before native setup can write instance state or a LaunchAgent."}));
+    state.installation_id ||= crypto.randomUUID();
+    state.macos_native_setup="WAITING_APPROVAL_FOR_RUNNER";
+    state.macos_rollback={available:true,automatic:false,created_at:new Date().toISOString()};
+    saveState(state);
+    return emit({
+      status:"WAITING",action_id:"macos_native_activation",recoverable:true, preferred_language:lang, mutations_performed:false,
+      message:"macOS preflight passed. Native runner activation remains waiting for verified authorization; no runner or service was started.",
+      prerequisites,migration
+    });
+  }
   state.installation_id ||= crypto.randomUUID();
   state.completed ||= [];
 
@@ -663,6 +687,13 @@ function githubLogin() {
 }
 
 function runtimeChecks(state) {
+  if(process.platform==="darwin") {
+    const result=macosRuntimeAction("status",{state});
+    return {control_repository:Boolean(state.control_repository),control_clone:Boolean(state.control_clone_path&&fs.existsSync(state.control_clone_path)),
+      project_clone:Boolean(state.project_clone_path&&fs.existsSync(state.project_clone_path)),runner_configured:Boolean(state.runner_path),
+      runner_running:Boolean(result.preflight?.inventory?.runner?.exists&&result.preflight?.status==="READY"),reviewer_browser:false,
+      codex_authenticated:macosPrerequisites().session_auth,pending_callbacks:pendingCallbackCount(state),migration:result.status};
+  }
   const pendingCallbacks=pendingCallbackCount(state);
 
   let runnerRunning=false;
@@ -712,6 +743,7 @@ function doctor() {
     reviewer_chat_configured:Boolean(state.reviewer_chat_url),
     ...runtimeChecks(state)
   };
+  if(process.platform==="darwin") checks.migration_preflight=migrationPreflight({state});
 
   let preflight=true;
   let preflightDetails=null;
@@ -744,6 +776,7 @@ function status() {
 function repair() {
   const state=loadState();
   const lang=ensureStateLanguage(state);
+  if(process.platform==="darwin") return emit({status:"NEEDS_USER_ACTION",preferred_language:lang,message:"macOS repair is approval-gated; no service or runner was changed.",migration:migrationPreflight({state}),mutations_performed:false});
   if(process.platform!=="win32"||!state.control_environment_ready||!state.control_clone_path||!state.project_key){
     return emit({status:"ERROR",error_id:"REPAIR-001",recoverable:true,preferred_language:lang,message:t(lang,"repair.not_ready"),runtime:runtimeChecks(state)},1);
   }
@@ -825,6 +858,10 @@ else if (command==="status") status();
 else if (command==="repair") repair();
 else if (command==="refresh-runtime") refreshRuntime();
 else if (command==="report-problem") reportProblem();
+else if (command==="migration-preflight") {
+  const state=loadState({create:false}); const lang=ensureStateLanguage(state);
+  emit({status:"PASS",preferred_language:lang,mutations_performed:false,migration:migrationPreflight({state})});
+}
 else if (command==="submit-report") submitReport();
 else if (command==="answer") answer();
 else if (command==="errors") emit({status:"PASS",errors:ERROR_CATALOG});
