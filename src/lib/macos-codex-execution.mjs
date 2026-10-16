@@ -114,6 +114,19 @@ function runCodex(executable, repo, prompt, timeoutMs, logFile) {
       const error = groupExists() ? Object.assign(new Error("Codex process group termination could not be verified; run outcome is unknown"), { code: "CODEX_TERMINATION_UNVERIFIED" }) : undefined;
       finish({ error, value: { code: null, signal, timedOut: true }, log: { exit_code: null, signal, ...(error ? { error: error.code } : {}), output: clean() } });
     };
+    const finishAfterClose = (code, signal) => {
+      const log = () => ({ exit_code: code, signal, output: clean() });
+      if (!groupExists()) return finish({ value: { code, signal, timedOut: false }, log: log() });
+      const unverified = () => finish({ error: Object.assign(new Error("Codex process group termination could not be verified; run outcome is unknown"), { code: "CODEX_TERMINATION_UNVERIFIED" }), value: { code: null, signal: null, timedOut: false }, log: { ...log(), error: "CODEX_TERMINATION_UNVERIFIED" } });
+      if (!signalGroup("SIGTERM")) return unverified();
+      if (!groupExists()) return finish({ value: { code, signal, timedOut: false }, log: log() });
+      killTimer = setTimeout(() => {
+        if (!signalGroup("SIGKILL")) return unverified();
+        if (!groupExists()) return finish({ value: { code, signal, timedOut: false }, log: log() });
+        reapTimer = setInterval(() => { if (!groupExists()) finish({ value: { code, signal, timedOut: false }, log: log() }); }, 25);
+        verificationTimer = setTimeout(unverified, 250);
+      }, 1000);
+    };
     child.stdout.on("data", append); child.stderr.on("data", append); child.stdin.end(prompt);
     let timer = setTimeout(() => {
       timedOut = true;
@@ -128,7 +141,7 @@ function runCodex(executable, repo, prompt, timeoutMs, logFile) {
     }, timeoutMs);
     child.on("close", (code, signal) => {
       if (timedOut) return;
-      finish({ value: { code, signal, timedOut: false }, log: { exit_code: code, signal, output: clean() } });
+      finishAfterClose(code, signal);
     });
     child.on("error", error => {
       if (timedOut) return finishTimeout(null);

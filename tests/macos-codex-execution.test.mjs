@@ -92,6 +92,71 @@ sleep 10
   } finally { process.env.HOME = old; fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
+function installExitWithBackgroundGroup(f, exitCode, marker) {
+  const groupFile = `${f.codex}.group.json`;
+  const child = `import fs from "node:fs";
+setTimeout(() => fs.writeFileSync(${JSON.stringify(marker)}, "mutated\\n"), 700);
+process.on("SIGTERM", () => process.exit(0));
+setInterval(() => {}, 1000);`;
+  fs.writeFileSync(`${f.codex}.mjs`, `import fs from "node:fs";
+import { spawn } from "node:child_process";
+const descendant = spawn(process.execPath, ["--input-type=module", "-e", ${JSON.stringify(child)}], { stdio: "ignore" });
+fs.writeFileSync(${JSON.stringify(groupFile)}, JSON.stringify({ pid: process.pid, descendant: descendant.pid }));
+process.exit(${exitCode});
+`);
+  fs.writeFileSync(f.codex, `#!/bin/sh\nexec '${process.execPath.replaceAll("'", "'\\''")}' "$0.mjs"\n`);
+  fs.chmodSync(f.codex, 0o700);
+  return groupFile;
+}
+
+test("parent close reconciles background group for exit 0 and 7", { timeout: 10000, skip: process.platform === "win32" }, async () => {
+  for (const exitCode of [0, 7]) {
+    const f = fixture(); const old = process.env.HOME; process.env.HOME = f.home;
+    const marker = path.join(f.repo, `late-${exitCode}`); const groupFile = installExitWithBackgroundGroup(f, exitCode, marker);
+    try {
+      const routesFile = path.join(f.home, ".chatgpt-codex-orchestrator/instances/exec-test/chat-routes.json");
+      fs.writeFileSync(routesFile, JSON.stringify({ routes: [{ project: "demo", route: "chat-212", status: "active", chat_url: "https://chatgpt.com/c/chat-212" }] }));
+      const event = f.event(); const body = JSON.parse(event.issue.body); body.review_route = "chat-212"; event.issue.body = JSON.stringify(body);
+      const planned = planMacosCodexRun({ event, controlRoot: f.control, controlRepository: "control/private", trustedGithubUsername: ["trusted"] });
+      const result = await executeMacosCodexRun({ planned, repoPath: f.repo, codexExecutable: f.codex, controlRoot: f.control, trustedGithubUsername: ["trusted"], timeoutMs: 5000 });
+      if (result.execution_state === "EXECUTED_UNVALIDATED") {
+        assert.equal(exitCode, 0); assert.equal(result.exit_code, 0);
+        assert.equal(fs.existsSync(marker), false);
+        await new Promise(resolve => setTimeout(resolve, 900)); assert.equal(fs.existsSync(marker), false);
+      } else if (result.state === "TERMINAL_FAILURE") {
+        assert.equal(exitCode, 7); assert.equal(result.failure.callback.chat_url, "https://chatgpt.com/c/chat-212");
+        assert.equal(result.failure.source_commit, null); assert.equal(result.failure.callback.delivery_state, "PENDING");
+        assert.equal(fs.existsSync(marker), false);
+        await new Promise(resolve => setTimeout(resolve, 900)); assert.equal(fs.existsSync(marker), false);
+      } else {
+        assert.equal(result.state, "UNKNOWN"); assert.equal(result.failure.code, "CODEX_TERMINATION_UNVERIFIED");
+        assert.equal(result.failure.source_commit, null); assert.equal(result.failure.callback.chat_url, "https://chatgpt.com/c/chat-212");
+        assert.equal(result.failure.callback.delivery_state, "PENDING");
+        await assert.rejects(() => executeMacosCodexRun({ planned, repoPath: f.repo, codexExecutable: f.codex, controlRoot: f.control, trustedGithubUsername: ["trusted"], timeoutMs: 5000 }), /claimed|uncertain/);
+      }
+    } finally {
+      try { const group = JSON.parse(fs.readFileSync(groupFile)); try { process.kill(-group.pid, "SIGKILL"); } catch (error) { if (error.code !== "ESRCH") throw error; } } catch {}
+      process.env.HOME = old; fs.rmSync(f.root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("parent-close group cleanup uncertainty stays UNKNOWN on original route", { timeout: 10000, skip: process.platform === "win32" }, async () => {
+  const f = fixture(); const old = process.env.HOME; const originalKill = process.kill; const marker = path.join(f.repo, "late-uncertain");
+  const groupFile = installExitWithBackgroundGroup(f, 0, marker);
+  try {
+    process.env.HOME = f.home; const routesFile = path.join(f.home, ".chatgpt-codex-orchestrator/instances/exec-test/chat-routes.json");
+    fs.writeFileSync(routesFile, JSON.stringify({ routes: [{ project: "demo", route: "chat-212", status: "active", chat_url: "https://chatgpt.com/c/chat-212" }] }));
+    const event = f.event(); const body = JSON.parse(event.issue.body); body.review_route = "chat-212"; event.issue.body = JSON.stringify(body);
+    const planned = planMacosCodexRun({ event, controlRoot: f.control, controlRepository: "control/private", trustedGithubUsername: ["trusted"] });
+    process.kill = (pid, signal) => { if (signal === "SIGTERM" && pid < 0) throw Object.assign(new Error("EPERM"), { code: "EPERM" }); return originalKill(pid, signal); };
+    const result = await executeMacosCodexRun({ planned, repoPath: f.repo, codexExecutable: f.codex, controlRoot: f.control, trustedGithubUsername: ["trusted"], timeoutMs: 5000 });
+    assert.equal(result.state, "UNKNOWN"); assert.equal(result.failure.code, "CODEX_TERMINATION_UNVERIFIED"); assert.equal(result.failure.source_commit, null); assert.equal(result.failure.callback.chat_url, "https://chatgpt.com/c/chat-212");
+    await new Promise(resolve => setTimeout(resolve, 900)); assert.equal(fs.existsSync(marker), true);
+    await assert.rejects(() => executeMacosCodexRun({ planned, repoPath: f.repo, codexExecutable: f.codex, controlRoot: f.control, trustedGithubUsername: ["trusted"], timeoutMs: 5000 }), /claimed|uncertain/);
+  } finally { process.kill = originalKill; try { const group = JSON.parse(fs.readFileSync(groupFile)); try { originalKill(-group.pid, "SIGKILL"); } catch (error) { if (error.code !== "ESRCH") throw error; } } catch {} process.env.HOME = old; fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
 function installPersistentCodexGroup(f) {
   const groupFile = `${f.codex}.group.json`; const readyFile = `${f.codex}.ready`;
   const descendant = `import fs from "node:fs";
