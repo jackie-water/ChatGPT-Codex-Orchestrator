@@ -11,7 +11,7 @@ import { sanitizeObject } from "./lib/sanitize.mjs";
 import { submitDiagnosticReport } from "./lib/reporting.mjs";
 import { prepareControlEnvironment, activateTargetProject, upgradeControlEnvironment, refreshControlRuntime } from "./lib/control-env.mjs";
 import { renderProjectInstructions } from "./lib/project-instructions.mjs";
-import { ensureInstallerChatRegistration } from "./lib/chat-registration.mjs";
+import { ensureInstallerChatRegistration, normalizeChatUrl } from "./lib/chat-registration.mjs";
 import { pendingCallbackCount, doctorHealth, repairHealth } from "./lib/runtime-health.mjs";
 import { macosPrerequisites, migrationPreflight, macosRuntimeAction, prepareMigrationIntent } from "./lib/macos-platform.mjs";
 import {
@@ -289,8 +289,44 @@ function runSetup() {
     if(state.github_plugin_authorization_verified!==true || state.github_plugin_authorization_installation_id!==state.installation_id || state.github_plugin_authorization_control_repository!==state.control_repository || state.github_plugin_authorization_sandbox_repository!==state.sandbox_repository || state.github_plugin_authorization_chat_url!==state.reviewer_chat_url) return emit(action(state,"generated_repo_authorization","setup.generated_repo.connect",{repositories:[state.control_repository,state.sandbox_repository],chat_url:state.reviewer_chat_url,verification_requirement:"The controlling Chat must confirm access to these exact generated private repositories and record this exact current Chat URL; local gh status and boolean answers are not proof.",mutations_performed:true}));
     const registration=ensureInstallerChatRegistration(state,{projectKey:state.sandbox_project_key});
     if(registration.status!=="READY"){ state.sandbox_chat_registration_issue=registration.issue?.url||null; saveState(state); return emit({status:"NEEDS_USER_ACTION",action_id:"sandbox_chat_registration",preferred_language:lang,message:"Register the explicit Sandbox callback in the originating Chat before CODEX-RUN.",registration_issue:registration.issue?.url||null,mutations_performed:true}); }
-    state.sandbox_review_route=registration.route; state.macos_native_setup="SANDBOX_READY"; state.current_step="sandbox_verification"; saveState(state);
-    return emit({status:"WAITING",action_id:"sandbox_verification",recoverable:true,preferred_language:lang,mutations_performed:true,message:"Native macOS Sandbox and Control are prepared; target remains disabled until Sandbox is complete. No LaunchAgent or runner was started.",control_repository:state.control_repository,sandbox_repository:state.sandbox_repository,runner_label:state.runner_label});
+    const registered=registration.record;
+    const shortId=String(state.installation_id||"").replace(/[^A-Za-z0-9]/g,"").slice(0,8).toLowerCase()||"default";
+    const expectedSandboxProject="sandbox-"+shortId;
+    const optionalInstallationMatches=!Object.hasOwn(registered||{},"installation_id") || String(registered.installation_id)===String(state.installation_id);
+    let registeredChatUrl=null;
+    try { registeredChatUrl=normalizeChatUrl(registered?.chat_url); } catch {}
+    let stateChatUrl=null;
+    try { stateChatUrl=normalizeChatUrl(state.reviewer_chat_url); } catch {}
+    if(!registered || registered.status!=="active" || String(registered.project)!==expectedSandboxProject || String(registered.project)!==String(state.sandbox_project_key) || registeredChatUrl!==stateChatUrl || (state.sandbox_review_route && state.sandbox_review_route!==String(registration.route)) || !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(String(registered.route||"")) || String(registered.route)!==String(registration.route) || !optionalInstallationMatches){
+      state.last_error={error_id:"SANDBOX-IDENTITY-001",message:"Sandbox callback registration identity is incomplete or does not match this installation",at:new Date().toISOString()};
+      saveState(state);
+      return emit({status:"ERROR",error_id:"SANDBOX-IDENTITY-001",recoverable:false,preferred_language:lang,message:"Sandbox verification failed closed because the registered route is not bound to this exact installation, project, and originating Chat.",mutations_performed:true},1);
+    }
+    state.sandbox_review_route=registration.route;
+    let smoke;
+    try { smoke=sandboxSmokeStatus(state); }
+    catch(error){
+      state.last_error={error_id:"SANDBOX-VERIFICATION-001",message:String(error.message||error),at:new Date().toISOString()};
+      saveState(state);
+      return emit({status:"ERROR",error_id:"SANDBOX-VERIFICATION-001",recoverable:true,preferred_language:lang,message:"Sandbox verification evidence could not be read; target remains disabled.",details:String(error.message||error),mutations_performed:true},1);
+    }
+    const sameInstanceComplete=smoke?.status==="PASS" && smoke?.stage==="COMPLETE" && smoke?.branch===`test/install-smoke-${shortId}`;
+    if(sameInstanceComplete){
+      state.sandbox_verified=true;
+      state.macos_native_setup="SANDBOX_VERIFIED";
+      if(!state.completed.includes("sandbox_verified")) state.completed.push("sandbox_verified");
+      saveState(state);
+      if(state.codex_trust_project===true){
+        state.macos_native_setup="POST_SANDBOX_HANDOFF";
+        state.current_step="native_post_sandbox_gate";
+        if(state.last_error?.error_id!=="MACOS-POST-SANDBOX-UNSUPPORTED") state.last_error={error_id:"MACOS-POST-SANDBOX-UNSUPPORTED",message:"Native macOS post-Sandbox Code Review/merge and target activation are not supported by this setup path",at:new Date().toISOString()};
+        saveState(state);
+        return emit({status:"ERROR",error_id:"MACOS-POST-SANDBOX-UNSUPPORTED",recoverable:false,preferred_language:lang,message:"Sandbox is verified and project trust is recorded, but the native macOS post-Sandbox Code Review/merge and target-activation gate is unsupported. Target remains disabled; no action was emitted.",current_step:state.current_step,mutations_performed:true},1);
+      }
+      return emit(action(state,"codex_trust_project","setup.codex.trust_project",{folder:state.project_clone_path||null,smoke,mutations_performed:true,details:"Sandbox completion was independently verified for this installation. Confirm project-folder trust as the next human gate; target remains disabled and no LaunchAgent or runner was started."}));
+    }
+    state.macos_native_setup="SANDBOX_READY"; state.current_step="sandbox_verification"; saveState(state);
+    return emit({status:"WAITING",action_id:"sandbox_verification",recoverable:true,preferred_language:lang,mutations_performed:true,message:"Native macOS Sandbox and Control are prepared; independently verified Sandbox completion is still required. The target remains disabled. No LaunchAgent or runner was started.",smoke,control_repository:state.control_repository,sandbox_repository:state.sandbox_repository,runner_label:state.runner_label});
   }
   state.installation_id ||= crypto.randomUUID();
   state.completed ||= [];
