@@ -166,7 +166,7 @@ export async function executeMacosCodexRun({ planned, repoPath, codexExecutable,
     throw error;
   }
   const id = `${plan.project}-${issue}-${plan.iteration}`; const ledgerFile = path.join(base, "macos-execution-ledger", `${id}.json`);
-  const ledger = { version: 1, execution_state: "CLAIMED", project: plan.project, issue, iteration: plan.iteration, claimed_at_utc: new Date().toISOString() };
+  const ledger = { version: 1, execution_state: "CLAIMED", project: plan.project, issue, iteration: plan.iteration, instance_id: snapshot.instance_id, authorization_digest: snapshot.authorization_digest, repo_path: fs.realpathSync(repo), claimed_at_utc: new Date().toISOString() };
   let logs;
   try { logs = privateDir(path.join(base, "macos-execution-logs")); }
   catch (error) {
@@ -198,7 +198,7 @@ export async function executeMacosCodexRun({ planned, repoPath, codexExecutable,
     const observed = validateClone(repo, plan);
     const result = await runCodex(trustedExecutable, repo, JSON.parse(snapshot.event.issue.body).prompt, timeoutMs, path.join(logs, `${id}.json`));
     if (result.code !== 0) { const saved = failure(planned, result.timedOut ? "timeout" : "codex", result.timedOut ? "CODEX_TIMEOUT" : (result.error ? "CODEX_SPAWN_FAILED" : "CODEX_NONZERO"), result.code ?? undefined); atomic(ledgerFile, { ...ledger, execution_state: "TERMINAL_FAILURE", callback_id: saved.state.callback_id }); return { state: "TERMINAL_FAILURE", failure: saved.state }; }
-    const done = { ...ledger, execution_state: "EXECUTED_UNVALIDATED", observed_branch: observed.branch, observed_repository: plan.repository, observed_head: observed.head, exit_code: 0, validation_state: "NOT_RUN", success_callback_state: "NOT_IMPLEMENTED", completed_at_utc: new Date().toISOString() }; atomic(ledgerFile, done); return done;
+    const done = { ...ledger, execution_state: "EXECUTED_UNVALIDATED", observed_branch: observed.branch, observed_repository: plan.repository, observed_head: observed.head, observed_remote_default: observed.remote_default, post_execution_head: git(repo, ["rev-parse", "--verify", "HEAD^{commit}"]), exit_code: 0, validation_state: "NOT_RUN", success_callback_state: "NOT_IMPLEMENTED", completed_at_utc: new Date().toISOString() }; atomic(ledgerFile, done); return done;
   } catch (error) {
     if (error?.code === "CODEX_LOG_PERSIST_FAILED" || error?.code === "CODEX_TERMINATION_UNVERIFIED") {
       // The child may still be running or may have changed the clone. Preserve the claim if reconciliation cannot be persisted.

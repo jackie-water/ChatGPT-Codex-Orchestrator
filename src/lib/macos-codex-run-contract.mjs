@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 import { normalizeControlEvent, getAuthorizedSnapshot } from "./control-event-normalizer.mjs";
 import { prepareFailure, persistFailure } from "./run-failure-state.mjs";
 
@@ -107,13 +108,14 @@ export function planMacosCodexRun({ event, controlRoot, controlRepository, trust
   if (typeof target !== "string" || !BRANCH.test(target) || !isSafeRef(target) || ["main", "master", defaultBranch].includes(target)) fail("Prohibited or unsafe task branch");
   const validation = validateSteps(b, project);
   duplicateState(controlRoot, snapshot.instance_id, normalized.context.authorized_source.project, issue, iteration);
-  const planned = { normalized, plan: { project: normalized.context.authorized_source.project, issue, iteration, repository: project.repository, default_branch: defaultBranch, target_branch: target, review_route: normalized.context.authorized_source.review_route, validation_steps: validation, run_id: `codex-${normalized.context.authorized_source.project}-${issue}-${iteration}` } };
+  const planned = { normalized, plan: { project: normalized.context.authorized_source.project, issue, iteration, max_iterations: effectiveMax, repository: project.repository, default_branch: defaultBranch, checkpoint_branch: project.checkpoint_branch, target_branch: target, review_route: normalized.context.authorized_source.review_route, validation_steps: validation, run_id: `codex-${normalized.context.authorized_source.project}-${issue}-${iteration}` } };
   const validatedSnapshot = immutableClone({
     event: normalized.event,
     plan: planned.plan,
     controlRoot,
     trustedGithubUsername,
     instance_id: snapshot.instance_id,
+    instance_root: path.join(fs.realpathSync(process.env.HOME || process.env.USERPROFILE || "/tmp"), ".chatgpt-codex-orchestrator", "instances", snapshot.instance_id),
     identity: {
       project: normalized.context.authorized_source.project,
       issue,
@@ -123,7 +125,13 @@ export function planMacosCodexRun({ event, controlRoot, controlRepository, trust
       repository: normalized.context.authorized_source.repository
     }
   });
-  validatedPlans.set(planned, Object.freeze({ ...validatedSnapshot, authorization: snapshot }));
+  // Persist this binding in the executor claim. Reauthorization of a changed
+  // event, registry, route, HOME, or validation profile must not finalize it.
+  const canonical = value => value === null || typeof value !== "object" ? JSON.stringify(value)
+    : Array.isArray(value) ? `[${value.map(canonical).join(",")}]`
+      : `{${Object.keys(value).sort().filter(key => value[key] !== undefined).map(key => `${JSON.stringify(key)}:${canonical(value[key])}`).join(",")}}`;
+  const authorization_digest = crypto.createHash("sha256").update(canonical({ ...validatedSnapshot, authorization: snapshot, provenance: normalized.context.control_provenance })).digest("hex");
+  validatedPlans.set(planned, Object.freeze({ ...validatedSnapshot, authorization: snapshot, authorization_digest }));
   return planned;
 }
 
