@@ -1,4 +1,4 @@
-import nodeTest from "node:test";
+import nodeTest, { after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -19,6 +19,30 @@ const test = (name, options, fn) => typeof options === "function"
 const realSync = childProcess.spawnSync;
 const realSpawn = childProcess.spawn;
 const realKill = process.kill;
+// Capture HOME before any fixture replaces it. Hosted CI toolcache ancestors
+// need not satisfy production executable trust checks. Share one private copy
+// for this test file, outside the fixture clones and their /tmp ancestors.
+const originalTestRunnerHome = fs.realpathSync(process.env.HOME || os.homedir());
+let privateNode;
+function trustedFixtureNode() {
+  if (privateNode) return privateNode;
+  const root = fs.mkdtempSync(path.join(originalTestRunnerHome, ".macos-finalize-node-"));
+  try {
+    fs.chmodSync(root, 0o700);
+    const bin = path.join(root, "bin"), executable = path.join(bin, "node");
+    fs.mkdirSync(bin, { mode: 0o700 }); fs.chmodSync(bin, 0o700);
+    fs.copyFileSync(process.execPath, executable, fs.constants.COPYFILE_EXCL);
+    fs.chmodSync(executable, 0o700);
+    privateNode = { root, bin, executable };
+    return privateNode;
+  } catch (error) {
+    fs.rmSync(root, { recursive: true, force: true });
+    throw error;
+  }
+}
+after(() => {
+  if (privateNode) { fs.rmSync(privateNode.root, { recursive: true, force: true }); privateNode = undefined; }
+});
 const write = (file, value) => fs.writeFileSync(file, JSON.stringify(value, null, 2) + "\n", { mode: 0o600 });
 const read = file => JSON.parse(fs.readFileSync(file, "utf8"));
 const hash = bytes => crypto.createHash("sha256").update(bytes).digest("hex");
@@ -27,11 +51,13 @@ function localGit(repo, ...args) {
   assert.equal(result.status, 0, result.stderr); return result.stdout.trim();
 }
 function fixture({ validator = "console.log('validator ok');", checkpoint = "codex/checkpoints" } = {}) {
+  const node = trustedFixtureNode();
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "macos-finalize-")));
   const home = path.join(root, "home"), control = path.join(root, "control"), bare = path.join(root, "remote.git");
   fs.mkdirSync(home, 0o700); fs.mkdirSync(control, 0o700);
   for (const key of Object.keys(process.env)) if (key.startsWith("GIT_")) delete process.env[key];
   process.env.HOME = home;
+  process.env.PATH = [node.bin, process.env.PATH].filter(Boolean).join(path.delimiter);
   const base = path.join(home, ".chatgpt-codex-orchestrator", "instances", "postexec-test");
   const automation = path.join(base, "automation"), repo = path.join(automation, "repo");
   fs.mkdirSync(automation, { recursive: true, mode: 0o700 });
@@ -229,6 +255,8 @@ test("validation runs exact argv without shell and report outputs are bounded an
     childProcess.spawn = (bin, args, options) => { calls.push({ bin, args, options }); return realSpawn(bin, args, options); };
     const result = await finalize(f); assert.equal(result.state, "READY_FOR_REVIEW");
     assert.equal(calls.length, 2); assert.deepEqual(calls[1].args, [f.script]);
+    assert.equal(calls[1].bin, trustedFixtureNode().executable);
+    assert.equal(calls[1].options.env.PATH.split(path.delimiter)[0], trustedFixtureNode().bin);
     for (const call of calls) { assert.equal(call.options.shell, false); assert.equal(call.options.detached, true); }
     const output = result.validation[1].output;
     assert.ok(output.length <= 8192); assert.match(output, /REDACTED/); assert.doesNotMatch(output, /fakeSECRET|secretvalue|hiddenvalue/);
