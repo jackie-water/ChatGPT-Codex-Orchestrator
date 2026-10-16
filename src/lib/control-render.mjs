@@ -77,9 +77,11 @@ export function renderConfigPs1({githubLogin,projectKey,projectClonePath,project
   ].join("\n");
 }
 
-export function renderWorkflow(template,{runnerLabel}){
+export function renderWorkflow(template,{runnerLabel,platform=process.platform,trustedGithubUsername}={}){
   if(!/^[A-Za-z0-9._-]{1,64}$/.test(runnerLabel)) throw new Error("Invalid runner label");
-  return String(template).replaceAll("{{RUNNER_LABEL}}",runnerLabel);
+  const rendered=String(template).replaceAll("{{RUNNER_LABEL}}",runnerLabel).replaceAll("{{RUNNER_OS}}",platform==="darwin"?"macOS":"Windows").replaceAll("{{RUNNER_ARCH}}",platform==="darwin"?"ARM64":"X64");
+  if(rendered.includes("{{TRUSTED_GITHUB_USERNAME}}")&&!/^[A-Za-z0-9-]+$/.test(String(trustedGithubUsername||""))) throw new Error("Invalid trusted GitHub login");
+  return rendered.replaceAll("{{TRUSTED_GITHUB_USERNAME}}",String(trustedGithubUsername||""));
 }
 
 export function defaultLocalPaths({home,installationId,projectKey}){

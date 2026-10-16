@@ -79,7 +79,17 @@ export function renderLaunchAgent({label,runnerPath,instanceRoot,programArgument
 }
 
 export function macosRuntimeAction(action,{state={}}={}) {
-  if(!["status","doctor"].includes(action)) return {status:"NEEDS_APPROVAL",mutations_performed:false,action};
+  if(!["status","doctor","install","start","stop","repair"].includes(action)) return {status:"ERROR",mutations_performed:false,action};
   const preflight=migrationPreflight({state});
-  return {status:preflight.status,mutations_performed:false,preflight};
+  if(preflight.status!=="READY") return {status:"ERROR",error_id:"MACOS-RUNNER-OWNERSHIP",mutations_performed:false,preflight,action:"Resolve runner ownership manually; no existing runner was stopped."};
+  const label=state.launch_agent_label, plist=path.join(HOME(),"Library","LaunchAgents",`${label}.plist`), listed=cmd("launchctl",["list"]);
+  if(!state.sandbox_only || state.target_environment_ready===true || !state.instance_id || state.runner_owner!==state.installation_id || !/^com\.chatgpt\.codex\.[A-Za-z0-9-]+$/.test(String(label||"")) || !/^[A-Za-z0-9._-]+$/.test(String(state.runner_label||""))) return {status:"ERROR",error_id:"MACOS-SANDBOX-SCOPE",mutations_performed:false,action,details:"Runner and LaunchAgent identities are incomplete or target ownership is present."};
+  if(state.browser_port_conflict===true || state.browser_profile_conflict===true || state.conflicting_runner===true) return {status:"ERROR",error_id:"MACOS-INSTANCE-CONFLICT",mutations_performed:false,action};
+  const active=listed.ok&&listed.output.split("\n").some(line=>line.includes(label));
+  if(action==="status"||action==="doctor") return {status:"PASS",mutations_performed:false,launchctl_checked:listed.ok,launchctl_state:active?"loaded":"not-loaded",plist_exists:fs.existsSync(plist),preflight};
+  if(state.macos_setup_approved!==true || state.macos_action_approval!==action) return {status:"NEEDS_USER_ACTION",error_id:"MACOS-ACTION-APPROVAL",mutations_performed:false,action:"Approve this exact macOS action: "+action};
+  if(action==="install"||action==="repair") { if(fs.existsSync(plist)){ const st=fs.lstatSync(plist); if(st.isSymbolicLink()||st.uid!==process.getuid?.()||st.mode&0o022) return {status:"ERROR",error_id:"MACOS-PLIST-COLLISION",mutations_performed:false,action}; if(action==="install"&&!state.plist_owned) return {status:"ERROR",error_id:"MACOS-PLIST-COLLISION",mutations_performed:false,action}; } fs.mkdirSync(path.dirname(plist),{recursive:true,mode:0o700}); const temp=plist+`.${process.pid}.tmp`; const fd=fs.openSync(temp,"wx",0o600); try { fs.writeFileSync(fd,renderLaunchAgent({label,runnerPath:state.runner_path,instanceRoot:state.instance_root})); fs.fsyncSync(fd); } finally { fs.closeSync(fd); } fs.renameSync(temp,plist); fs.chmodSync(plist,0o600); return {status:"PASS",mutations_performed:true,action,plist}; }
+  if(!listed.ok) return {status:"ERROR",error_id:"MACOS-LAUNCHCTL-001",mutations_performed:false,details:listed.output};
+  const result=cmd("launchctl",[action==="start"?"bootstrap":"bootout",`gui/${process.getuid?.()||0}`,plist]);
+  return {status:result.ok?"PASS":"ERROR",mutations_performed:result.ok,action,launchctl_state:result.ok?(action==="start"?"loaded":"not-loaded"):"unknown",details:result.output};
 }

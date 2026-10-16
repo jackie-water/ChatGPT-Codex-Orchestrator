@@ -198,11 +198,15 @@ function browserPortForInstallation(shortId){
   return 10000+(Number.isFinite(n)?n%40000:0);
 }
 
-function writeInstanceMetadata(controlPath,{instanceId}){
+function writeInstanceMetadata(controlPath,{instanceId,trustedGithubUsername,launchAgentLabel}){
   if(!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(instanceId)) throw new Error("Invalid instance id");
+  if(process.platform==="darwin"&&!/^[A-Za-z0-9-]+$/.test(String(trustedGithubUsername||""))) throw new Error("Invalid trusted GitHub login");
+  if(launchAgentLabel!==undefined&&launchAgentLabel!==null&&!/^com\.chatgpt\.codex\.[A-Za-z0-9-]+$/.test(launchAgentLabel)) throw new Error("Invalid LaunchAgent label");
   fs.writeFileSync(path.join(controlPath,"instance.json"),JSON.stringify({
     schema_version:1,
-    instance_id:instanceId
+    instance_id:instanceId,
+    trusted_github_username:trustedGithubUsername,
+    launch_agent_label:launchAgentLabel||null
   },null,2)+"\n");
 }
 
@@ -273,15 +277,15 @@ export function upgradeControlEnvironment({state,sourceRoot=process.cwd(),home=o
   }
   removeLegacyDefaultReviewRoutes(path.join(state.control_clone_path,"projects.json"));
 
-  const workflowTemplate=fs.readFileSync(path.join(sourceRoot,"templates","control-repo","orchestrator.yml.template"),"utf8");
+  const workflowTemplate=fs.readFileSync(path.join(sourceRoot,"templates","control-repo",process.platform==="darwin"?"orchestrator.macos.yml.template":"orchestrator.yml.template"),"utf8");
   fs.mkdirSync(path.join(state.control_clone_path,".github","workflows"),{recursive:true});
   fs.writeFileSync(
     path.join(state.control_clone_path,".github","workflows","orchestrator.yml"),
-    renderWorkflow(workflowTemplate,{runnerLabel:state.runner_label})
+    renderWorkflow(workflowTemplate,{runnerLabel:state.runner_label,platform:process.platform,trustedGithubUsername:state.github_login})
   );
 
   const instanceId=installationShortId(state.installation_id)||path.basename(state.runner_path);
-  writeInstanceMetadata(state.control_clone_path,{instanceId});
+  writeInstanceMetadata(state.control_clone_path,{instanceId,trustedGithubUsername:state.github_login,launchAgentLabel:state.launch_agent_label});
 
   const configRoot=path.join(home,".chatgpt-codex-orchestrator");
   const instanceRoot=path.join(configRoot,"instances",instanceId);
@@ -394,16 +398,16 @@ export function prepareControlEnvironment({
   const controlRepository=login+"/chatgpt-codex-orchestrator-control-"+short;
   ensureOwnedPrivateRepo({fullName:controlRepository,installationId,purpose:"control"});
   ensureClone(controlRepository,paths.control);
-  writeInstanceMetadata(paths.control,{instanceId:short});
+  writeInstanceMetadata(paths.control,{instanceId:short,trustedGithubUsername:login,launchAgentLabel:process.platform==="darwin"?`com.chatgpt.codex.${short.toLowerCase()}`:null});
 
   const scriptsSource=path.join(sourceRoot,"runtime","scripts");
-  const workflowTemplate=fs.readFileSync(path.join(sourceRoot,"templates","control-repo","orchestrator.yml.template"),"utf8");
+  const workflowTemplate=fs.readFileSync(path.join(sourceRoot,"templates","control-repo",process.platform==="darwin"?"orchestrator.macos.yml.template":"orchestrator.yml.template"),"utf8");
 
   copyDirectory(scriptsSource,path.join(paths.control,"scripts"));
   fs.mkdirSync(path.join(paths.control,".github","workflows"),{recursive:true});
   fs.writeFileSync(
     path.join(paths.control,".github","workflows","orchestrator.yml"),
-    renderWorkflow(workflowTemplate,{runnerLabel:paths.runnerLabel})
+    renderWorkflow(workflowTemplate,{runnerLabel:paths.runnerLabel,platform:process.platform,trustedGithubUsername:login})
   );
 
   const targetEntry=projectEntry({
@@ -477,6 +481,9 @@ export function prepareControlEnvironment({
     sandbox_validation_profile:sandboxValidationProfile,
     runner_path:paths.runner,
     runner_label:paths.runnerLabel,
+    launch_agent_label:process.platform==="darwin"?`com.chatgpt.codex.${short.toLowerCase()}`:null,
+    runner_owner:installationId,
+    sandbox_only:true,
     instance_id:short,
     instance_root:instanceRoot,
     config_path:configPath,
