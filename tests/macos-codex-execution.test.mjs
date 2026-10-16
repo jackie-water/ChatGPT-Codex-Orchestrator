@@ -73,16 +73,22 @@ test("timeout terminates the private process group before returning", { timeout:
   const f = fixture(); const old = process.env.HOME; process.env.HOME = f.home;
   const marker = path.join(f.repo, "late-descendant-mutation");
   fs.writeFileSync(f.codex, `#!/bin/sh
-(trap '' TERM; sleep 1; printf 'mutated\\n' > '${marker}') &
+(trap '' TERM; sleep 3; printf 'mutated\\n' > '${marker}') &
 trap 'exit 143' TERM
 sleep 10
 `); fs.chmodSync(f.codex, 0o700);
   try {
-    const planned = planMacosCodexRun({ event: f.event(), controlRoot: f.control, controlRepository: "control/private", trustedGithubUsername: ["trusted"] });
+    const routesFile = path.join(f.home, ".chatgpt-codex-orchestrator/instances/exec-test/chat-routes.json");
+    fs.writeFileSync(routesFile, JSON.stringify({ routes: [{ project: "demo", route: "chat-212", status: "active", chat_url: "https://chatgpt.com/c/chat-212" }] }));
+    const event = f.event(); const body = JSON.parse(event.issue.body); body.review_route = "chat-212"; event.issue.body = JSON.stringify(body);
+    const planned = planMacosCodexRun({ event, controlRoot: f.control, controlRepository: "control/private", trustedGithubUsername: ["trusted"] });
     const result = await executeMacosCodexRun({ planned, repoPath: f.repo, codexExecutable: f.codex, controlRoot: f.control, trustedGithubUsername: ["trusted"], timeoutMs: 50 });
-    assert.equal(result.state, "TERMINAL_FAILURE"); assert.equal(result.failure.stage, "timeout");
-    await new Promise(resolve => setTimeout(resolve, 1200));
+    assert.ok(["TERMINAL_FAILURE", "UNKNOWN"].includes(result.state)); assert.notEqual(result.state, "EXECUTED_UNVALIDATED");
+    assert.equal(result.failure.source_commit, null); assert.equal(result.failure.callback.chat_url, "https://chatgpt.com/c/chat-212"); assert.equal(result.failure.callback.delivery_state, "PENDING");
     assert.equal(fs.existsSync(marker), false);
+    await new Promise(resolve => setTimeout(resolve, 3500));
+    assert.equal(fs.existsSync(marker), false);
+    await assert.rejects(() => executeMacosCodexRun({ planned, repoPath: f.repo, codexExecutable: f.codex, controlRoot: f.control, trustedGithubUsername: ["trusted"], timeoutMs: 50 }), /claimed|uncertain|Duplicate/);
   } finally { process.env.HOME = old; fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
