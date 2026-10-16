@@ -28,6 +28,16 @@ A different Chat must register separately. Never reuse another conversation's ro
 
 The one-time registration issue contains the Chat URL. Subsequent coding/review/merge issues contain the route name only.
 
+### Mac registration when the historic Windows Control runner is offline
+
+If the `[CHAT-REGISTER]` issue remains queued because the historic Windows self-hosted Control runner is offline, use the supported native Mac intake with the exact private Control repository and exact Issue number or URL:
+
+`node runtime/scripts/register-chat-mac.mjs --control-repository OWNER/chatgpt-codex-orchestrator-control-INSTANCE_ID --trusted-github-username USER --issue-number N --deliver`
+
+The intake uses authenticated `gh` only to verify that exact Issue, its trusted author, the private Control `instance.json`/`projects.json`, and any queued registration Action. It cancels and verifies cancellation of only that queued registration run before creating the local route/outbox. It never starts another runner or Codex job. Do not use it for an online, running, ambiguous, or unrelated Action; resolve that state first.
+
+If the Mac machine or browser cannot deliver the callback, tell the user that human action is required: leave the durable outbox pending and report the exact `PENDING`/`DRAFT_INSERTED` status. Do not overwrite the draft, click again, use another Chat route, or claim `DELIVERED`; reconcile only after a user-role receipt is visible.
+
 There is **no default reviewer Chat and no fallback Chat**. If the current Chat does not have a valid registered route, stop and register it first.
 
 If work is handed off to another Chat, register the destination Chat first. Handoff does not rerun Codex, increment the implementation iteration, change a reviewed SHA, or authorize merge.

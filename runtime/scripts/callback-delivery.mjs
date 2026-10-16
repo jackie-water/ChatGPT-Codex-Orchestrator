@@ -85,12 +85,25 @@ export async function deliverCallback({read, hasReceipt, send, update, beforeSen
   if (stored.delivery_state !== "PENDING" || !allowSend) return {action:"reconcile", state:stored.delivery_state};
   await beforeSend();
   update(nextDeliveryState("PENDING", "DRAFT_INSERTED"));
-  update(nextDeliveryState("DRAFT_INSERTED", "SUBMISSION_ATTEMPTED"));
+  let attemptJournaled = false;
+  const beforeClick = () => {
+    if (!attemptJournaled) {
+      update(nextDeliveryState("DRAFT_INSERTED", "SUBMISSION_ATTEMPTED"));
+      attemptJournaled = true;
+    }
+  };
   try {
-    const result = await send();
+    // A real sender invokes beforeClick immediately before the irreversible
+    // browser click. Test/legacy senders that do not accept the hook are kept
+    // compatible by journaling after their successful return.
+    const result = await send({beforeClick});
+    if (!attemptJournaled) beforeClick();
     return {action:"sent", result};
   } catch (error) {
-    if (error.code === "PRE_SEND_NOT_READY") update("PENDING");
+    // This error is emitted only while no Send control was exposed and the
+    // gate was never opened. The unchanged draft can safely be retried.
+    if (error.code === "PRE_SEND_NOT_READY" && !attemptJournaled) update("PENDING");
+    // Once the gate opened, any click/error is unknown and must reconcile only.
     throw error;
   }
 }

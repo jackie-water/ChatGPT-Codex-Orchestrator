@@ -135,6 +135,16 @@ test("production delivery helper retries without blind resend and counts only ir
   for (const prior of ["DRAFT_INSERTED","SUBMISSION_ATTEMPTED","DELIVERED"]) { state=prior; let called=0; assert.equal((await deliverCallback({read,hasReceipt:async()=>false,update,send:async()=>called++})).action,"reconcile"); assert.equal(called,0); state=prior; assert.equal((await deliverCallback({read,hasReceipt:async()=>true,update,send:async()=>called++})).state,"DELIVERED"); assert.equal(called,0); }
 });
 
+test("two-phase sender journals immediately before click and preserves ambiguity", async () => {
+  let state="PENDING", order=[];
+  const update=next=>{state=next; order.push(next);};
+  const result=await deliverCallback({read:()=>({delivery_state:state}),hasReceipt:async()=>false,update,beforeSend:async()=>order.push("draft"),send:async({beforeClick})=>{order.push("ready"); await beforeClick(); order.push("click"); return "sent";}});
+  assert.equal(result.action,"sent"); assert.deepEqual(order,["draft","DRAFT_INSERTED","ready","SUBMISSION_ATTEMPTED","click"]);
+  state="PENDING"; order=[];
+  await assert.rejects(()=>deliverCallback({read:()=>({delivery_state:state}),hasReceipt:async()=>false,update,beforeSend:async()=>{},send:async({beforeClick})=>{await beforeClick(); const error=new Error("browser transport lost"); error.code="BROWSER_TRANSPORT_LOST"; throw error;}}),/browser transport lost/);
+  assert.equal(state,"SUBMISSION_ATTEMPTED");
+});
+
 test("deliverCallback blocks send on production state-store faults", async () => {
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),"callback-delivery-store-")); const file=path.join(dir,"state.json");
   const record={routing_version:"explicit-route-v1",delivery_state:"PENDING",callback_id:"x",chat_url:"https://chatgpt.com/c/chat-27",message:"payload"};

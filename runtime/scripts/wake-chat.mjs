@@ -304,7 +304,7 @@ async function confirmSubmission(send, callbackId, text, timeoutMs = 15000) {
   }));
 }
 
-async function sendMessage(send) {
+async function sendMessage(send, {beforeClick = async () => {}} = {}) {
   // Wait for ChatGPT to become idle and expose a real Send button.
   // Never submit a form or synthesize Enter while a Stop/generating control is active.
   for (let i = 0; i < 120; i++) {
@@ -346,7 +346,6 @@ async function sendMessage(send) {
 
       if (busy) return {ok:false, reason:'chat-busy-generating'};
       if (sendButton) {
-        sendButton.el.click();
         return {
           ok:true,
           method:'button-click',
@@ -356,7 +355,6 @@ async function sendMessage(send) {
 
       const submitButton = buttons.find(b => !b.disabled && b.type === 'submit' && !/(stop|cancel)/.test(label(b)));
       if (submitButton) {
-        submitButton.el.click();
         return {
           ok:true,
           method:'submit-button-click',
@@ -372,8 +370,33 @@ async function sendMessage(send) {
     })()`);
 
     if (clicked?.ok) {
-      console.log("CHAT_SEND_METHOD:", JSON.stringify(clicked));
-      return clicked;
+      await beforeClick();
+      const submitted = await evaluate(send, `(() => {
+        if ((location.origin + location.pathname) !== ${JSON.stringify(normalizeConversationUrl(expected))}) return {ok:false, reason:'destination-changed'};
+        const composer = document.querySelector('[data-orchestrator-composer="true"]');
+        if (!composer) return {ok:false, reason:'composer-missing'};
+        const actual = composer instanceof HTMLInputElement || composer instanceof HTMLTextAreaElement ? composer.value : (composer.innerText ?? composer.textContent ?? '');
+        if (actual !== ${JSON.stringify(message)}) return {ok:false, reason:'draft-changed'};
+        const roots = [];
+        let node = composer;
+        for (let depth = 0; depth < 8 && node; depth++, node = node.parentElement) roots.push(node);
+        const buttons = roots.flatMap(root => [...root.querySelectorAll('button')]).filter((button, index, all) => all.indexOf(button) === index);
+        const label = b => [b.getAttribute('aria-label') || '',b.getAttribute('data-testid') || '',b.getAttribute('title') || '',(b.innerText || b.textContent || '').trim()].join(' ').toLowerCase();
+        const usable = b => { const r=b.getBoundingClientRect(), s=getComputedStyle(b); return !b.disabled && r.width >= 8 && r.height >= 8 && s.display !== 'none' && s.visibility !== 'hidden'; };
+        const busy = buttons.some(b => usable(b) && /(^|\\s)(stop|cancel)(\\s|$)|stop generating|cancel generation/.test(label(b)));
+        if (busy) return {ok:false, reason:'chat-busy-generating'};
+        const button = buttons.find(b => usable(b) && /send/.test(label(b))) || buttons.find(b => usable(b) && b.type === 'submit' && !/(stop|cancel)/.test(label(b)));
+        if (!button) return {ok:false, reason:'send-control-changed'};
+        button.click();
+        return {ok:true, method:'button-click', button:{aria:button.getAttribute('aria-label') || '',testid:button.getAttribute('data-testid') || '',title:button.getAttribute('title') || '',type:button.getAttribute('type') || '',text:(button.innerText || button.textContent || '').trim()}};
+      })()`);
+      if (!submitted?.ok) {
+        const error = new Error("Send control changed after the durable attempt journal; callback is reconcile-only");
+        error.code = "SUBMISSION_ATTEMPTED";
+        throw error;
+      }
+      console.log("CHAT_SEND_METHOD:", JSON.stringify(submitted));
+      return submitted;
     }
 
     if (i === 0 || i % 20 === 0) console.log("CHAT_SEND_WAIT:", JSON.stringify(clicked));
@@ -475,7 +498,7 @@ async function main() {
         const verifyDestination = await evaluate(send, "location.href");
         assertSafeMutation({destination:normalizeConversationUrl(verifyDestination), expectedDestination:normalizeConversationUrl(expected), draft:message, message});
       },
-      send: () => sendMessage(send),
+      send: ({beforeClick} = {}) => sendMessage(send, {beforeClick}),
       allowSend: !reconcileOnly
     });
     if (sendResult.action !== "sent") {
