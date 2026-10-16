@@ -13,7 +13,7 @@ import { prepareControlEnvironment, activateTargetProject, upgradeControlEnviron
 import { renderProjectInstructions } from "./lib/project-instructions.mjs";
 import { ensureInstallerChatRegistration } from "./lib/chat-registration.mjs";
 import { pendingCallbackCount, doctorHealth, repairHealth } from "./lib/runtime-health.mjs";
-import { macosPrerequisites, migrationPreflight, macosRuntimeAction } from "./lib/macos-platform.mjs";
+import { macosPrerequisites, migrationPreflight, macosRuntimeAction, prepareMigrationIntent } from "./lib/macos-platform.mjs";
 import {
   sandboxSmokeStatus,
   startSandboxSmoke,
@@ -273,7 +273,15 @@ function runSetup() {
     if(!state.reviewer_chat_url) return emit(action(state,"reviewer_chat_url","setup.chat.ask",{mutations_performed:false}));
     if(!/^https:\/\/chatgpt\.com\//i.test(state.reviewer_chat_url)) return emit({status:"ERROR",error_id:"SETUP-006",recoverable:true,preferred_language:lang,message:"Reviewer Chat URL is invalid; no installation mutation was performed.",mutations_performed:false},1);
     state.installation_id ||= crypto.randomUUID();
-    state.macos_native_setup="PREPARING";
+    try {
+      const intent=prepareMigrationIntent({state,sourceRoot:process.cwd(),home:os.homedir()});
+      state.migration_intent_path=intent.path;
+      state.migration_intent_phase=intent.phase;
+      state.macos_native_setup="PREPARING";
+      saveState(state);
+    } catch(error) {
+      return emit({status:"ERROR",error_id:"MACOS-MIGRATION-INTENT",recoverable:true,preferred_language:lang,message:"Durable macOS migration intent could not be prepared; no Control/Sandbox mutation was performed.",details:String(error.message||error),mutations_performed:false},1);
+    }
     if(!state.control_environment_ready){
       try { const control=prepareControlEnvironment({installationId:state.installation_id,targetRepository:state.target_repository,reviewerChatUrl:state.reviewer_chat_url,sourceRoot:process.cwd(),home:os.homedir()}); Object.assign(state,control,{control_environment_ready:true,routing_architecture:"explicit-route-v1",target_environment_ready:false,macos_rollback:{available:true,automatic:false,created_at:new Date().toISOString()}}); saveState(state); }
       catch(error){ state.last_error={error_id:"SETUP-011",message:String(error.message||error),at:new Date().toISOString()}; saveState(state); return emit({status:"ERROR",error_id:"SETUP-011",recoverable:true,preferred_language:lang,message:"Native macOS Control/Sandbox preparation failed; no runner or service was started.",details:String(error.message||error)},1); }

@@ -6,6 +6,14 @@ export function safeKey(value){
   return key;
 }
 
+export function canonicalInstallationId(value){
+  return String(value||"").replace(/[^A-Za-z0-9]/g,"").slice(0,8).toLowerCase()||"default";
+}
+
+function historicalInstallationId(value){
+  return String(value||"").replace(/[^A-Za-z0-9]/g,"").slice(0,8)||"default";
+}
+
 export function projectEntry({projectKey,repository,defaultBranch="main",validationProfile,enabled=true}){
   const allowed=[...new Set(["git",...(validationProfile?.allowed_executables||[])])];
   return {
@@ -85,7 +93,7 @@ export function renderWorkflow(template,{runnerLabel,platform=process.platform,t
 }
 
 export function defaultLocalPaths({home,installationId,projectKey}){
-  const short=String(installationId).replace(/[^A-Za-z0-9]/g,"").slice(0,8)||"default";
+  const short=historicalInstallationId(installationId);
   return {
     control:path.join(home,"ChatGPTCodexOrchestrator","control-"+short),
     project:path.join(home,"ChatGPTCodexProjects",projectKey),

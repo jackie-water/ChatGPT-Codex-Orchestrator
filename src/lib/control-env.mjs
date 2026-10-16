@@ -9,7 +9,8 @@ import {
   renderProjectsRegistry,
   renderConfigPs1,
   renderWorkflow,
-  safeKey
+  safeKey,
+  canonicalInstallationId
 } from "./control-render.mjs";
 
 function run(command,args,{cwd,allowFailure=false}={}){
@@ -208,7 +209,7 @@ function stopRetiredOriginRouter(controlPath){
 }
 
 function installationShortId(value){
-  return String(value||"").replace(/[^A-Za-z0-9]/g,"").slice(0,8).toLowerCase()||"default";
+  return canonicalInstallationId(value);
 }
 
 function browserPortForInstallation(shortId){
