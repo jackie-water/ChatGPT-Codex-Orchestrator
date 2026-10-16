@@ -205,3 +205,151 @@ test("rejects forged authorization snapshots without file side effects", () => {
   try { assert.throws(() => prepareFailureForAuthorizedSnapshot({ authorization: { instance_id: "exec-test", project: "demo", repository: "owner/repo", issue: 200, iteration: 1, author: "trusted", chat_url: "https://chatgpt.com/c/chat-165", configuration: {} }, stage: "codex", code: "CODEX_NONZERO" }), /genuine authorization snapshot/); assert.deepEqual(fs.readdirSync(f.home), before); }
   finally { process.env.HOME = old; }
 });
+
+test("rejects executables beneath writable parents while accepting private parents and trusted temp boundaries", async () => {
+  for (const mode of [0o777, 0o775]) {
+    const f = fixture(); const old = process.env.HOME; process.env.HOME = f.home;
+    const parent = path.join(f.root, `writable-${mode.toString(8)}`); const executable = path.join(parent, "codex");
+    fs.mkdirSync(parent); fs.chmodSync(parent, mode); fs.copyFileSync(f.codex, executable); fs.chmodSync(executable, 0o700);
+    try {
+      const planned = planMacosCodexRun({ event: f.event(), controlRoot: f.control, controlRepository: "control/private", trustedGithubUsername: ["trusted"] });
+      await assert.rejects(() => executeMacosCodexRun({ planned, repoPath: f.repo, codexExecutable: executable, controlRoot: f.control, trustedGithubUsername: ["trusted"], timeoutMs: 5000 }), /trusted/);
+      assert.equal(fs.existsSync(path.join(f.repo, "argv")), false);
+      assert.equal(fs.existsSync(path.join(f.home, ".chatgpt-codex-orchestrator/instances/exec-test/macos-execution-ledger/demo-200-1.json")), false);
+    } finally { process.env.HOME = old; }
+  }
+  const f = fixture(); const old = process.env.HOME; process.env.HOME = f.home;
+  const privateParent = path.join(f.root, "private-bin"); const privateExecutable = path.join(privateParent, "codex");
+  fs.mkdirSync(privateParent, 0o700); fs.copyFileSync(f.codex, privateExecutable); fs.chmodSync(privateExecutable, 0o700);
+  try {
+    const planned = planMacosCodexRun({ event: f.event(), controlRoot: f.control, controlRepository: "control/private", trustedGithubUsername: ["trusted"] });
+    const result = await executeMacosCodexRun({ planned, repoPath: f.repo, codexExecutable: privateExecutable, controlRoot: f.control, trustedGithubUsername: ["trusted"], timeoutMs: 5000 });
+    assert.equal(result.execution_state, "EXECUTED_UNVALIDATED");
+    assert.equal(fs.readFileSync(path.join(f.repo, "argv"), "utf8"), "exec--full-auto");
+  } finally { process.env.HOME = old; }
+});
+
+test("preexisting unsafe log paths fail before claim and persist one recoverable P1 failure", async () => {
+  for (const kind of ["symlink", "file"]) {
+    const f = fixture(); const old = process.env.HOME; process.env.HOME = f.home;
+    const state = path.join(f.home, ".chatgpt-codex-orchestrator/instances/exec-test");
+    const logs = path.join(state, "macos-execution-logs"); const outside = path.join(f.root, "outside");
+    fs.mkdirSync(outside); const sentinel = path.join(outside, "sentinel"); fs.writeFileSync(sentinel, "untouched\n");
+    if (kind === "symlink") fs.symlinkSync(outside, logs); else fs.writeFileSync(logs, "not a directory\n");
+    try {
+      const planned = planMacosCodexRun({ event: f.event(), controlRoot: f.control, controlRepository: "control/private", trustedGithubUsername: ["trusted"] });
+      await assert.rejects(() => executeMacosCodexRun({ planned, repoPath: f.repo, codexExecutable: f.codex, controlRoot: f.control, trustedGithubUsername: ["trusted"], timeoutMs: 5000 }), /Unsafe|directory/);
+      const outbox = path.join(state, "failure-outbox"); const files = fs.readdirSync(outbox).filter(name => name.endsWith(".json") && !name.endsWith(".journal.json"));
+      assert.deepEqual(files, ["failure-demo-200-1.json"]); const first = JSON.parse(fs.readFileSync(path.join(outbox, files[0]), "utf8"));
+      assert.equal(first.project, "demo"); assert.equal(first.issue, 200); assert.equal(first.iteration, 1); assert.equal(first.source_commit, null); assert.equal(first.callback.chat_url, "https://chatgpt.com/c/chat-165"); assert.equal(first.callback.delivery_state, "PENDING");
+      assert.equal(fs.existsSync(path.join(state, "macos-execution-ledger/demo-200-1.json")), false); assert.equal(fs.existsSync(path.join(f.repo, "argv")), false); assert.equal(fs.readFileSync(sentinel, "utf8"), "untouched\n");
+      await assert.rejects(() => executeMacosCodexRun({ planned, repoPath: f.repo, codexExecutable: f.codex, controlRoot: f.control, trustedGithubUsername: ["trusted"], timeoutMs: 5000 }), /Unsafe|directory/);
+      assert.deepEqual(fs.readdirSync(outbox).filter(name => name.endsWith(".json") && !name.endsWith(".journal.json")), files); assert.equal(fs.existsSync(path.join(f.repo, "argv")), false);
+    } finally { process.env.HOME = old; }
+  }
+});
+
+test("log rename failure settles as UNKNOWN with one original-Chat P1 callback and no rerun", { timeout: 15000 }, async () => {
+  for (const exitCode of [0, 7]) {
+    const f = fixture(); const old = process.env.HOME; const renameSync = fs.renameSync;
+    const state = path.join(f.home, ".chatgpt-codex-orchestrator/instances/exec-test");
+    const logFile = path.join(state, "macos-execution-logs/demo-200-1.json");
+    const ledgerFile = path.join(state, "macos-execution-ledger/demo-200-1.json");
+    const outbox = path.join(state, "failure-outbox"); const callbackFile = path.join(outbox, "failure-demo-200-1.json");
+    let deadline; let logFailures = 0;
+    try {
+      process.env.HOME = f.home;
+      // Keep the clone clean so the claim, rather than a dirty-clone check, must prevent a rerun.
+      fs.writeFileSync(f.codex, `#!/bin/sh\nprintf 'launch\\n' >> "$0.launches"\ncat >/dev/null\nexit ${exitCode}\n`);
+      const planned = planMacosCodexRun({ event: f.event(), controlRoot: f.control, controlRepository: "control/private", trustedGithubUsername: ["trusted"] });
+      const routesFile = path.join(state, "chat-routes.json"); const routes = JSON.parse(fs.readFileSync(routesFile, "utf8"));
+      routes.routes.push({ project: "demo", route: "chat-212", status: "active", chat_url: "https://chatgpt.com/c/chat-212" });
+      fs.writeFileSync(routesFile, JSON.stringify(routes)); planned.plan.review_route = "chat-212";
+      fs.renameSync = (from, to) => {
+        if (to === logFile) { logFailures++; throw Object.assign(new Error("ENOSPC secret=log_DIAGNOSTIC_123456"), { code: "ENOSPC" }); }
+        return renameSync(from, to);
+      };
+      const result = await Promise.race([
+        executeMacosCodexRun({ planned, repoPath: f.repo, codexExecutable: f.codex, controlRoot: f.control, trustedGithubUsername: ["trusted"], timeoutMs: 5000 }),
+        new Promise((_, reject) => { deadline = setTimeout(() => reject(new Error("Log persistence failure did not settle")), 3000); })
+      ]);
+      clearTimeout(deadline);
+      assert.equal(logFailures, 1); assert.equal(result.state, "UNKNOWN");
+      const ledgerText = fs.readFileSync(ledgerFile, "utf8"); const ledger = JSON.parse(ledgerText);
+      assert.equal(ledger.execution_state, "UNKNOWN"); assert.equal(ledger.callback_id, "failure-demo-200-1");
+      assert.equal(ledger.project, "demo"); assert.equal(ledger.issue, 200); assert.equal(ledger.iteration, 1);
+      assert.deepEqual(fs.readdirSync(outbox), ["failure-demo-200-1.json"]);
+      const callbackText = fs.readFileSync(callbackFile, "utf8"); const persisted = JSON.parse(callbackText);
+      assert.deepEqual(result.failure, persisted);
+      assert.equal(persisted.stage, "unknown"); assert.equal(persisted.code, "CODEX_LOG_PERSIST_FAILED");
+      assert.equal(persisted.project, "demo"); assert.equal(persisted.issue, 200); assert.equal(persisted.iteration, 1);
+      assert.equal(persisted.source_commit, null); assert.equal(persisted.source_commit_available, false); assert.equal(persisted.exit_code, null);
+      assert.equal(persisted.callback_id, "failure-demo-200-1"); assert.equal(persisted.callback.callback_id, persisted.callback_id);
+      assert.equal(persisted.callback.chat_url, "https://chatgpt.com/c/chat-165"); assert.equal(persisted.callback.delivery_state, "PENDING"); assert.equal(persisted.delivery_state, "PENDING");
+      assert.doesNotMatch(callbackText + ledgerText, /ENOSPC|log_DIAGNOSTIC_123456|chat-212/);
+      assert.equal(fs.existsSync(logFile), false); assert.equal(fs.existsSync(path.join(f.repo, "argv")), false);
+      assert.equal(fs.readFileSync(`${f.codex}.launches`, "utf8"), "launch\n");
+      fs.renameSync = renameSync;
+      await assert.rejects(() => executeMacosCodexRun({ planned, repoPath: f.repo, codexExecutable: f.codex, controlRoot: f.control, trustedGithubUsername: ["trusted"], timeoutMs: 5000 }), /claimed|uncertain/);
+      assert.equal(fs.readFileSync(`${f.codex}.launches`, "utf8"), "launch\n");
+      assert.equal(fs.readFileSync(callbackFile, "utf8"), callbackText); assert.equal(fs.readFileSync(ledgerFile, "utf8"), ledgerText);
+      assert.deepEqual(fs.readdirSync(outbox), ["failure-demo-200-1.json"]);
+    } finally {
+      clearTimeout(deadline); fs.renameSync = renameSync;
+      if (old === undefined) delete process.env.HOME; else process.env.HOME = old;
+      fs.rmSync(f.root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("log failure reconciliation rejects and prevents rerun when persistence is unavailable", { timeout: 20000 }, async () => {
+  for (const unavailable of ["outbox", "ledger", "both"]) {
+    const f = fixture(); const old = process.env.HOME; const renameSync = fs.renameSync;
+    const state = path.join(f.home, ".chatgpt-codex-orchestrator/instances/exec-test");
+    const logFile = path.join(state, "macos-execution-logs/demo-200-1.json");
+    const ledgerFile = path.join(state, "macos-execution-ledger/demo-200-1.json");
+    const outbox = path.join(state, "failure-outbox"); const callbackFile = path.join(outbox, "failure-demo-200-1.json");
+    const journalFile = path.join(outbox, "failure-demo-200-1.journal.json");
+    const outboxUnavailable = unavailable !== "ledger"; const ledgerUnavailable = unavailable !== "outbox";
+    const attempts = new Set(); let deadline;
+    try {
+      process.env.HOME = f.home;
+      fs.writeFileSync(f.codex, "#!/bin/sh\nprintf 'launch\\n' >> \"$0.launches\"\ncat >/dev/null\nexit 0\n");
+      const planned = planMacosCodexRun({ event: f.event(), controlRoot: f.control, controlRepository: "control/private", trustedGithubUsername: ["trusted"] });
+      fs.renameSync = (from, to) => {
+        attempts.add(to);
+        if (to === logFile || (outboxUnavailable && to === callbackFile) || (ledgerUnavailable && to === ledgerFile)) throw Object.assign(new Error("ENOSPC secret=recovery_DIAGNOSTIC_123456"), { code: "ENOSPC" });
+        return renameSync(from, to);
+      };
+      await assert.rejects(() => Promise.race([
+        executeMacosCodexRun({ planned, repoPath: f.repo, codexExecutable: f.codex, controlRoot: f.control, trustedGithubUsername: ["trusted"], timeoutMs: 5000 }),
+        new Promise((_, reject) => { deadline = setTimeout(() => reject(new Error("Reconciliation did not settle")), 3000); })
+      ]), error => {
+        assert.equal(error.code, "CODEX_LOG_PERSIST_FAILED"); assert.doesNotMatch(error.message, /ENOSPC|recovery_DIAGNOSTIC_123456/); return true;
+      });
+      clearTimeout(deadline);
+      assert.equal(attempts.has(logFile), true); assert.equal(attempts.has(callbackFile), true); assert.equal(attempts.has(ledgerFile), true);
+      // If storage refuses the UNKNOWN update, the original claim must still block execution.
+      const ledgerText = fs.readFileSync(ledgerFile, "utf8"); const ledger = JSON.parse(ledgerText);
+      assert.equal(ledger.execution_state, ledgerUnavailable ? "CLAIMED" : "UNKNOWN");
+      assert.equal(ledger.project, "demo"); assert.equal(ledger.issue, 200); assert.equal(ledger.iteration, 1);
+      const incidentFile = outboxUnavailable ? journalFile : callbackFile;
+      const incidentText = fs.readFileSync(incidentFile, "utf8"); const record = JSON.parse(incidentText);
+      const incident = outboxUnavailable ? record.failure : record;
+      assert.equal(incident.stage, "unknown"); assert.equal(incident.code, "CODEX_LOG_PERSIST_FAILED"); assert.equal(incident.source_commit, null);
+      assert.equal(incident.project, "demo"); assert.equal(incident.issue, 200); assert.equal(incident.iteration, 1);
+      assert.equal(incident.callback_id, "failure-demo-200-1"); assert.equal(incident.callback.chat_url, "https://chatgpt.com/c/chat-165"); assert.equal(incident.callback.delivery_state, "PENDING");
+      assert.doesNotMatch(incidentText, /ENOSPC|recovery_DIAGNOSTIC_123456/);
+      assert.deepEqual(fs.readdirSync(outbox).filter(name => name.endsWith(".json")), [path.basename(incidentFile)]);
+      fs.renameSync = renameSync;
+      await assert.rejects(() => executeMacosCodexRun({ planned, repoPath: f.repo, codexExecutable: f.codex, controlRoot: f.control, trustedGithubUsername: ["trusted"], timeoutMs: 5000 }), /claimed|uncertain/);
+      assert.equal(fs.readFileSync(`${f.codex}.launches`, "utf8"), "launch\n");
+      assert.equal(fs.readFileSync(ledgerFile, "utf8"), ledgerText); assert.equal(fs.readFileSync(incidentFile, "utf8"), incidentText);
+      assert.deepEqual(fs.readdirSync(outbox).filter(name => name.endsWith(".json")), [path.basename(incidentFile)]);
+    } finally {
+      clearTimeout(deadline); fs.renameSync = renameSync;
+      if (old === undefined) delete process.env.HOME; else process.env.HOME = old;
+      fs.rmSync(f.root, { recursive: true, force: true });
+    }
+  }
+});
