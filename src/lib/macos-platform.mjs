@@ -114,7 +114,8 @@ export function macosRuntimeAction(action,{state={},commandRunner=cmd}={}) {
   const preflight=migrationPreflight({state,commandRunner});
   if(preflight.status!=="READY") {
     const unknown=preflight.conflicts.some(x=>x.kind==="runner_ownership_unknown");
-    return {status:unknown?"NEEDS_USER_ACTION":"ERROR",action_id:unknown?"resolve_runner_ownership":undefined,error_id:"MACOS-RUNNER-OWNERSHIP",launchctl_state:unknown?"unknown":undefined,mutations_performed:false,preflight,action:"Resolve runner ownership manually; no existing runner was stopped."};
+    if(unknown) return {status:"NEEDS_USER_ACTION",action_id:"resolve_runner_ownership",error_id:"MACOS-RUNNER-OWNERSHIP",launchctl_state:"unknown",mutations_performed:false,preflight,action:"Resolve runner ownership manually; no existing runner was stopped."};
+    return {status:"ERROR",error_id:"MACOS-RUNNER-OWNERSHIP",mutations_performed:false,preflight,action:"Resolve runner ownership manually; no existing runner was stopped."};
   }
   const label=state.launch_agent_label, plist=path.join(HOME(),"Library","LaunchAgents",`${label}.plist`), listed=commandRunner("launchctl",["list"]);
   if(!state.sandbox_only || state.target_environment_ready===true || !state.instance_id || state.runner_owner!==state.installation_id || !/^com\.chatgpt\.codex\.[A-Za-z0-9-]+$/.test(String(label||"")) || !/^[A-Za-z0-9._-]+$/.test(String(state.runner_label||""))) return {status:"ERROR",error_id:"MACOS-SANDBOX-SCOPE",mutations_performed:false,action,details:"Runner and LaunchAgent identities are incomplete or target ownership is present."};
