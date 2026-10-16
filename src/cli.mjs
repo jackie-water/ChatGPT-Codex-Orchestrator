@@ -177,6 +177,10 @@ function answer() {
   const lang = ensureStateLanguage(state);
   const actionId = valueOf("--action");
   const value = valueOf("--value");
+  const controlRepository = valueOf("--control-repository");
+  const sandboxRepository = valueOf("--sandbox-repository");
+  const verificationRoute = valueOf("--verification-route");
+  const currentChatUrl = valueOf("--chat-url") || verificationRoute;
 
   const bool = v => /^(true|yes|y|1|done|completed)$/i.test(String(v || ""));
 
@@ -198,8 +202,28 @@ function answer() {
     }
     state.reviewer_chat_url = value;
   } else if (actionId === "generated_repo_authorization") {
-    if (!bool(value)) return emit({status:"ERROR",error_id:"AUTH-005",recoverable:true,preferred_language:lang,message:t(lang,"answer.generated_repo.invalid")},1);
-    state.generated_repo_authorized = true;
+    if (process.platform !== "darwin") {
+      if (!bool(value)) return emit({status:"ERROR",error_id:"AUTH-005",recoverable:true,preferred_language:lang,message:t(lang,"answer.generated_repo.invalid")},1);
+      state.generated_repo_authorized = true;
+    } else {
+      const exact = x => /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(String(x || ""));
+      const canonicalChat = /^https:\/\/chatgpt\.com\/(?:g\/[A-Za-z0-9_-]+\/)?c\/[A-Za-z0-9-]+\/?$/i;
+      if (value || !exact(controlRepository) || !exact(sandboxRepository) || !canonicalChat.test(String(currentChatUrl || ""))) {
+        return emit({status:"ERROR",error_id:"AUTH-005",recoverable:true,preferred_language:lang,message:"macOS generated-repository authorization requires exact Control and Sandbox repositories plus the canonical current Chat URL; a boolean or route name is not proof."},1);
+      }
+      if (!state.control_environment_ready || controlRepository !== state.control_repository || sandboxRepository !== state.sandbox_repository) {
+        return emit({status:"ERROR",error_id:"AUTH-006",recoverable:true,preferred_language:lang,message:"Exact generated repositories do not match the prepared private Control/Sandbox pair."},1);
+      }
+      if (currentChatUrl !== state.reviewer_chat_url) {
+        return emit({status:"ERROR",error_id:"AUTH-007",recoverable:true,preferred_language:lang,message:"Authorization provenance must match the saved originating Chat URL exactly."},1);
+      }
+      state.github_plugin_authorization_verified = true;
+      state.github_plugin_authorization_control_repository = controlRepository;
+      state.github_plugin_authorization_sandbox_repository = sandboxRepository;
+      state.github_plugin_authorization_chat_url = currentChatUrl;
+      state.github_plugin_authorization_installation_id = state.installation_id;
+      state.generated_repo_authorized = true;
+    }
   } else if (actionId === "codex_trust_sandbox") {
     if (!bool(value)) return emit({status:"ERROR",error_id:"AUTH-002",recoverable:true,preferred_language:lang,message:t(lang,"answer.codex.invalid")},1);
     state.codex_trust_sandbox = true;
@@ -239,7 +263,11 @@ function runSetup() {
     if(!ready) return emit({status:"ERROR",error_id:"MACOS-PREREQUISITE-OR-MIGRATION",recoverable:true,preferred_language:lang,mutations_performed:false,message:"macOS preflight found a prerequisite or migration conflict; no installation mutation was performed.",prerequisites,migration},1);
     if(!state.macos_setup_approved) return emit(action(state,"macos_setup_approval","setup.macos.approval",{mutations_performed:false,details:"Approval is required before native setup can write instance state or a LaunchAgent."}));
     if(!prerequisites.github_auth) return emit(action(state,"github_cli_authorization","setup.github_cli.connect",{helper_command:"node src/cli.mjs github-login --json",mutations_performed:false}));
-    if(!state.github_plugin_authorized || state.github_plugin_authorization_verified!==true) return emit(action(state,"github_plugin_authorization","setup.github_plugin.connect",{mutations_performed:false,verification_requirement:"The ChatGPT GitHub plugin must confirm access to the exact generated Control and Sandbox repositories after bootstrap; local gh auth and boolean answers are not proof."}));
+    // The preliminary connector connection is necessarily collected before
+    // bootstrap.  The exact private repository names do not exist until the
+    // idempotent preparer creates/resumes them, so exact-repository proof is a
+    // post-bootstrap gate below (never inferred from local gh state).
+    if(!state.github_plugin_authorized) return emit(action(state,"github_plugin_authorization","setup.github_plugin.connect",{mutations_performed:false,verification_requirement:"Connect ChatGPT GitHub before bootstrap; exact generated Control and Sandbox repository confirmation is required after bootstrap."}));
     if(!state.target_repository) return emit(action(state,"target_repository","setup.repository.ask",{mutations_performed:false}));
     if(!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(state.target_repository)) return emit({status:"ERROR",error_id:"SETUP-005",recoverable:true,preferred_language:lang,message:"Target repository must be owner/repository; no installation mutation was performed.",mutations_performed:false},1);
     if(!state.reviewer_chat_url) return emit(action(state,"reviewer_chat_url","setup.chat.ask",{mutations_performed:false}));
@@ -250,7 +278,7 @@ function runSetup() {
       try { const control=prepareControlEnvironment({installationId:state.installation_id,targetRepository:state.target_repository,reviewerChatUrl:state.reviewer_chat_url,sourceRoot:process.cwd(),home:os.homedir()}); Object.assign(state,control,{control_environment_ready:true,routing_architecture:"explicit-route-v1",target_environment_ready:false,macos_rollback:{available:true,automatic:false,created_at:new Date().toISOString()}}); saveState(state); }
       catch(error){ state.last_error={error_id:"SETUP-011",message:String(error.message||error),at:new Date().toISOString()}; saveState(state); return emit({status:"ERROR",error_id:"SETUP-011",recoverable:true,preferred_language:lang,message:"Native macOS Control/Sandbox preparation failed; no runner or service was started.",details:String(error.message||error)},1); }
     }
-    if(state.github_plugin_authorization_verified!==true || state.github_plugin_authorization_control_repository!==state.control_repository || state.github_plugin_authorization_sandbox_repository!==state.sandbox_repository) return emit(action(state,"github_plugin_authorization","setup.github_plugin.connect",{repositories:[state.control_repository,state.sandbox_repository],verification_requirement:"Record ChatGPT GitHub plugin confirmation for these exact private repositories; local gh status and boolean confirmation are not proof.",mutations_performed:true}));
+    if(state.github_plugin_authorization_verified!==true || state.github_plugin_authorization_installation_id!==state.installation_id || state.github_plugin_authorization_control_repository!==state.control_repository || state.github_plugin_authorization_sandbox_repository!==state.sandbox_repository || state.github_plugin_authorization_chat_url!==state.reviewer_chat_url) return emit(action(state,"generated_repo_authorization","setup.generated_repo.connect",{repositories:[state.control_repository,state.sandbox_repository],chat_url:state.reviewer_chat_url,verification_requirement:"The controlling Chat must confirm access to these exact generated private repositories and record this exact current Chat URL; local gh status and boolean answers are not proof.",mutations_performed:true}));
     const registration=ensureInstallerChatRegistration(state,{projectKey:state.sandbox_project_key});
     if(registration.status!=="READY"){ state.sandbox_chat_registration_issue=registration.issue?.url||null; saveState(state); return emit({status:"NEEDS_USER_ACTION",action_id:"sandbox_chat_registration",preferred_language:lang,message:"Register the explicit Sandbox callback in the originating Chat before CODEX-RUN.",registration_issue:registration.issue?.url||null,mutations_performed:true}); }
     state.sandbox_review_route=registration.route; state.macos_native_setup="SANDBOX_READY"; state.current_step="sandbox_verification"; saveState(state);

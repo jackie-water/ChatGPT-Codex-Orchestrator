@@ -70,7 +70,7 @@ export function normalizeControlEvent({event, controlRoot, controlRepository, tr
   const chatUrl = canonicalChatUrl(record.chat_url);
   const digest = crypto.createHash("sha256").update(canonical(raw)).digest("hex");
   const normalizedEvent = { repository: { full_name: configured.repository }, issue: { title: raw.issue.title, number: issue, user: { login: author }, body: JSON.stringify({ ...body, project, iteration, review_route: route, target_repo: configured.repository }) } };
-  const normalized = { event: normalizedEvent, context: { control_provenance: { repository: controlRepository, issue_number: issue, author, event_digest_sha256: digest }, authorized_source: { project, repository: configured.repository, review_route: route, iteration } } };
+  const normalized = { event: normalizedEvent, context: { instance_id: instance.instance_id, control_provenance: { repository: controlRepository, issue_number: issue, author, event_digest_sha256: digest }, authorized_source: { project, repository: configured.repository, review_route: route, iteration } } };
   const snapshot = immutableClone({ instance_id: instance.instance_id, project, repository: configured.repository, issue, iteration, author, review_route: route, chat_url: chatUrl, configuration: projects.projects[project] });
   authorizedSnapshots.set(normalized, snapshot);
   authorizedSnapshotObjects.add(snapshot);

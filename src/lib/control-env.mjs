@@ -62,6 +62,25 @@ function ensureClone(repository,target){
   run("gh",["repo","clone",repository,target]);
 }
 
+function inspectExistingClone(target, purpose){
+  if(!fs.existsSync(target)) return;
+  const st=fs.lstatSync(target);
+  if(st.isSymbolicLink() || !st.isDirectory() || (typeof process.getuid === "function" && st.uid !== process.getuid())) throw new Error(`${purpose} clone directory is symlinked, foreign-owned, or not a directory`);
+  const git=path.join(target,".git");
+  if(fs.existsSync(git)) {
+    const gs=fs.lstatSync(git);
+    if(gs.isSymbolicLink() || (typeof process.getuid === "function" && gs.uid !== process.getuid())) throw new Error(`${purpose} clone Git directory is symlinked or foreign-owned`);
+    const status=run("git",["status","--porcelain","--untracked-files=all"],{cwd:target}).stdout;
+    if(status) throw new Error(`${purpose} clone contains dirty or untracked state; refusing to fetch or overwrite it`);
+  } else if(fs.readdirSync(target).length) throw new Error(`${purpose} clone directory is not an empty Git checkout`);
+}
+
+function requireCleanOwnedClone(target, purpose){
+  if(!fs.existsSync(path.join(target,".git"))) return;
+  const status=run("git",["status","--porcelain","--untracked-files=all"],{cwd:target}).stdout;
+  if(status) throw new Error(`${purpose} clone contains dirty or untracked state; refusing to overwrite it`);
+}
+
 function copyDirectory(src,dst){
   fs.mkdirSync(dst,{recursive:true});
   for(const entry of fs.readdirSync(src,{withFileTypes:true})){
@@ -384,19 +403,22 @@ export function prepareControlEnvironment({
   const paths=defaultLocalPaths({home,installationId,projectKey});
   const short=installationShortId(installationId);
 
+  inspectExistingClone(paths.project,"Target");
   ensureClone(targetRepository,paths.project);
   const validationProfile=detectProjectProfile(paths.project);
 
   const sandboxProjectKey="sandbox-"+short;
   const sandboxRepository=login+"/chatgpt-codex-orchestrator-sandbox-"+short;
-  const sandboxClonePath=path.join(home,"ChatGPTCodexOrchestrator","sandbox-"+short);
+  const sandboxClonePath=path.join(home,".chatgpt-codex-orchestrator","instances",short,"automation",sandboxProjectKey);
   ensureOwnedPrivateRepo({fullName:sandboxRepository,installationId,purpose:"sandbox"});
+  inspectExistingClone(sandboxClonePath,"Sandbox");
   ensureClone(sandboxRepository,sandboxClonePath);
   seedSandbox({repoPath:sandboxClonePath,installationId});
   const sandboxValidationProfile=detectProjectProfile(sandboxClonePath);
 
   const controlRepository=login+"/chatgpt-codex-orchestrator-control-"+short;
   ensureOwnedPrivateRepo({fullName:controlRepository,installationId,purpose:"control"});
+  inspectExistingClone(paths.control,"Control");
   ensureClone(controlRepository,paths.control);
   writeInstanceMetadata(paths.control,{instanceId:short,trustedGithubUsername:login,launchAgentLabel:process.platform==="darwin"?`com.chatgpt.codex.${short.toLowerCase()}`:null});
 
