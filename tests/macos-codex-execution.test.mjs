@@ -69,6 +69,156 @@ test("nonzero Codex and timeout persist safe P1 failures", async () => {
   }
 });
 
+test("timeout terminates the private process group before returning", { timeout: 10000 }, async () => {
+  const f = fixture(); const old = process.env.HOME; process.env.HOME = f.home;
+  const marker = path.join(f.repo, "late-descendant-mutation");
+  fs.writeFileSync(f.codex, `#!/bin/sh
+(trap '' TERM; sleep 1; printf 'mutated\\n' > '${marker}') &
+trap 'exit 143' TERM
+sleep 10
+`); fs.chmodSync(f.codex, 0o700);
+  try {
+    const planned = planMacosCodexRun({ event: f.event(), controlRoot: f.control, controlRepository: "control/private", trustedGithubUsername: ["trusted"] });
+    const result = await executeMacosCodexRun({ planned, repoPath: f.repo, codexExecutable: f.codex, controlRoot: f.control, trustedGithubUsername: ["trusted"], timeoutMs: 50 });
+    assert.equal(result.state, "TERMINAL_FAILURE"); assert.equal(result.failure.stage, "timeout");
+    await new Promise(resolve => setTimeout(resolve, 1200));
+    assert.equal(fs.existsSync(marker), false);
+  } finally { process.env.HOME = old; fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+function installPersistentCodexGroup(f) {
+  const groupFile = `${f.codex}.group.json`; const readyFile = `${f.codex}.ready`;
+  const descendant = `import fs from "node:fs";
+process.on("SIGTERM", () => {});
+fs.writeFileSync(${JSON.stringify(readyFile)}, "ready");
+setInterval(() => {}, 1000);`;
+  // The parent exits on TERM and closes its pipes; the descendant keeps the private group alive.
+  fs.writeFileSync(`${f.codex}.mjs`, `import fs from "node:fs";
+import { spawn } from "node:child_process";
+process.on("SIGTERM", () => process.exit(0));
+const child = spawn(process.execPath, ["--input-type=module", "-e", ${JSON.stringify(descendant)}], { stdio: "ignore" });
+fs.writeFileSync(${JSON.stringify(groupFile)}, JSON.stringify({ pid: process.pid, descendant: child.pid }));
+fs.appendFileSync(${JSON.stringify(`${f.codex}.launches`)}, "launch\\n");
+console.error("benign group diagnostic secret=termination_OUTPUT_123456");
+process.stdin.resume();
+setInterval(() => {}, 1000);
+`);
+  fs.writeFileSync(f.codex, `#!/bin/sh\nexec '${process.execPath.replaceAll("'", "'\\''")}' "$0.mjs"\n`);
+  return { groupFile, readyFile };
+}
+
+for (const scenario of [
+  { name: "SIGTERM denied", deny: "SIGTERM" },
+  { name: "SIGKILL denied after parent exit", deny: "SIGKILL" },
+  { name: "group remains after SIGKILL", survives: true },
+  { name: "group probe fails after SIGKILL", probeFails: true },
+  ...["outbox", "ledger", "both"].map(unavailable => ({ name: `${unavailable} storage unavailable`, deny: "SIGTERM", unavailable }))
+]) {
+  test(`unverified timeout termination stays UNKNOWN: ${scenario.name}`, { timeout: 10000, skip: process.platform === "win32" }, async () => {
+    const f = fixture(); const old = process.env.HOME; const originalKill = process.kill; const renameSync = fs.renameSync;
+    const { groupFile, readyFile } = installPersistentCodexGroup(f);
+    const state = path.join(f.home, ".chatgpt-codex-orchestrator/instances/exec-test");
+    const ledgerFile = path.join(state, "macos-execution-ledger/demo-200-1.json");
+    const logFile = path.join(state, "macos-execution-logs/demo-200-1.json");
+    const outbox = path.join(state, "failure-outbox"); const callbackFile = path.join(outbox, "failure-demo-200-1.json");
+    const journalFile = path.join(outbox, "failure-demo-200-1.journal.json");
+    const outboxUnavailable = ["outbox", "both"].includes(scenario.unavailable);
+    const ledgerUnavailable = ["ledger", "both"].includes(scenario.unavailable);
+    const calls = []; const writes = new Set(); let killAttempted = false; let probeFailures = 0; let deadline;
+    const readGroup = () => JSON.parse(fs.readFileSync(groupFile, "utf8"));
+    try {
+      process.env.HOME = f.home;
+      const routesFile = path.join(state, "chat-routes.json");
+      fs.writeFileSync(routesFile, JSON.stringify({ routes: [{ project: "demo", route: "chat-212", status: "active", chat_url: "https://chatgpt.com/c/chat-212" }] }));
+      const event = f.event(); const body = JSON.parse(event.issue.body); body.review_route = "chat-212"; event.issue.body = JSON.stringify(body);
+      const planned = planMacosCodexRun({ event, controlRoot: f.control, controlRepository: "control/private", trustedGithubUsername: ["trusted"] });
+      fs.writeFileSync(routesFile, JSON.stringify({ routes: [{ project: "demo", route: "chat-999", status: "active", chat_url: "https://chatgpt.com/c/chat-999" }] }));
+      planned.plan.review_route = "chat-999";
+      process.kill = (pid, signal) => {
+        calls.push({ pid, signal, ready: fs.existsSync(readyFile) });
+        const group = readGroup();
+        // Never forward a signal to anything except this test's recorded fake group.
+        if (!Number.isInteger(group.pid) || group.pid <= 1 || group.pid === process.pid || pid !== -group.pid) throw Object.assign(new Error("Unexpected process group"), { code: "EPERM" });
+        if (signal === scenario.deny) throw Object.assign(new Error("EPERM secret=termination_DIAGNOSTIC_123456"), { code: "EPERM" });
+        if (signal === "SIGKILL") {
+          killAttempted = true;
+          if (scenario.survives) return true;
+        }
+        if (signal === 0 && killAttempted && scenario.probeFails) {
+          probeFailures++;
+          throw Object.assign(new Error("EIO secret=termination_DIAGNOSTIC_123456"), { code: "EIO" });
+        }
+        return originalKill(pid, signal);
+      };
+      fs.renameSync = (from, to) => {
+        writes.add(to);
+        if ((outboxUnavailable && to === callbackFile) || (ledgerUnavailable && to === ledgerFile)) throw Object.assign(new Error("ENOSPC secret=termination_STORAGE_123456"), { code: "ENOSPC" });
+        return renameSync(from, to);
+      };
+      const started = Date.now();
+      const execution = () => Promise.race([
+        executeMacosCodexRun({ planned, repoPath: f.repo, codexExecutable: f.codex, controlRoot: f.control, trustedGithubUsername: ["trusted"], timeoutMs: 1000 }),
+        new Promise((_, reject) => { deadline = setTimeout(() => reject(new Error("Termination reconciliation did not settle")), 5000); })
+      ]);
+      let result;
+      if (scenario.unavailable) {
+        await assert.rejects(execution, error => {
+          assert.equal(error.code, "CODEX_TERMINATION_UNVERIFIED");
+          assert.equal(error.message, "Codex process group termination could not be verified; run outcome is unknown"); return true;
+        });
+      } else {
+        result = await execution(); assert.equal(result.state, "UNKNOWN");
+      }
+      clearTimeout(deadline); assert.ok(Date.now() - started < 4500, "unverified termination must settle within a bounded interval");
+      const group = readGroup();
+      assert.ok(calls.length > 0); assert.ok(calls.every(call => call.pid === -group.pid && call.ready));
+      assert.ok(calls.some(call => call.signal === "SIGTERM"));
+      assert.equal(calls.some(call => call.signal === "SIGKILL"), scenario.deny !== "SIGTERM");
+      if (scenario.deny !== "SIGTERM") assert.throws(() => originalKill(group.pid, 0), { code: "ESRCH" }, "the direct parent exited before settlement");
+      if (scenario.probeFails) assert.ok(probeFailures > 0);
+      else assert.equal(originalKill(-group.pid, 0), true, "the fake group is still present when UNKNOWN settles");
+      if (scenario.survives) assert.ok(killAttempted && Date.now() - started >= 2250, "the bounded post-KILL verification must expire");
+      const ledgerText = fs.readFileSync(ledgerFile, "utf8"); const ledger = JSON.parse(ledgerText);
+      assert.equal(ledger.execution_state, ledgerUnavailable ? "CLAIMED" : "UNKNOWN");
+      assert.equal(ledger.project, "demo"); assert.equal(ledger.issue, 200); assert.equal(ledger.iteration, 1);
+      if (!scenario.unavailable) assert.equal(ledger.callback_id, "failure-demo-200-1");
+      const incidentFile = outboxUnavailable ? journalFile : callbackFile;
+      const incidentText = fs.readFileSync(incidentFile, "utf8"); const record = JSON.parse(incidentText);
+      const incident = outboxUnavailable ? record.failure : record;
+      assert.equal(incident.execution_state, "UNKNOWN"); assert.equal(incident.stage, "unknown"); assert.equal(incident.code, "CODEX_TERMINATION_UNVERIFIED");
+      assert.equal(incident.project, "demo"); assert.equal(incident.issue, 200); assert.equal(incident.iteration, 1);
+      assert.equal(incident.source_commit, null); assert.equal(incident.source_commit_available, false); assert.equal(incident.exit_code, null);
+      assert.equal(incident.callback_id, "failure-demo-200-1"); assert.equal(incident.callback.callback_id, incident.callback_id);
+      assert.equal(incident.callback.chat_url, "https://chatgpt.com/c/chat-212"); assert.equal(incident.callback.delivery_state, "PENDING"); assert.equal(incident.delivery_state, "PENDING");
+      if (result) assert.deepEqual(result.failure, incident);
+      assert.deepEqual(fs.readdirSync(outbox).filter(name => name.endsWith(".json")), [path.basename(incidentFile)]);
+      const logText = fs.readFileSync(logFile, "utf8"); assert.equal(JSON.parse(logText).error, "CODEX_TERMINATION_UNVERIFIED");
+      assert.match(logText, /benign group diagnostic secret=\[REDACTED\]/);
+      assert.doesNotMatch(incidentText + ledgerText + logText, /EPERM|EIO|ENOSPC|termination_(?:DIAGNOSTIC|STORAGE|OUTPUT)_123456|chat-999/);
+      assert.ok(writes.has(logFile) && writes.has(callbackFile) && writes.has(ledgerFile));
+      const callCount = calls.length;
+      fs.renameSync = renameSync;
+      await assert.rejects(() => executeMacosCodexRun({ planned, repoPath: f.repo, codexExecutable: f.codex, controlRoot: f.control, trustedGithubUsername: ["trusted"], timeoutMs: 1000 }), /claimed|uncertain/);
+      assert.equal(calls.length, callCount);
+      assert.equal(fs.readFileSync(`${f.codex}.launches`, "utf8"), "launch\n");
+      assert.equal(fs.readFileSync(ledgerFile, "utf8"), ledgerText); assert.equal(fs.readFileSync(incidentFile, "utf8"), incidentText);
+      assert.deepEqual(fs.readdirSync(outbox).filter(name => name.endsWith(".json")), [path.basename(incidentFile)]);
+    } finally {
+      clearTimeout(deadline); process.kill = originalKill; fs.renameSync = renameSync;
+      try {
+        if (fs.existsSync(groupFile)) {
+          const group = readGroup();
+          assert.ok(Number.isInteger(group.pid) && group.pid > 1 && group.pid !== process.pid);
+          try { originalKill(-group.pid, "SIGKILL"); } catch (error) { if (error.code !== "ESRCH") throw error; }
+        }
+      } finally {
+        if (old === undefined) delete process.env.HOME; else process.env.HOME = old;
+        fs.rmSync(f.root, { recursive: true, force: true });
+      }
+    }
+  });
+}
+
 test("redacts GitHub credentials and token-shaped diagnostics before every log is persisted", async () => {
   const cases = [
     { name: "success", script: "#!/bin/sh\nprintf '%s\\n' 'Authorization: Bearer bearer_PLACEHOLDER_123456' 'github_pat_PLACEHOLDER_123456' 'gho_PLACEHOLDER_123456' 'ghu_PLACEHOLDER_123456' 'ghs_PLACEHOLDER_123456' 'ghr_PLACEHOLDER_123456' 'api_key=generic_PLACEHOLDER_123456' 'benign success diagnostic context'; cat >/dev/null; exit 0", timeoutMs: 5000 },

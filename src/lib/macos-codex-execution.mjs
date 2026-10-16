@@ -62,6 +62,7 @@ function failure(planned, stage, code, exitCode) {
   const snapshot = getValidatedMacosCodexPlan(planned);
   const authorization = snapshot.authorization;
   const { context, failure: state } = prepareFailureForAuthorizedSnapshot({ authorization, stage, code, exitCode });
+  if (code === "CODEX_TERMINATION_UNVERIFIED") state.execution_state = "UNKNOWN";
   return persistFailure({ context, failure: state });
 }
 function validateClone(repo, plan) {
@@ -81,23 +82,55 @@ function validateClone(repo, plan) {
 }
 function runCodex(executable, repo, prompt, timeoutMs, logFile) {
   return new Promise((resolve, reject) => {
-    let settled = false; let killTimer;
+    let settled = false; let killTimer; let reapTimer; let verificationTimer; let timedOut = false; let groupPid;
+    const groupExists = () => {
+      // Only ESRCH proves absence; a failed probe must not authorize a terminal outcome.
+      if (!Number.isInteger(groupPid) || groupPid === process.pid || groupPid <= 1) return true;
+      try { process.kill(-groupPid, 0); return true; } catch (error) { return error?.code !== "ESRCH"; }
+    };
+    const signalGroup = signal => {
+      if (!Number.isInteger(groupPid) || groupPid === process.pid || groupPid <= 1) return false;
+      if (!groupExists()) return true;
+      try { process.kill(-groupPid, signal); return true; } catch (error) { return error?.code === "ESRCH"; }
+    };
     const finish = result => {
-      if (settled) return; settled = true; clearTimeout(timer); clearTimeout(killTimer);
+      if (settled) return; settled = true; clearTimeout(timer); clearTimeout(killTimer); clearInterval(reapTimer); clearTimeout(verificationTimer);
       try { atomic(logFile, result.log); }
-      catch { reject(Object.assign(new Error("Codex log persistence failed; run outcome is unknown"), { code: "CODEX_LOG_PERSIST_FAILED" })); return; }
+      catch { reject(result.error || Object.assign(new Error("Codex log persistence failed; run outcome is unknown"), { code: "CODEX_LOG_PERSIST_FAILED" })); return; }
+      if (result.error) { reject(result.error); return; }
       resolve(result.value);
     };
-    const child = spawn(executable, ["exec", "--full-auto"], { cwd: repo, shell: false, stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn(executable, ["exec", "--full-auto"], { cwd: repo, shell: false, detached: true, stdio: ["pipe", "pipe", "pipe"] });
+    groupPid = child.pid;
     let output = ""; const append = chunk => { if (output.length < 32768) output += chunk.toString().slice(0, 32768 - output.length); };
     const clean = () => output
       .replace(/\b(?:github_pat_|gh[opusr]_)[A-Za-z0-9_]+/gi, "[REDACTED]")
       .replace(/((?:authorization\s*:\s*)?(?:bearer|token)\s+)[A-Za-z0-9._~+/=-]+/gi, "$1[REDACTED]")
       .replace(/((?:api[_-]?key|secret|token)\s*[:=]\s*)[A-Za-z0-9._~+/=-]{12,}/gi, "$1[REDACTED]");
+    const finishTimeout = signal => {
+      const error = groupExists() ? Object.assign(new Error("Codex process group termination could not be verified; run outcome is unknown"), { code: "CODEX_TERMINATION_UNVERIFIED" }) : undefined;
+      finish({ error, value: { code: null, signal, timedOut: true }, log: { exit_code: null, signal, ...(error ? { error: error.code } : {}), output: clean() } });
+    };
     child.stdout.on("data", append); child.stderr.on("data", append); child.stdin.end(prompt);
-    let timer = setTimeout(() => { child.kill("SIGTERM"); killTimer = setTimeout(() => child.kill("SIGKILL"), 1000); }, timeoutMs);
-    child.on("close", (code, signal) => finish({ value: { code, signal, timedOut: Boolean(killTimer) }, log: { exit_code: code, signal, output: clean() } }));
-    child.on("error", error => finish({ value: { code: null, error }, log: { error: error.code || "spawn-failed", output: clean() } }));
+    let timer = setTimeout(() => {
+      timedOut = true;
+      if (!signalGroup("SIGTERM")) return finishTimeout(null);
+      if (!groupExists()) return finishTimeout("SIGTERM");
+      killTimer = setTimeout(() => {
+        if (!signalGroup("SIGKILL")) return finishTimeout(null);
+        if (!groupExists()) return finishTimeout("SIGKILL");
+        reapTimer = setInterval(() => { if (!groupExists()) finishTimeout("SIGKILL"); }, 25);
+        verificationTimer = setTimeout(() => finishTimeout("SIGKILL"), 250);
+      }, 1000);
+    }, timeoutMs);
+    child.on("close", (code, signal) => {
+      if (timedOut) return;
+      finish({ value: { code, signal, timedOut: false }, log: { exit_code: code, signal, output: clean() } });
+    });
+    child.on("error", error => {
+      if (timedOut) return finishTimeout(null);
+      finish({ value: { code: null, error }, log: { error: error.code || "spawn-failed", output: clean() } });
+    });
   });
 }
 
@@ -131,10 +164,10 @@ export async function executeMacosCodexRun({ planned, repoPath, codexExecutable,
     if (result.code !== 0) { const saved = failure(planned, result.timedOut ? "timeout" : "codex", result.timedOut ? "CODEX_TIMEOUT" : (result.error ? "CODEX_SPAWN_FAILED" : "CODEX_NONZERO"), result.code ?? undefined); atomic(ledgerFile, { ...ledger, execution_state: "TERMINAL_FAILURE", callback_id: saved.state.callback_id }); return { state: "TERMINAL_FAILURE", failure: saved.state }; }
     const done = { ...ledger, execution_state: "EXECUTED_UNVALIDATED", observed_branch: observed.branch, observed_repository: plan.repository, observed_head: observed.head, exit_code: 0, validation_state: "NOT_RUN", success_callback_state: "NOT_IMPLEMENTED", completed_at_utc: new Date().toISOString() }; atomic(ledgerFile, done); return done;
   } catch (error) {
-    if (error?.code === "CODEX_LOG_PERSIST_FAILED") {
-      // The child may have changed the clone. Preserve the claim even if reconciliation cannot be persisted.
+    if (error?.code === "CODEX_LOG_PERSIST_FAILED" || error?.code === "CODEX_TERMINATION_UNVERIFIED") {
+      // The child may still be running or may have changed the clone. Preserve the claim if reconciliation cannot be persisted.
       let saved; let persistenceFailed = false;
-      try { saved = failure(planned, "unknown", "CODEX_LOG_PERSIST_FAILED"); } catch { persistenceFailed = true; }
+      try { saved = failure(planned, "unknown", error.code); } catch { persistenceFailed = true; }
       try { atomic(ledgerFile, { ...ledger, execution_state: "UNKNOWN", ...(saved ? { callback_id: saved.state.callback_id } : {}) }); } catch { persistenceFailed = true; }
       if (persistenceFailed) throw error;
       return { state: "UNKNOWN", failure: saved.state };
