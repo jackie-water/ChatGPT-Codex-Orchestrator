@@ -265,6 +265,114 @@ test("claim, origin, and dirty-clone checks fail closed before Codex", async () 
   }
 });
 
+test("partial claim write becomes one UNKNOWN original-route incident without invoking Codex", async () => {
+  const f = fixture(); const old = process.env.HOME; const writeFileSync = fs.writeFileSync;
+  const state = path.join(f.home, ".chatgpt-codex-orchestrator/instances/exec-test");
+  const ledgerFile = path.join(state, "macos-execution-ledger/demo-200-1.json");
+  const callbackFile = path.join(state, "failure-outbox/failure-demo-200-1.json");
+  let claimWrite = true;
+  try {
+    process.env.HOME = f.home;
+    const routesFile = path.join(state, "chat-routes.json");
+    fs.writeFileSync(routesFile, JSON.stringify({ routes: [{ project: "demo", route: "chat-212", status: "active", chat_url: "https://chatgpt.com/c/chat-212" }] }));
+    const event = f.event(); const body = JSON.parse(event.issue.body); body.review_route = "chat-212"; event.issue.body = JSON.stringify(body);
+    const planned = planMacosCodexRun({ event, controlRoot: f.control, controlRepository: "control/private", trustedGithubUsername: ["trusted"] });
+    fs.writeFileSync = (file, data, ...rest) => {
+      if (claimWrite && typeof file === "number") { claimWrite = false; throw Object.assign(new Error("ENOSPC secret=claim_DIAGNOSTIC"), { code: "ENOSPC" }); }
+      return writeFileSync(file, data, ...rest);
+    };
+    const result = await executeMacosCodexRun({ planned, repoPath: f.repo, codexExecutable: f.codex, controlRoot: f.control, trustedGithubUsername: ["trusted"], timeoutMs: 5000 });
+    assert.equal(result.state, "UNKNOWN"); assert.equal(result.failure.code, "EXECUTION_CLAIM_PERSIST_FAILED");
+    assert.equal(result.failure.callback.chat_url, "https://chatgpt.com/c/chat-212"); assert.equal(result.failure.source_commit, null);
+    assert.equal(JSON.parse(fs.readFileSync(ledgerFile)).execution_state, "UNKNOWN");
+    assert.equal(JSON.parse(fs.readFileSync(callbackFile)).code, "EXECUTION_CLAIM_PERSIST_FAILED");
+    assert.equal(fs.existsSync(path.join(f.repo, "argv")), false);
+    assert.doesNotMatch(fs.readFileSync(callbackFile, "utf8"), /ENOSPC|claim_DIAGNOSTIC|chat-165/);
+    await assert.rejects(() => executeMacosCodexRun({ planned, repoPath: f.repo, codexExecutable: f.codex, controlRoot: f.control, trustedGithubUsername: ["trusted"], timeoutMs: 5000 }), /claimed|uncertain|Duplicate/);
+  } finally { fs.writeFileSync = writeFileSync; process.env.HOME = old; fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("fsync failure after wx claim reconciles to UNKNOWN with original route and no rerun", async () => {
+  const f = fixture(); const old = process.env.HOME; const fsyncSync = fs.fsyncSync;
+  const state = path.join(f.home, ".chatgpt-codex-orchestrator/instances/exec-test");
+  const ledgerFile = path.join(state, "macos-execution-ledger/demo-200-1.json");
+  const callbackFile = path.join(state, "failure-outbox/failure-demo-200-1.json");
+  let claimFsync = true;
+  try {
+    process.env.HOME = f.home;
+    const event = f.event(); const body = JSON.parse(event.issue.body); body.review_route = "chat-212"; event.issue.body = JSON.stringify(body);
+    fs.writeFileSync(path.join(state, "chat-routes.json"), JSON.stringify({ routes: [{ project: "demo", route: "chat-212", status: "active", chat_url: "https://chatgpt.com/c/chat-212" }] }));
+    const planned = planMacosCodexRun({ event, controlRoot: f.control, controlRepository: "control/private", trustedGithubUsername: ["trusted"] });
+    fs.fsyncSync = fd => { if (claimFsync) { claimFsync = false; throw Object.assign(new Error("ENOSPC secret=claim_fsync"), { code: "ENOSPC" }); } return fsyncSync(fd); };
+    const result = await executeMacosCodexRun({ planned, repoPath: f.repo, codexExecutable: f.codex, controlRoot: f.control, trustedGithubUsername: ["trusted"], timeoutMs: 5000 });
+    const incident = JSON.parse(fs.readFileSync(callbackFile));
+    assert.equal(result.state, "UNKNOWN"); assert.equal(result.failure.code, "EXECUTION_CLAIM_PERSIST_FAILED");
+    assert.equal(JSON.parse(fs.readFileSync(ledgerFile)).execution_state, "UNKNOWN");
+    assert.equal(incident.callback.chat_url, "https://chatgpt.com/c/chat-212"); assert.equal(incident.source_commit, null); assert.equal(incident.callback.delivery_state, "PENDING");
+    assert.doesNotMatch(JSON.stringify(incident), /ENOSPC|claim_fsync|chat-165/); assert.equal(fs.existsSync(path.join(f.repo, "argv")), false);
+    await assert.rejects(() => executeMacosCodexRun({ planned, repoPath: f.repo, codexExecutable: f.codex, controlRoot: f.control, trustedGithubUsername: ["trusted"], timeoutMs: 5000 }), /claimed|uncertain|Duplicate/);
+  } finally { fs.fsyncSync = fsyncSync; process.env.HOME = old; fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("claim reconciliation preserves a prepared journal when outbox storage fails", async () => {
+  const f = fixture(); const old = process.env.HOME; const renameSync = fs.renameSync; const fsyncSync = fs.fsyncSync;
+  const state = path.join(f.home, ".chatgpt-codex-orchestrator/instances/exec-test");
+  const ledgerFile = path.join(state, "macos-execution-ledger/demo-200-1.json");
+  const callbackFile = path.join(state, "failure-outbox/failure-demo-200-1.json");
+  const journalFile = path.join(state, "failure-outbox/failure-demo-200-1.journal.json");
+  let claimFsync = true;
+  try {
+    process.env.HOME = f.home;
+    const event = f.event(); const body = JSON.parse(event.issue.body); body.review_route = "chat-212"; event.issue.body = JSON.stringify(body);
+    fs.writeFileSync(path.join(state, "chat-routes.json"), JSON.stringify({ routes: [{ project: "demo", route: "chat-212", status: "active", chat_url: "https://chatgpt.com/c/chat-212" }] }));
+    const planned = planMacosCodexRun({ event, controlRoot: f.control, controlRepository: "control/private", trustedGithubUsername: ["trusted"] });
+    fs.fsyncSync = fd => { if (claimFsync) { claimFsync = false; throw Object.assign(new Error("ENOSPC secret=claim_fsync"), { code: "ENOSPC" }); } return fsyncSync(fd); };
+    fs.renameSync = (from, to) => { if (to === callbackFile) throw Object.assign(new Error("ENOSPC secret=outbox"), { code: "ENOSPC" }); return renameSync(from, to); };
+    await assert.rejects(() => executeMacosCodexRun({ planned, repoPath: f.repo, codexExecutable: f.codex, controlRoot: f.control, trustedGithubUsername: ["trusted"], timeoutMs: 5000 }), error => { assert.equal(error.code, "EXECUTION_CLAIM_PERSIST_FAILED"); assert.equal(error.message, "Execution claim persistence failed; run outcome is unknown"); return true; });
+    assert.equal(JSON.parse(fs.readFileSync(ledgerFile)).execution_state, "CLAIMED");
+    const journal = JSON.parse(fs.readFileSync(journalFile)); assert.equal(journal.failure.callback.chat_url, "https://chatgpt.com/c/chat-212"); assert.equal(journal.failure.source_commit, null); assert.equal(journal.failure.callback.delivery_state, "PENDING");
+    assert.equal(fs.existsSync(callbackFile), false); assert.doesNotMatch(JSON.stringify(journal), /ENOSPC|outbox|chat-165/); assert.equal(fs.existsSync(path.join(f.repo, "argv")), false);
+    await assert.rejects(() => executeMacosCodexRun({ planned, repoPath: f.repo, codexExecutable: f.codex, controlRoot: f.control, trustedGithubUsername: ["trusted"], timeoutMs: 5000 }), /claimed|uncertain|Duplicate/);
+  } finally { fs.fsyncSync = fsyncSync; fs.renameSync = renameSync; process.env.HOME = old; fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("claim reconciliation keeps CLAIMED when UNKNOWN ledger storage fails and never emits a second incident", async () => {
+  const f = fixture(); const old = process.env.HOME; const renameSync = fs.renameSync; const fsyncSync = fs.fsyncSync;
+  const state = path.join(f.home, ".chatgpt-codex-orchestrator/instances/exec-test");
+  const ledgerFile = path.join(state, "macos-execution-ledger/demo-200-1.json");
+  const callbackFile = path.join(state, "failure-outbox/failure-demo-200-1.json");
+  let claimFsync = true;
+  try {
+    process.env.HOME = f.home;
+    const event = f.event(); const body = JSON.parse(event.issue.body); body.review_route = "chat-212"; event.issue.body = JSON.stringify(body);
+    fs.writeFileSync(path.join(state, "chat-routes.json"), JSON.stringify({ routes: [{ project: "demo", route: "chat-212", status: "active", chat_url: "https://chatgpt.com/c/chat-212" }] }));
+    const planned = planMacosCodexRun({ event, controlRoot: f.control, controlRepository: "control/private", trustedGithubUsername: ["trusted"] });
+    fs.fsyncSync = fd => { if (claimFsync) { claimFsync = false; throw Object.assign(new Error("ENOSPC secret=claim_fsync"), { code: "ENOSPC" }); } return fsyncSync(fd); };
+    fs.renameSync = (from, to) => { if (to === ledgerFile && fs.existsSync(ledgerFile)) throw Object.assign(new Error("ENOSPC secret=ledger"), { code: "ENOSPC" }); return renameSync(from, to); };
+    await assert.rejects(() => executeMacosCodexRun({ planned, repoPath: f.repo, codexExecutable: f.codex, controlRoot: f.control, trustedGithubUsername: ["trusted"], timeoutMs: 5000 }), error => { assert.equal(error.code, "EXECUTION_CLAIM_PERSIST_FAILED"); return true; });
+    assert.equal(JSON.parse(fs.readFileSync(ledgerFile)).execution_state, "CLAIMED");
+    const incident = JSON.parse(fs.readFileSync(callbackFile)); assert.equal(incident.callback.chat_url, "https://chatgpt.com/c/chat-212"); assert.equal(incident.source_commit, null); assert.equal(incident.callback.delivery_state, "PENDING");
+    assert.doesNotMatch(JSON.stringify(incident), /ENOSPC|ledger|chat-165/); assert.equal(fs.existsSync(path.join(f.repo, "argv")), false);
+    await assert.rejects(() => executeMacosCodexRun({ planned, repoPath: f.repo, codexExecutable: f.codex, controlRoot: f.control, trustedGithubUsername: ["trusted"], timeoutMs: 5000 }), /claimed|uncertain|Duplicate/);
+  } finally { fs.fsyncSync = fsyncSync; fs.renameSync = renameSync; process.env.HOME = old; fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("preexisting claim remains immutable without P1 callback or Codex invocation", async () => {
+  const f = fixture(); const old = process.env.HOME;
+  const state = path.join(f.home, ".chatgpt-codex-orchestrator/instances/exec-test");
+  const ledgerDir = path.join(state, "macos-execution-ledger"); const ledgerFile = path.join(ledgerDir, "demo-200-1.json");
+  try {
+    process.env.HOME = f.home; fs.mkdirSync(ledgerDir, { recursive: true });
+    const original = { version: 1, execution_state: "CLAIMED", project: "demo", issue: 200, iteration: 1, claimed_at_utc: "2026-10-16T00:00:00.000Z" };
+    fs.writeFileSync(ledgerFile, JSON.stringify(original));
+    const event = f.event(); const body = JSON.parse(event.issue.body); body.review_route = "chat-212"; event.issue.body = JSON.stringify(body);
+    fs.writeFileSync(path.join(state, "chat-routes.json"), JSON.stringify({ routes: [{ project: "demo", route: "chat-212", status: "active", chat_url: "https://chatgpt.com/c/chat-212" }] }));
+    const planned = planMacosCodexRun({ event, controlRoot: f.control, controlRepository: "control/private", trustedGithubUsername: ["trusted"] });
+    await assert.rejects(() => executeMacosCodexRun({ planned, repoPath: f.repo, codexExecutable: f.codex, controlRoot: f.control, trustedGithubUsername: ["trusted"], timeoutMs: 5000 }), /claimed|uncertain|Duplicate/);
+    assert.deepEqual(JSON.parse(fs.readFileSync(ledgerFile)), original); assert.equal(fs.existsSync(path.join(state, "failure-outbox")), false); assert.equal(fs.existsSync(path.join(f.repo, "argv")), false);
+  } finally { process.env.HOME = old; fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
 test("unvalidated plan objects and symlinked clones fail closed", async () => {
   const f = fixture(); const old = process.env.HOME; process.env.HOME = f.home;
   try {

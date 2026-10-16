@@ -32,8 +32,11 @@ function atomic(file, value) {
 }
 function claim(file, value) {
   privateDir(path.dirname(file));
-  let fd; try { fd = fs.openSync(file, "wx", 0o600); } catch (e) { if (e.code === "EEXIST") throw new Error("Run is already claimed or has uncertain prior state"); throw e; }
+  let fd; try { fd = fs.openSync(file, "wx", 0o600); } catch (e) { if (e.code === "EEXIST") throw Object.assign(new Error("Run is already claimed or has uncertain prior state"), { code: "EEXIST" }); throw e; }
   try { fs.writeFileSync(fd, JSON.stringify(value) + "\n"); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+}
+function claimPersistenceError() {
+  return Object.assign(new Error("Execution claim persistence failed; run outcome is unknown"), { code: "EXECUTION_CLAIM_PERSIST_FAILED" });
 }
 function git(repo, args) {
   const result = spawnSync("git", ["-C", repo, ...args], { encoding: "utf8", timeout: 15000 });
@@ -157,7 +160,27 @@ export async function executeMacosCodexRun({ planned, repoPath, codexExecutable,
     failure(planned, "preflight", "EXECUTION_PREP_FAILED");
     throw error;
   }
-  claim(ledgerFile, ledger);
+  try {
+    claim(ledgerFile, ledger);
+  } catch (error) {
+    // EEXIST is an immutable duplicate/uncertain-state barrier. It must not
+    // enqueue a second callback or alter the existing claim.
+    if (error?.code === "EEXIST") throw new Error("Run is already claimed or has uncertain prior state");
+
+    // wx may have created a partial claim before write/fsync failed. Reconcile
+    // only with the immutable authorized snapshot; never trust the failed
+    // storage error or caller-mutated plan data.
+    let saved;
+    try {
+      saved = failure(planned, "unknown", "EXECUTION_CLAIM_PERSIST_FAILED");
+      atomic(ledgerFile, { ...ledger, execution_state: "UNKNOWN", callback_id: saved.state.callback_id });
+    } catch {
+      // Preserve any partial claim and/or prepared failure journal. A later
+      // recovery pass must decide; this process must not retry or delete it.
+      throw claimPersistenceError();
+    }
+    return { state: "UNKNOWN", failure: saved.state };
+  }
   try {
     const observed = validateClone(repo, plan);
     const result = await runCodex(trustedExecutable, repo, JSON.parse(snapshot.event.issue.body).prompt, timeoutMs, path.join(logs, `${id}.json`));
