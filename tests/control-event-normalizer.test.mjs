@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { normalizeControlEvent, writeNormalizedOutput } from "../src/lib/control-event-normalizer.mjs";
-import { prepareFailure } from "../src/lib/run-failure-state.mjs";
+import { getAuthorizedSnapshot, normalizeControlEvent, writeNormalizedOutput } from "../src/lib/control-event-normalizer.mjs";
+import { persistFailure, prepareFailure, prepareFailureForAuthorizedSnapshot } from "../src/lib/run-failure-state.mjs";
 
 function fixture() {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "control-normalizer-"));
@@ -49,6 +49,26 @@ test("normalizer rejects chat_url injection and string trusted users", () => {
     assert.deepEqual(Object.keys(normalized.event.repository), ["full_name"]);
     assert.equal(normalized.event.repository.id, undefined);
     assert.equal(normalized.event.repository.html_url, undefined);
+  } finally { process.env.HOME = old; fs.rmSync(x.home, { recursive: true, force: true }); }
+});
+
+test("trusted trailing-slash route canonicalizes for durable idempotent failure callbacks", () => {
+  const x = fixture(); const old = process.env.HOME; process.env.HOME = x.home;
+  try {
+    const routes = path.join(x.home, ".chatgpt-codex-orchestrator/instances/test-instance/chat-routes.json");
+    fs.writeFileSync(routes, JSON.stringify({ version: 1, routes: [{ project: "demo", route: "chat-165", chat_url: "https://chatgpt.com/c/abc/", status: "active" }] }));
+    const normalized = normalizeControlEvent({ event: x.event, controlRoot: x.control, controlRepository: "jackie-water/control-private", trustedGithubUsername: ["jackie"] });
+    const authorization = getAuthorizedSnapshot(normalized);
+    assert.equal(authorization.chat_url, "https://chatgpt.com/c/abc");
+    const first = persistFailure(prepareFailureForAuthorizedSnapshot({ authorization, stage: "preflight", code: "GIT_UNAVAILABLE" }));
+    const second = persistFailure(prepareFailureForAuthorizedSnapshot({ authorization, stage: "preflight", code: "GIT_UNAVAILABLE" }));
+    assert.equal(first.state.callback.delivery_state, "PENDING");
+    assert.equal(first.state.callback.chat_url, "https://chatgpt.com/c/abc");
+    assert.equal(second.reused, true);
+    assert.throws(() => {
+      fs.writeFileSync(routes, JSON.stringify({ version: 1, routes: [{ project: "demo", route: "chat-165", chat_url: "https://evil.example/c/abc/", status: "active" }] }));
+      normalizeControlEvent({ event: x.event, controlRoot: x.control, controlRepository: "jackie-water/control-private", trustedGithubUsername: ["jackie"] });
+    }, /Invalid registered Chat URL/);
   } finally { process.env.HOME = old; fs.rmSync(x.home, { recursive: true, force: true }); }
 });
 

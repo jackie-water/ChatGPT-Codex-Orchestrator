@@ -1,10 +1,12 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
+import { isAuthorizedSnapshot } from "./control-event-normalizer.mjs";
 
 export const FAILURE_STAGES = new Set(["preflight", "git", "codex", "validation", "publish", "timeout", "cancel", "unknown"]);
 export const DELIVERY_STATES = new Set(["PENDING", "DRAFT_INSERTED", "SUBMISSION_ATTEMPTED", "DELIVERED"]);
 const ID = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+const REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const CODE = /^[A-Z][A-Z0-9_]{0,63}$/;
 const SHA = /^[0-9a-f]{40}$/;
 const IMMUTABLE = ["project", "issue", "iteration", "stage", "code", "source_commit", "exit_code", "callback_id", "chat_url", "message"];
@@ -76,6 +78,18 @@ export function prepareFailure({event, controlRoot, trustedGithubUsername, stage
   const normalizedExit = exitCode === undefined ? null : Number(exitCode); if (normalizedExit !== null && (!Number.isInteger(normalizedExit) || normalizedExit < 0 || normalizedExit > 255)) throw new Error("Invalid exit code");
   const id = callbackId(project, issue, iteration); const f = {version:1, routing_version:ROUTING_VERSION, execution_state:"TERMINAL_FAILURE", project, issue, iteration, repository:configuredRepo, stage, code:safeCode, exit_code:normalizedExit, source_commit:sourceCommit || null, source_commit_available:Boolean(sourceCommit), callback_id:id, created_at_utc:new Date().toISOString()};
   f.callback = {version:1, delivery_state:"PENDING", callback_id:id, chat_url:chatUrl, message:messageFor({...f, chat_url:chatUrl}), queued_at_utc:f.created_at_utc}; f.delivery_state="PENDING"; f.chat_url=chatUrl; f.message=f.callback.message; f.chat_decision = {state:"unhandled"}; return {context:c, failure:f};
+}
+export function prepareFailureForAuthorizedSnapshot({authorization, stage, code, exitCode, sourceCommit}) {
+  if (!isAuthorizedSnapshot(authorization)) throw new Error("A genuine authorization snapshot is required");
+  const { instance_id, project, repository, issue, author, chat_url, configuration } = authorization;
+  if (!ID.test(String(instance_id)) || !ID.test(String(project)) || !REPO.test(String(repository)) || !Number.isInteger(issue) || issue < 1 || typeof author !== "string" || !configuration || safeChatUrl(chat_url) !== chat_url) throw new Error("Malformed authorization snapshot");
+  if (sourceCommit !== undefined && !SHA.test(sourceCommit)) throw new Error("Invalid source commit");
+  const safeCode = sanitizeCode(code); if (!FAILURE_STAGES.has(stage)) throw new Error("Invalid failure stage");
+  const normalizedExit = exitCode === undefined ? null : Number(exitCode); if (normalizedExit !== null && (!Number.isInteger(normalizedExit) || normalizedExit < 0 || normalizedExit > 255)) throw new Error("Invalid exit code");
+  const iteration = Number(authorization.iteration ?? 1); if (!Number.isInteger(iteration) || iteration < 1) throw new Error("Invalid iteration");
+  const id = callbackId(project, issue, iteration); const f = {version:1, routing_version:ROUTING_VERSION, execution_state:"TERMINAL_FAILURE", project, issue, iteration, repository, stage, code:safeCode, exit_code:normalizedExit, source_commit:sourceCommit || null, source_commit_available:Boolean(sourceCommit), callback_id:id, created_at_utc:new Date().toISOString()};
+  f.callback = {version:1, delivery_state:"PENDING", callback_id:id, chat_url, message:messageFor({...f, chat_url}), queued_at_utc:f.created_at_utc}; f.delivery_state="PENDING"; f.chat_url=chat_url; f.message=f.callback.message; f.chat_decision={state:"unhandled"};
+  return { context: { instance: { instance_id }, configuration }, failure: f };
 }
 function osHome() { return process.env.HOME || process.env.USERPROFILE || "/tmp"; }
 export function persistFailure({context, failure}) { const base = path.join(osHome(), ".chatgpt-codex-orchestrator", "instances", context.instance.instance_id, "failure-outbox"); return withLock(base, () => { const file = path.join(base, `${failure.callback_id}.json`), journalFile = path.join(base, `${failure.callback_id}.journal.json`); let journal = null; if (existsAny(journalFile)) journal = readJournal(journalFile, failure.callback_id); if (journal && !sameIdentity(journal.failure, failure)) throw new Error("Conflicting failure journal"); if (existsAny(file)) { const old=json(file); const repaired=repairRoutingVersion(old); if (!sameIdentity(repaired, journal ? journal.failure : failure)) throw new Error("Conflicting failure payload"); if (repaired !== old) atomicWrite(file, repaired); if (journal) fs.rmSync(journalFile); return {file, state:repaired, reused:true}; } const state = journal ? journal.failure : repairRoutingVersion(failure); if (!journal) atomicWrite(journalFile, {version:1, phase:"prepared", callback_id:state.callback_id, failure:state}); atomicWrite(file, state); fs.rmSync(journalFile, {force:true}); return {file, state, reused:Boolean(journal)}; }); }

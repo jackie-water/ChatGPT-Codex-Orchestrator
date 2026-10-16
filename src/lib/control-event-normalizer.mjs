@@ -6,6 +6,7 @@ const ID = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const ROUTE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const authorizedSnapshots = new WeakMap();
+const authorizedSnapshotObjects = new WeakSet();
 
 function safePath(value, allowMissing = false) {
   const absolute = path.resolve(String(value));
@@ -25,6 +26,11 @@ function canonical(value) {
 }
 function fail(message) { throw new Error(message); }
 
+function canonicalChatUrl(value) {
+  if (typeof value !== "string" || !/^https:\/\/chatgpt\.com\/(?:g\/[^/]+\/)?c\/[A-Za-z0-9-]+\/?$/.test(value)) fail("Invalid registered Chat URL");
+  return value.replace(/\/$/, "");
+}
+
 function immutableClone(value) {
   if (value === null || typeof value !== "object") return value;
   if (Array.isArray(value)) return Object.freeze(value.map(immutableClone));
@@ -36,6 +42,7 @@ export function getAuthorizedSnapshot(normalized) {
   if (!snapshot) fail("A normalized event authorization snapshot is required");
   return snapshot;
 }
+export function isAuthorizedSnapshot(value) { return authorizedSnapshotObjects.has(value); }
 
 export function normalizeControlEvent({event, controlRoot, controlRepository, trustedGithubUsername}) {
   if (!Array.isArray(trustedGithubUsername) || trustedGithubUsername.length === 0 || trustedGithubUsername.some(name => typeof name !== "string" || !name)) fail("trustedGithubUsername must be a nonempty array of usernames");
@@ -60,11 +67,13 @@ export function normalizeControlEvent({event, controlRoot, controlRepository, tr
   const routeFile = path.join(process.env.HOME || process.env.USERPROFILE || "/tmp", ".chatgpt-codex-orchestrator", "instances", instance.instance_id, "chat-routes.json");
   const routes = readJson(routeFile); const record = (routes.routes || []).find(r => r.project === project && r.route === route && r.status === "active");
   if (!record) fail("Missing or inactive review_route");
-  if (typeof record.chat_url !== "string" || !/^https:\/\/chatgpt\.com\/(?:g\/[^/]+\/)?c\/[A-Za-z0-9-]+\/?$/.test(record.chat_url)) fail("Invalid registered Chat URL");
+  const chatUrl = canonicalChatUrl(record.chat_url);
   const digest = crypto.createHash("sha256").update(canonical(raw)).digest("hex");
   const normalizedEvent = { repository: { full_name: configured.repository }, issue: { title: raw.issue.title, number: issue, user: { login: author }, body: JSON.stringify({ ...body, project, iteration, review_route: route, target_repo: configured.repository }) } };
   const normalized = { event: normalizedEvent, context: { control_provenance: { repository: controlRepository, issue_number: issue, author, event_digest_sha256: digest }, authorized_source: { project, repository: configured.repository, review_route: route, iteration } } };
-  authorizedSnapshots.set(normalized, immutableClone({ instance_id: instance.instance_id, project, configuration: projects.projects[project] }));
+  const snapshot = immutableClone({ instance_id: instance.instance_id, project, repository: configured.repository, issue, iteration, author, review_route: route, chat_url: chatUrl, configuration: projects.projects[project] });
+  authorizedSnapshots.set(normalized, snapshot);
+  authorizedSnapshotObjects.add(snapshot);
   return normalized;
 }
 
