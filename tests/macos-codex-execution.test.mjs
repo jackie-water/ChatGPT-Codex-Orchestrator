@@ -69,6 +69,27 @@ test("nonzero Codex and timeout persist safe P1 failures", async () => {
   }
 });
 
+test("redacts GitHub credentials and token-shaped diagnostics before every log is persisted", async () => {
+  const cases = [
+    { name: "success", script: "#!/bin/sh\nprintf '%s\\n' 'Authorization: Bearer bearer_PLACEHOLDER_123456' 'github_pat_PLACEHOLDER_123456' 'gho_PLACEHOLDER_123456' 'ghu_PLACEHOLDER_123456' 'ghs_PLACEHOLDER_123456' 'ghr_PLACEHOLDER_123456' 'api_key=generic_PLACEHOLDER_123456' 'benign success diagnostic context'; cat >/dev/null; exit 0", timeoutMs: 5000 },
+    { name: "nonzero", script: "#!/bin/sh\nprintf '%s\\n' 'token generic_TOKEN_PLACEHOLDER_123456' 'benign nonzero diagnostic context'; cat >/dev/null; exit 7", timeoutMs: 5000 },
+    { name: "timeout", script: "#!/bin/sh\nprintf '%s\\n' 'Authorization: token token_HEADER_PLACEHOLDER_123456' 'benign timeout diagnostic context'; cat >/dev/null; sleep 2", timeoutMs: 500 }
+  ];
+  for (const item of cases) {
+    const f = fixture(); const old = process.env.HOME; process.env.HOME = f.home;
+    fs.writeFileSync(f.codex, item.script); fs.chmodSync(f.codex, 0o700);
+    try {
+      const planned = planMacosCodexRun({ event: f.event(), controlRoot: f.control, controlRepository: "control/private", trustedGithubUsername: ["trusted"] });
+      await executeMacosCodexRun({ planned, repoPath: f.repo, codexExecutable: f.codex, controlRoot: f.control, trustedGithubUsername: ["trusted"], timeoutMs: item.timeoutMs });
+      const logFile = path.join(f.home, ".chatgpt-codex-orchestrator/instances/exec-test/macos-execution-logs/demo-200-1.json");
+      const persisted = fs.readFileSync(logFile, "utf8");
+      assert.match(persisted, /\[REDACTED\]/);
+      for (const placeholder of ["bearer_PLACEHOLDER_123456", "github_pat_PLACEHOLDER_123456", "gho_PLACEHOLDER_123456", "ghu_PLACEHOLDER_123456", "ghs_PLACEHOLDER_123456", "ghr_PLACEHOLDER_123456", "generic_PLACEHOLDER_123456", "generic_TOKEN_PLACEHOLDER_123456", "token_HEADER_PLACEHOLDER_123456"]) assert.doesNotMatch(persisted, new RegExp(placeholder));
+      assert.match(persisted, new RegExp(`benign ${item.name} diagnostic context`));
+    } finally { process.env.HOME = old; }
+  }
+});
+
 test("claim, origin, and dirty-clone checks fail closed before Codex", async () => {
   const f = fixture(); const old = process.env.HOME; process.env.HOME = f.home;
   try {

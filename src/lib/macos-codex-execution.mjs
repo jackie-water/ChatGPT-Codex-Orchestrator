@@ -75,7 +75,10 @@ function runCodex(executable, repo, prompt, timeoutMs, logFile) {
     const finish = result => { if (settled) return; settled = true; clearTimeout(timer); clearTimeout(killTimer); atomic(logFile, result.log); resolve(result.value); };
     const child = spawn(executable, ["exec", "--full-auto"], { cwd: repo, shell: false, stdio: ["pipe", "pipe", "pipe"] });
     let output = ""; const append = chunk => { if (output.length < 32768) output += chunk.toString().slice(0, 32768 - output.length); };
-    const clean = () => output.replace(/Bearer\s+\S+|ghp_[A-Za-z0-9]+/g, "[REDACTED]");
+    const clean = () => output
+      .replace(/\b(?:github_pat_|gh[opusr]_)[A-Za-z0-9_]+/gi, "[REDACTED]")
+      .replace(/((?:authorization\s*:\s*)?(?:bearer|token)\s+)[A-Za-z0-9._~+/=-]+/gi, "$1[REDACTED]")
+      .replace(/((?:api[_-]?key|secret|token)\s*[:=]\s*)[A-Za-z0-9._~+/=-]{12,}/gi, "$1[REDACTED]");
     child.stdout.on("data", append); child.stderr.on("data", append); child.stdin.end(prompt);
     let timer = setTimeout(() => { child.kill("SIGTERM"); killTimer = setTimeout(() => child.kill("SIGKILL"), 1000); }, timeoutMs);
     child.on("close", (code, signal) => finish({ value: { code, signal, timedOut: Boolean(killTimer) }, log: { exit_code: code, signal, output: clean() } }));
