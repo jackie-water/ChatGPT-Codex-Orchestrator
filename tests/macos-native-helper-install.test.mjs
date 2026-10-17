@@ -35,13 +35,42 @@ test("approved isolated prepare builds, proves, receipts, and verifies one insta
     if (args[2] === "--show-sdk-path") return { ok: true, status: 0, stdout: sdk + "\n" };
     const output = args[args.indexOf("-o") + 1]; fs.writeFileSync(output, "isolated-helper\n", { mode: 0o700 }); return { ok: true, status: 0, stdout: "", stderr: "" };
   };
-  const identityReader = pid => ({ status: "OK", pid, identity: `100:${String(pid).padStart(6, "0")}`, start_sec: 100, start_usec: pid });
+  let processGeneration = 0;
+  const identityReader = pid => ({ status: "OK", pid, identity: `${100 + processGeneration}:${String(pid).padStart(6, "0")}`, start_sec: 100 + processGeneration, start_usec: pid });
   const state = { installation_id: "fixture-22A1", macos_setup_approved: true, parent_pid: 123 };
   const result = prepareMacosNativeHelper({ state, home, platform: "darwin", commandRunner, identityReader });
   assert.equal(result.status, "PASS"); assert.equal(result.mutations_performed, true); assert.equal(result.source_sha256, REVIEWED_SOURCE_SHA256); assert.equal(calls.find(x => x.args.includes("-o")).args.includes("clang"), true);
-  assert.equal(verifyMacosNativeCapability({ state, home, platform: "darwin" }).status, "PASS");
+  assert.equal(verifyMacosNativeCapability({ state, home, platform: "darwin", identityReader, parentPid: 123 }).status, "PASS");
+  processGeneration = 1;
+  const resumed = prepareMacosNativeHelper({ state, home, platform: "darwin", commandRunner, identityReader });
+  assert.equal(resumed.status, "PASS"); assert.equal(resumed.idempotent, true); assert.equal(resumed.mutations_performed, false);
+  const receiptText = fs.readFileSync(result.receipt_path, "utf8");
+  fs.unlinkSync(result.receipt_path);
+  assert.equal(verifyMacosNativeCapability({ state, home, platform: "darwin", identityReader, parentPid: 123 }).status, "ERROR");
+  const tampered = JSON.parse(receiptText); tampered.source_review_commit = "tampered";
+  fs.writeFileSync(result.receipt_path, JSON.stringify(tampered), { mode: 0o600 });
+  assert.equal(verifyMacosNativeCapability({ state, home, platform: "darwin", identityReader, parentPid: 123 }).status, "ERROR");
+  fs.writeFileSync(result.receipt_path, receiptText, { mode: 0o600 });
   fs.writeFileSync(result.helper_path, "replacement\n", { mode: 0o700 });
-  assert.equal(verifyMacosNativeCapability({ state, home, platform: "darwin" }).status, "ERROR");
+  assert.equal(verifyMacosNativeCapability({ state, home, platform: "darwin", identityReader, parentPid: 123 }).status, "ERROR");
+});
+
+test("snapshot trust accepts a normal fixture home and rejects writable user ancestors", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "orch-native-ancestor-"));
+  const home = path.join(root, "home"); fs.mkdirSync(home, { recursive: true, mode: 0o700 });
+  const sdk = toolchain(home);
+  const commandRunner = (command, args) => {
+    if (args[0] === "--find") return { ok: true, status: 0, stdout: "/usr/bin/clang\n" };
+    if (args[2] === "--show-sdk-path") return { ok: true, status: 0, stdout: sdk + "\n" };
+    fs.writeFileSync(args[args.indexOf("-o") + 1], "isolated-helper\n", { mode: 0o700 }); return { ok: true, status: 0, stdout: "", stderr: "" };
+  };
+  const identityReader = pid => ({ status: "OK", pid, identity: `100:${String(pid).padStart(6, "0")}`, start_sec: 100, start_usec: pid });
+  const state = { installation_id: "fixture-ancestor", macos_setup_approved: true, parent_pid: 123 };
+  assert.equal(prepareMacosNativeHelper({ state, home, platform: "darwin", commandRunner, identityReader }).status, "PASS");
+  const unsafeHome = path.join(root, "unsafe-home"); fs.mkdirSync(unsafeHome, { recursive: true, mode: 0o777 }); fs.chmodSync(unsafeHome, 0o777);
+  assert.notEqual(fs.lstatSync(unsafeHome).mode & 0o022, 0);
+  const unsafeResult = prepareMacosNativeHelper({ state: { ...state, installation_id: "fixture-unsafe" }, home: unsafeHome, platform: "darwin", commandRunner, identityReader });
+  assert.equal(unsafeResult.status, "ERROR"); assert.equal(unsafeResult.mutations_performed, false); assert.equal(unsafeResult.instance.private_root, false);
 });
 
 test("unauthorized prepare and non-Darwin paths never mutate", () => {

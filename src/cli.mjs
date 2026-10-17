@@ -291,10 +291,15 @@ function runSetup() {
     }
     if(state.github_plugin_authorization_verified!==true || state.github_plugin_authorization_installation_id!==state.installation_id || state.github_plugin_authorization_control_repository!==state.control_repository || state.github_plugin_authorization_sandbox_repository!==state.sandbox_repository || state.github_plugin_authorization_chat_url!==state.reviewer_chat_url) return emit(action(state,"generated_repo_authorization","setup.generated_repo.connect",{repositories:[state.control_repository,state.sandbox_repository],chat_url:state.reviewer_chat_url,verification_requirement:"The controlling Chat must confirm access to these exact generated private repositories and record this exact current Chat URL; local gh status and boolean answers are not proof.",mutations_performed:true}));
     if(state.macos_native_installation_id && state.macos_native_installation_id!==state.installation_id) return emit({status:"ERROR",error_id:"MACOS-NATIVE-INSTALLATION-MISMATCH",recoverable:false,preferred_language:lang,message:"Native helper capability belongs to a different installation; target and Runner remain disabled.",mutations_performed:false},1);
-    const nativePrepared=prepareMacosNativeHelper({state,home:os.homedir(),approved:true});
+    let nativePrepared;
+    try { nativePrepared=prepareMacosNativeHelper({state,home:os.homedir(),approved:true}); }
+    catch(error) {
+      return emit({status:"ERROR",error_id:"MACOS-NATIVE-PREPARE-IO",recoverable:true,preferred_language:lang,message:"macOS native helper preparation failed closed; existing installer state and disabled gates were preserved.",details:"Native helper filesystem/build/proof operation failed.",mutations_performed:false},1);
+    }
     if(nativePrepared.status!=="PASS") return emit({status:nativePrepared.status==="NEEDS_USER_ACTION"?"NEEDS_USER_ACTION":"ERROR",error_id:nativePrepared.error_id||"MACOS-NATIVE-PREPARE",recoverable:nativePrepared.status!=="ERROR",preferred_language:lang,message:"macOS native helper capability is unavailable; no native identity was enabled and the target remains disabled.",details:nativePrepared.details||nativePrepared.reason||null,capability:nativePrepared,mutations_performed:nativePrepared.mutations_performed===true},1);
     state.macos_native_installation_id=state.installation_id;
-    state.macos_native_capability={status:"VERIFIED",helper_path:nativePrepared.helper_path,receipt_path:nativePrepared.receipt_path,source_sha256:nativePrepared.source_sha256,binary_sha256:nativePrepared.binary_sha256};
+    state.instance_root=nativePrepared.instance_path;
+    state.macos_native_capability={status:"VERIFIED",instance_path:nativePrepared.instance_path,helper_path:nativePrepared.helper_path,receipt_path:nativePrepared.receipt_path,source_review_commit:nativePrepared.source_review_commit,source_sha256:nativePrepared.source_sha256,binary_sha256:nativePrepared.binary_sha256};
     saveState(state);
     const registration=ensureInstallerChatRegistration(state,{projectKey:state.sandbox_project_key});
     if(registration.status!=="READY"){ state.sandbox_chat_registration_issue=registration.issue?.url||null; saveState(state); return emit({status:"NEEDS_USER_ACTION",action_id:"sandbox_chat_registration",preferred_language:lang,message:"Register the explicit Sandbox callback in the originating Chat before CODEX-RUN.",registration_issue:registration.issue?.url||null,mutations_performed:true}); }

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { macosPrerequisites, parseNodeMajor, migrationInventory, migrationPreflight, renderLaunchAgent } from "../src/lib/macos-platform.mjs";
+import { macosPrerequisites, parseNodeMajor, migrationInventory, migrationPreflight, renderLaunchAgent, macosRuntimeAction } from "../src/lib/macos-platform.mjs";
 
 test("Node prerequisite parser accepts supported majors and rejects v21",()=>{
   assert.equal(parseNodeMajor("v21.9.0"),21);
@@ -54,4 +54,36 @@ test("LaunchAgent rendering separates reverse-DNS labels from filesystem paths",
     if(previousHome===undefined) delete process.env.HOME;
     else process.env.HOME=previousHome;
   }
+});
+
+test("runtime install renders native identity only for a verified same-instance capability",()=>{
+  const home=fs.mkdtempSync(path.join(os.tmpdir(),"orch-macos-runtime-"));
+  const previousHome=process.env.HOME; process.env.HOME=home;
+  const instance=path.join(home,"instance"), runner=path.join(instance,"runner");
+  fs.mkdirSync(instance,{recursive:true,mode:0o700}); fs.writeFileSync(runner,"runner\n",{mode:0o700});
+  const state={sandbox_only:true,target_environment_ready:false,instance_id:"instance-1",installation_id:"install-1",runner_owner:"install-1",runner_label:"runner-1",launch_agent_label:"com.chatgpt.codex.runner",runner_path:runner,instance_root:instance,macos_setup_approved:true,macos_action_approval:"install"};
+  const helper=path.join(instance,"runtime","native","macos","process-identity");
+  const commandRunner=(command,args)=>command==="launchctl"&&args[0]==="list"?{ok:true,output:""}:{ok:false,output:"unexpected"};
+  try {
+    const result=macosRuntimeAction("install",{state,home,platform:"darwin",commandRunner,capabilityVerifier:()=>({status:"PASS",installation_id:"install-1",instance_path:instance,helper_path:helper})});
+    assert.equal(result.status,"PASS");
+    const plist=fs.readFileSync(result.plist,"utf8");
+    assert.match(plist,/ORCHESTRATOR_MACOS_NATIVE_HELPER/); assert.ok(plist.includes(helper));
+    assert.match(plist,/ORCHESTRATOR_MACOS_NATIVE_PROCESS_IDENTITY/);
+  } finally { if(previousHome===undefined) delete process.env.HOME; else process.env.HOME=previousHome; }
+});
+
+test("runtime install rejects forged or wrong-instance native capability before rendering",()=>{
+  const home=fs.mkdtempSync(path.join(os.tmpdir(),"orch-macos-runtime-reject-"));
+  const previousHome=process.env.HOME; process.env.HOME=home;
+  const instance=path.join(home,"instance"), runner=path.join(instance,"runner");
+  fs.mkdirSync(instance,{recursive:true,mode:0o700}); fs.writeFileSync(runner,"runner\n",{mode:0o700});
+  const state={sandbox_only:true,target_environment_ready:false,instance_id:"instance-1",installation_id:"install-1",runner_owner:"install-1",runner_label:"runner-1",launch_agent_label:"com.chatgpt.codex.runner",runner_path:runner,instance_root:instance,macos_setup_approved:true,macos_action_approval:"install"};
+  const commandRunner=(command,args)=>command==="launchctl"&&args[0]==="list"?{ok:true,output:""}:{ok:false,output:"unexpected"};
+  try {
+    for(const capability of [{status:"ERROR",error_id:"MACOS-NATIVE-CAPABILITY-CORRUPT"},{status:"PASS",installation_id:"other",instance_path:instance,helper_path:path.join(instance,"runtime","native","macos","process-identity")},{status:"PASS",installation_id:"install-1",instance_path:path.join(home,"other"),helper_path:path.join(home,"other","runtime","native","macos","process-identity")}]) {
+      const result=macosRuntimeAction("install",{state,home,platform:"darwin",commandRunner,capabilityVerifier:()=>capability});
+      assert.equal(result.status,"ERROR"); assert.equal(fs.existsSync(path.join(home,"Library","LaunchAgents","com.chatgpt.codex.runner.plist")),false);
+    }
+  } finally { if(previousHome===undefined) delete process.env.HOME; else process.env.HOME=previousHome; }
 });

@@ -4,7 +4,7 @@ import os from "node:os";
 import crypto from "node:crypto";
 import { spawnSafeSync } from "./spawn-safe.mjs";
 import { canonicalInstallationId } from "./control-render.mjs";
-import { macosNativeHelperPreflight } from "./macos-native-helper-install.mjs";
+import { macosNativeHelperPreflight, verifyMacosNativeCapability } from "./macos-native-helper-install.mjs";
 
 const HOME = () => process.env.HOME || os.homedir();
 const cmd = (name,args=[],options={}) => { const r=spawnSafeSync(name,args,{encoding:"utf8",...options}); return {ok:r.status===0, output:(r.stdout||r.stderr||"").trim()}; };
@@ -139,7 +139,7 @@ export function renderLaunchAgent({label,runnerPath,instanceRoot,programArgument
   return `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict><key>Label</key><string>${xml(label)}</string><key>ProgramArguments</key><array>${[runnerPath,...programArguments].map(x=>`<string>${xml(x)}</string>`).join("")}</array><key>WorkingDirectory</key><string>${xml(instanceRoot)}</string>${environment}<key>RunAtLoad</key><false/></dict></plist>`;
 }
 
-export function macosRuntimeAction(action,{state={},commandRunner=cmd}={}) {
+export function macosRuntimeAction(action,{state={},commandRunner=cmd,home=HOME(),platform=process.platform,capabilityVerifier=verifyMacosNativeCapability}={}) {
   if(!["status","doctor","install","start","stop","repair"].includes(action)) return {status:"ERROR",mutations_performed:false,action};
   const readonly=action==="status"||action==="doctor";
   const preflight=migrationPreflight({state,commandRunner});
@@ -148,7 +148,7 @@ export function macosRuntimeAction(action,{state={},commandRunner=cmd}={}) {
     if(unknown) return {status:"NEEDS_USER_ACTION",action_id:"resolve_runner_ownership",error_id:"MACOS-RUNNER-OWNERSHIP",launchctl_state:"unknown",mutations_performed:false,preflight,action:"Resolve runner ownership manually; no existing runner was stopped."};
     return {status:"ERROR",error_id:"MACOS-RUNNER-OWNERSHIP",mutations_performed:false,preflight,action:"Resolve runner ownership manually; no existing runner was stopped."};
   }
-  const label=state.launch_agent_label, plist=path.join(HOME(),"Library","LaunchAgents",`${label}.plist`), listed=commandRunner("launchctl",["list"]);
+  const label=state.launch_agent_label, plist=path.join(home,"Library","LaunchAgents",`${label}.plist`), listed=commandRunner("launchctl",["list"]);
   if(!state.sandbox_only || state.target_environment_ready===true || !state.instance_id || state.runner_owner!==state.installation_id || !/^com\.chatgpt\.codex\.[A-Za-z0-9-]+$/.test(String(label||"")) || !/^[A-Za-z0-9._-]+$/.test(String(state.runner_label||""))) return {status:"ERROR",error_id:"MACOS-SANDBOX-SCOPE",mutations_performed:false,action,details:"Runner and LaunchAgent identities are incomplete or target ownership is present."};
   if(state.browser_port_conflict===true || state.browser_profile_conflict===true || state.conflicting_runner===true) return {status:"ERROR",error_id:"MACOS-INSTANCE-CONFLICT",mutations_performed:false,action};
   if(!listed.ok) return {status:"ERROR",error_id:"MACOS-LAUNCHCTL-001",mutations_performed:false,launchctl_state:"unknown",details:listed.output,preflight};
@@ -156,9 +156,15 @@ export function macosRuntimeAction(action,{state={},commandRunner=cmd}={}) {
   const proof=listedActive?commandRunner("launchctl",["print",`gui/${process.getuid?.()||0}/${label}`]):{ok:false,output:"not-listed"};
   if(listedActive&&!proof.ok) return {status:"ERROR",error_id:"MACOS-LAUNCHCTL-002",mutations_performed:false,launchctl_state:"unknown",details:proof.output,preflight};
   const active=listedActive&&proof.ok;
+  if(active&&(action==="install"||action==="repair")) return {status:"ERROR",error_id:"MACOS-RUNNER-ACTIVE",mutations_performed:false,action,launchctl_state:"loaded",preflight};
   if(readonly) return {status:preflight.status!=="READY"&&!active?"NEEDS_USER_ACTION":"PASS",mutations_performed:false,launchctl_checked:listed.ok,launchctl_state:active?"loaded":(preflight.status!=="READY"?"unknown":"not-loaded"),plist_exists:fs.existsSync(plist),preflight};
   if(state.macos_setup_approved!==true || state.macos_action_approval!==action) return {status:"NEEDS_USER_ACTION",error_id:"MACOS-ACTION-APPROVAL",mutations_performed:false,action:"Approve this exact macOS action: "+action};
-  if(action==="install"||action==="repair") { try{safeLaunchAgentPath(plist);}catch(error){return {status:"ERROR",error_id:"MACOS-PLIST-UNSAFE",mutations_performed:false,action,details:String(error.message||error)};} if(fs.existsSync(plist)&&action==="install"&&!state.plist_owned)return {status:"ERROR",error_id:"MACOS-PLIST-COLLISION",mutations_performed:false,action}; const temp=path.join(path.dirname(plist),`.${label}.${process.pid}.${crypto.randomUUID()}.tmp`); let fd; try{fd=fs.openSync(temp,"wx",0o600);fs.writeFileSync(fd,renderLaunchAgent({label,runnerPath:state.runner_path,instanceRoot:state.instance_root}));fs.fsyncSync(fd);}catch(error){try{if(fd!==undefined)fs.closeSync(fd);}catch{}try{fs.unlinkSync(temp);}catch{}return {status:"ERROR",error_id:"MACOS-PLIST-WRITE",mutations_performed:false,action,details:String(error.message||error)};}finally{if(fd!==undefined)try{fs.closeSync(fd);}catch{}} try{safeLaunchAgentPath(plist);if(fs.existsSync(plist)&&action==="install"&&!state.plist_owned)throw new Error("Unexpected existing LaunchAgent");fs.renameSync(temp,plist);const dfd=fs.openSync(path.dirname(plist),"r");try{fs.fsyncSync(dfd);}finally{fs.closeSync(dfd);}safeLaunchAgentPath(plist);fs.chmodSync(plist,0o600);}catch(error){try{fs.unlinkSync(temp);}catch{}return {status:"ERROR",error_id:"MACOS-PLIST-COMMIT",mutations_performed:false,action,details:String(error.message||error)};} return {status:"PASS",mutations_performed:true,action,plist}; }
+  if(action==="install"||action==="repair") {
+    let capability;
+    try { capability=capabilityVerifier({state,home,platform}); }
+    catch(error) { return {status:"ERROR",error_id:"MACOS-NATIVE-CAPABILITY-VERIFY",mutations_performed:false,action,details:String(error.message||error)}; }
+    if(capability?.status!=="PASS" || capability.installation_id!==state.installation_id || capability.instance_path!==state.instance_root || !capability.helper_path || !path.isAbsolute(capability.helper_path) || path.dirname(capability.helper_path)!==path.join(capability.instance_path,"runtime","native","macos")) return {status:"ERROR",error_id:capability?.error_id||"MACOS-NATIVE-CAPABILITY-INVALID",mutations_performed:false,action,capability:{status:capability?.status||"ERROR",error_id:capability?.error_id||"MACOS-NATIVE-CAPABILITY-INVALID"}};
+    try{safeLaunchAgentPath(plist);}catch(error){return {status:"ERROR",error_id:"MACOS-PLIST-UNSAFE",mutations_performed:false,action,details:String(error.message||error)};} if(fs.existsSync(plist)&&action==="install"&&!state.plist_owned)return {status:"ERROR",error_id:"MACOS-PLIST-COLLISION",mutations_performed:false,action}; const temp=path.join(path.dirname(plist),`.${label}.${process.pid}.${crypto.randomUUID()}.tmp`); let fd; try{fd=fs.openSync(temp,"wx",0o600);fs.writeFileSync(fd,renderLaunchAgent({label,runnerPath:state.runner_path,instanceRoot:state.instance_root,nativeHelperPath:capability.helper_path,nativeProcessIdentity:true}));fs.fsyncSync(fd);}catch(error){try{if(fd!==undefined)fs.closeSync(fd);}catch{}try{fs.unlinkSync(temp);}catch{}return {status:"ERROR",error_id:"MACOS-PLIST-WRITE",mutations_performed:false,action,details:String(error.message||error)};}finally{if(fd!==undefined)try{fs.closeSync(fd);}catch{}} try{safeLaunchAgentPath(plist);if(fs.existsSync(plist)&&action==="install"&&!state.plist_owned)throw new Error("Unexpected existing LaunchAgent");fs.renameSync(temp,plist);const dfd=fs.openSync(path.dirname(plist),"r");try{fs.fsyncSync(dfd);}finally{fs.closeSync(dfd);}safeLaunchAgentPath(plist);fs.chmodSync(plist,0o600);}catch(error){try{fs.unlinkSync(temp);}catch{}return {status:"ERROR",error_id:"MACOS-PLIST-COMMIT",mutations_performed:false,action,details:String(error.message||error)};} return {status:"PASS",mutations_performed:true,action,plist}; }
   const result=commandRunner("launchctl",[action==="start"?"bootstrap":"bootout",`gui/${process.getuid?.()||0}`,plist]);
   if(!result.ok) return {status:"ERROR",mutations_performed:false,action,launchctl_state:"unknown",details:result.output};
   const after=commandRunner("launchctl",["print",`gui/${process.getuid?.()||0}/${label}`]);
