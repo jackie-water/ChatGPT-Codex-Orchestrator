@@ -78,6 +78,10 @@ function processStartIdentity(pid) {
   return null;
 }
 
+function fallbackReceiptLockIdentity() {
+  return `uncertain-${process.pid}-${crypto.randomBytes(12).toString("hex")}`;
+}
+
 function ownerLiveness({ pid, process_start_identity, kill = process.kill, identity = processStartIdentity }) {
   if (!Number.isInteger(pid) || pid <= 0 || typeof process_start_identity !== "string" || !process_start_identity) return "unknown";
   try { kill(pid, 0); }
@@ -134,7 +138,12 @@ export function updateMacosDurableStatus({ receiptPath, expected = ["ACCEPTED", 
     throw Object.assign(new Error("Receipt lock is held by a live writer"), { code: "RECEIPT_LOCK_CONTENTION" });
   }
   try {
-    const process_start_identity = processStartIdentity(process.pid);
+    let process_start_identity;
+    try { process_start_identity = processStartIdentity(process.pid); }
+    catch (error) {
+      if (!macosNativeProcessIdentityEnabled() || !String(error?.code || "").startsWith("NATIVE_PROCESS_IDENTITY_HELPER_UNAVAILABLE")) throw error;
+      process_start_identity = fallbackReceiptLockIdentity();
+    }
     if (!process_start_identity) throw Object.assign(new Error("Unable to establish receipt lock owner identity"), { code: "OWNER_IDENTITY_UNAVAILABLE" });
     fs.writeFileSync(fd, JSON.stringify({ version: 1, pid: process.pid, process_start_identity, locked_at_utc: new Date().toISOString() }) + "\n"); fs.fsyncSync(fd);
   }
@@ -163,6 +172,12 @@ export function reconcileMacosDurableWorker({ receiptPath, key }) {
     return receipt;
   }
   if (claim?.version !== 1 || claim.key !== key || !Number.isInteger(claim.pid) || claim.pid <= 0 || typeof claim.process_start_identity !== "string" || !claim.process_start_identity) fail("Malformed durable worker claim", "UNCERTAIN_STATE");
+  if (macosNativeProcessIdentityEnabled()) {
+    try { nativeProcessStartIdentity(claim.pid); }
+    catch (error) {
+      if (error?.code === "NATIVE_PROCESS_IDENTITY_HELPER_UNAVAILABLE") return updateMacosDurableStatus({ receiptPath, expected: ["ACCEPTED", "RUNNING"], patch: { status: "UNKNOWN", failure_code: "OWNER_IDENTITY_UNAVAILABLE" } });
+    }
+  }
   const claimState = ownerLiveness(claim);
   if (claimState === "live" || claimState === "unknown") return receipt;
   return updateMacosDurableStatus({ receiptPath, expected: ["ACCEPTED", "RUNNING"], patch: { status: "UNKNOWN", failure_code: "WORKER_ORPHANED" } });
@@ -191,6 +206,19 @@ export function submitMacosDurableIntent({ event, controlRoot, controlRepository
     if (candidate.identity.project === snapshot.identity.project && candidate.identity.issue === snapshot.identity.issue
       && candidate.identity.iteration === snapshot.identity.iteration && candidate.identity.review_route === snapshot.identity.review_route
       && candidate.key !== paths.key) fail("Conflicting durable intent exists", "AUTHORIZATION_CONFLICT");
+  }
+  let existing = false;
+  for (const file of [paths.intentPath, paths.receiptPath]) {
+    try { privateFile(file); existing = true; } catch (error) { if (error.code !== "ENOENT") throw error; }
+  }
+  if (existing) return readMacosDurableStatus({ snapshot, paths });
+  if (macosNativeProcessIdentityEnabled()) {
+    try { nativeProcessStartIdentity(process.pid); }
+    catch (error) {
+      throw Object.assign(new Error("Darwin native process identity preflight failed; no durable intent was accepted"), {
+        code: error?.code || "NATIVE_PROCESS_IDENTITY_PREFLIGHT_FAILED", cause: error
+      });
+    }
   }
   const intent = { version: 1, key: paths.key, kind: "MACOS_DURABLE_INTENT", created_at_utc: new Date().toISOString(),
     authorization_digest: snapshot.authorization_digest, authorized_snapshot: snapshot, identity: snapshot.identity, event,

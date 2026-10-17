@@ -43,7 +43,7 @@ The helper is intentionally source-only in this repository. It is not installed 
 
 `src/lib/macos-native-process-identity.mjs` is a pure parser/runner boundary. It accepts only a positive decimal PID, invokes the trusted helper with one fixed argv element, uses a finite timeout and fixed environment, and rejects extra output, wrong PIDs, unsafe numeric values, invalid microseconds, and all unknown statuses.
 
-The Darwin intake integration is opt-in through `ORCHESTRATOR_MACOS_PROCESS_IDENTITY=1`. With that flag, an absent or untrusted helper fails closed with an actionable `NATIVE_PROCESS_IDENTITY_HELPER_UNAVAILABLE`/owner-identity error; it never falls back silently or claims the owner is live. Without the flag, existing stable Darwin behavior is unchanged. Linux and Windows paths are not changed.
+The Darwin intake integration is opt-in through `ORCHESTRATOR_MACOS_NATIVE_PROCESS_IDENTITY=1`. With that flag, an absent, unreadable, invalid, or untrusted helper fails closed before a new intent is accepted with an actionable `NATIVE_PROCESS_IDENTITY_HELPER_UNAVAILABLE`/owner-identity error; it never falls back silently or claims the owner is live. If the helper disappears after acceptance, the worker/receipt recovery path records an actionable `UNKNOWN` outcome without rerunning Codex. Without the flag, existing stable Darwin behavior is unchanged. Linux and Windows paths are not changed.
 
 The existing durable rules remain authoritative: exact start-identity equality is required, PID reuse is ambiguous/not live, missing owner is dead only when the kernel reports `ESRCH`, permission denial is unknown, terminal receipt states are monotonic, claims and receipt locks remain exclusive, and an uncertain lock is never deleted as though it belonged to another owner.
 
@@ -56,7 +56,7 @@ The official macOS installer should add a prerequisite step before enabling any 
 3. Verify owner, regular-file status, non-writable group/other bits, and a recorded package/source digest.
 4. Run the helper against the installer process and one independently selected live PID; require full-schema success and distinct microsecond-capable identities.
 5. Persist an explicit capability result. If any check fails, keep legacy stable operation available but do not enable native identity, and surface an actionable status for the operator.
-6. Only after those checks should the official runtime opt into `ORCHESTRATOR_MACOS_PROCESS_IDENTITY=1`.
+6. Only after those checks should the official runtime opt into `ORCHESTRATOR_MACOS_NATIVE_PROCESS_IDENTITY=1`.
 
 This proposal is deliberately documented rather than applied: `Install.command`, `install.sh`, CI, and `AI_INSTALL.md` were not modified in this spike. The installer must preserve the existing explicit-route-v1, `PROJECT_DISABLED`, exact-SHA review, and user-approved merge gates.
 

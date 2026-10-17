@@ -7,6 +7,8 @@ const MAX_OUTPUT = 4096;
 const TIMEOUT_MS = 250;
 const PID_TEXT = /^[1-9][0-9]{0,9}$/;
 const DEFAULT_HELPER = fileURLToPath(new URL("../../runtime/native/macos/process-identity", import.meta.url));
+const ERRNO = Object.freeze({ EINVAL: 22, EPERM: 1, EACCES: 13, ESRCH: 3 });
+const EXIT = Object.freeze({ INVALID_PID: 64, SHORT_READ: 65, MISSING: 66, INVALID_TIMESTAMP: 69, UNEXPECTED_ERROR: 70, PERMISSION_DENIED: 77 });
 
 const result = (status, details = {}) => ({ status, ...details });
 
@@ -20,7 +22,20 @@ export function parseMacosNativeProcessIdentity(output, expectedPid) {
   if (!value || typeof value !== "object" || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) return result("MALFORMED_OUTPUT");
   if (value.status !== "OK") {
     const allowed = new Set(["INVALID_PID", "MISSING", "PERMISSION_DENIED", "SHORT_READ", "UNEXPECTED_ERROR", "INVALID_TIMESTAMP"]);
-    return allowed.has(value.status) && value.pid === expectedPid ? result(value.status, { errno: value.errno }) : result("MALFORMED_OUTPUT");
+    if (!allowed.has(value.status) || value.pid !== expectedPid) return result("MALFORMED_OUTPUT");
+    const keys = Object.keys(value).sort().join(",");
+    const errno = value.errno;
+    const expectedErrno = value.status === "INVALID_PID" ? ERRNO.EINVAL
+      : value.status === "MISSING" ? ERRNO.ESRCH
+        : value.status === "PERMISSION_DENIED" ? [ERRNO.EPERM, ERRNO.EACCES] : null;
+    const errnoValid = expectedErrno
+      ? (!Number.isInteger(errno) || (Array.isArray(expectedErrno) ? !expectedErrno.includes(errno) : errno !== expectedErrno))
+      : value.status === "UNEXPECTED_ERROR"
+        ? (!Number.isInteger(errno) || errno <= 0)
+        : (keys === "errno,pid,status" && errno !== 0);
+    if (keys !== "pid,status" && keys !== "errno,pid,status") return result("MALFORMED_OUTPUT");
+    if (errnoValid) return result("MALFORMED_OUTPUT");
+    return result(value.status, { errno: errno ?? 0 });
   }
   if (Object.keys(value).sort().join(",") !== "pid,start_sec,start_usec,status" || value.pid !== expectedPid
     || !Number.isSafeInteger(value.start_sec) || value.start_sec < 0
@@ -30,12 +45,29 @@ export function parseMacosNativeProcessIdentity(output, expectedPid) {
 
 function trustedHelper(file) {
   if (typeof file !== "string" || !path.isAbsolute(file)) return null;
+  const uid = typeof process.getuid === "function" ? process.getuid() : null;
+  const trustedOwner = st => uid === null || st.uid === uid || st.uid === 0;
+  const validateChain = (start, resolved) => {
+    let current = path.parse(start).root;
+    for (const part of start.slice(current.length).split(path.sep).filter(Boolean)) {
+      current = path.join(current, part);
+      let st;
+      try { st = fs.lstatSync(current); } catch { return false; }
+      if (!trustedOwner(st) || (st.isDirectory() && (st.mode & 0o022) !== 0)) return false;
+      if (st.isSymbolicLink()) {
+        let target;
+        try { target = fs.realpathSync(current); } catch { return false; }
+        if (!validateChain(target, target)) return false;
+      } else if (current !== start && !st.isDirectory()) return false;
+    }
+    return true;
+  };
   let resolved;
   try { resolved = fs.realpathSync(file); } catch { return null; }
+  if (!validateChain(file, resolved) || !validateChain(resolved, resolved)) return null;
   let stat;
-  try { stat = fs.statSync(resolved); } catch { return null; }
-  const uid = typeof process.getuid === "function" ? process.getuid() : null;
-  if (!stat.isFile() || (stat.mode & 0o111) === 0 || (stat.mode & 0o022) !== 0 || (uid !== null && stat.uid !== uid && stat.uid !== 0)) return null;
+  try { stat = fs.lstatSync(resolved); } catch { return null; }
+  if (!stat.isFile() || stat.nlink !== 1 || (stat.mode & 0o111) === 0 || (stat.mode & 0o022) !== 0 || !trustedOwner(stat)) return null;
   return resolved;
 }
 
@@ -61,7 +93,9 @@ export function readMacosNativeProcessIdentity(pid, { helperPath = process.env.O
   if (!child || child.error?.code === "ETIMEDOUT" || child.signal) return result("RUNNER_TIMEOUT");
   if (typeof child.stdout !== "string" || child.stdout.length > MAX_OUTPUT) return result("MALFORMED_OUTPUT");
   const parsed = parseMacosNativeProcessIdentity(child.stdout, pid);
-  if (parsed.status === "MALFORMED_OUTPUT" && child.status !== 0) return result("NATIVE_FAILURE", { exit_code: child.status });
+  if (parsed.status === "MALFORMED_OUTPUT") return result("NATIVE_FAILURE", { exit_code: child.status });
+  const expectedExit = parsed.status === "OK" ? 0 : EXIT[parsed.status];
+  if (!Number.isInteger(child.status) || child.status !== expectedExit) return result("NATIVE_FAILURE", { native_status: parsed.status, errno: parsed.errno, exit_code: child.status });
   return parsed;
 }
 
