@@ -34,7 +34,7 @@ function assertSecureTarget(fs, path, file) {
   return true;
 }
 
-function atomicWrite(fs, path, file, value) {
+function atomicWrite(fs, path, file, value, platform = process.platform) {
   const absolute = secureAncestors(fs, path, file);
   const dir = path.dirname(absolute);
   const temp = `${absolute}.${process.pid}.${crypto.randomBytes(8).toString("hex")}.tmp`;
@@ -47,13 +47,23 @@ function atomicWrite(fs, path, file, value) {
     fs.closeSync(fd);
     fd = undefined;
     fs.renameSync(temp, absolute);
-    const parentFd = fs.openSync(dir, fs.constants.O_RDONLY);
-    try { fs.fsyncSync(parentFd); } finally { fs.closeSync(parentFd); }
+    if (platform !== "win32") {
+      // POSIX directory fsync closes the rename durability window. Windows
+      // does not support opening a directory this way (EPERM/EISDIR); the
+      // file fsync and atomic rename above remain mandatory there, with this
+      // bounded directory-durability limitation.
+      const parentFd = fs.openSync(dir, fs.constants.O_RDONLY);
+      try { fs.fsyncSync(parentFd); } finally { fs.closeSync(parentFd); }
+    }
   } catch (error) {
     if (fd !== undefined) { try { fs.closeSync(fd); } catch {} }
     try { if (fs.existsSync(temp)) fs.unlinkSync(temp); } catch {}
     throw error;
   }
+}
+
+function sameFileIdentity(left, right) {
+  return typeof left?.dev === "number" && typeof left?.ino === "number" && left.dev === right.dev && left.ino === right.ino;
 }
 
 function acquireLock(fs, path, file, callbackId) {
@@ -88,6 +98,8 @@ function acquireLock(fs, path, file, callbackId) {
       if (stat.isSymbolicLink() || !stat.isFile()) throw new Error("Callback delivery lock was replaced");
       const current = JSON.parse(fs.readFileSync(lock, "utf8"));
       if (current.token !== token || current.pid !== process.pid) throw new Error("Callback delivery lock owner changed");
+      const opened = fs.fstatSync(fd);
+      if (!sameFileIdentity(opened, stat)) throw new Error("Callback delivery lock was replaced");
       fs.closeSync(fd);
       fs.unlinkSync(lock);
     } catch (error) {
@@ -97,7 +109,7 @@ function acquireLock(fs, path, file, callbackId) {
   };
 }
 
-export function createCallbackStateStore({file, expected, callbackId, message, fsModule, pathModule, expectedFingerprint = "", now = () => new Date().toISOString()}) {
+export function createCallbackStateStore({file, expected, callbackId, message, fsModule, pathModule, expectedFingerprint = "", now = () => new Date().toISOString(), platform = process.platform}) {
   const fs = fsModule;
   const path = pathModule;
   let currentFingerprint = expectedFingerprint;
@@ -118,7 +130,7 @@ export function createCallbackStateStore({file, expected, callbackId, message, f
     if (currentFingerprint && fingerprint() !== currentFingerprint) throw new Error("Callback state fingerprint changed");
     const current = read();
     const next = {...current, ...extra, routing_version:"explicit-route-v1", callback_id:callbackId || current.callback_id, chat_url:expected || current.chat_url, delivery_state:state, delivery_updated_at_utc:now()};
-    atomicWrite(fs, path, file, next);
+    atomicWrite(fs, path, file, next, platform);
     currentFingerprint = fingerprint();
     return currentFingerprint;
   };

@@ -60,6 +60,11 @@ function activeRunTitle(run) {
   return typeof run.display_title === "string" ? run.display_title : typeof run.displayTitle === "string" ? run.displayTitle : null;
 }
 function isIssueRun(run) { return String(run.event || "").toLowerCase() === "issues"; }
+function signedIssueNumber(run) {
+  const candidates = [run.issue_number, run.issueNumber, run.event_payload?.issue?.number, run.eventPayload?.issue?.number];
+  const match = candidates.find(value => Number.isInteger(Number(value)) && Number(value) > 0);
+  return match === undefined ? null : Number(match);
+}
 function isRegistrationRun(run, issue) {
   const title = activeRunTitle(run);
   const exactTitle = title !== null && title === issue.title;
@@ -106,6 +111,8 @@ function allRunners(repo) {
     if (payload.runners.length > total) fail("Actions runner page exceeds total_count; native intake refuses the race");
     for (const runner of payload.runners) {
       if (!runner || !Number.isInteger(Number(runner.id)) || Number(runner.id) < 1 || seen.has(Number(runner.id))) fail("Actions runner page has missing or duplicate identity; native intake refuses the race");
+      if (!['online', 'offline'].includes(String(runner.status || '').toLowerCase())) fail("Actions runner page has unknown status; native intake refuses the race");
+      if (!Array.isArray(runner.labels) || !runner.labels.length || runner.labels.some(label => !label || typeof label.name !== 'string' || !label.name)) fail("Actions runner page has missing or malformed labels; native intake refuses the race");
       seen.add(Number(runner.id));
       all.push(runner);
     }
@@ -118,20 +125,35 @@ function allRunners(repo) {
 function reconcileQueuedRegistration(repo, issue, instance) {
   const runs = allIssueRuns(repo);
   const relevant = runs.filter(run => active(run) && isIssueRun(run) && /orchestrator|register-chat/i.test(`${run.name || ""} ${run.workflow_name || run.workflowName || ""} ${run.path || ""}`));
+  const signedIssueTitleConflicts = relevant.filter(run => signedIssueNumber(run) === issue.number && !isRegistrationRun(run, issue));
+  if (signedIssueTitleConflicts.length) fail("An active Control Actions run has the same signed Issue number with a different title; registration refused without claiming or cancelling the run");
   const sameTitle = relevant.filter(run => isRegistrationRun(run, issue));
-  const unrelated = relevant.filter(run => !isRegistrationRun(run, issue));
+  const exact = sameTitle.filter(run => signedIssueNumber(run) === issue.number);
+  const unproven = sameTitle.filter(run => signedIssueNumber(run) === null);
+  const foreignIssue = sameTitle.filter(run => signedIssueNumber(run) !== null && signedIssueNumber(run) !== issue.number);
+  const unrelated = relevant.filter(run => !isRegistrationRun(run, issue) && signedIssueNumber(run) !== issue.number).concat(foreignIssue);
   if (unrelated.length) fail("Unexpected queued or active Control Actions run exists; registration refused without cancelling unrelated work");
   const runners = allRunners(repo);
-  const online = runners.filter(r => r.status === "online" && (instance.runner_label ? (r.labels || []).some(label => label.name === instance.runner_label) : (r.labels || []).some(label => label.name === "self-hosted")));
+  const expectedLabel = `codex-orchestrator-${instance.instance_id}`;
+  if (instance.runner_label && instance.runner_label !== expectedLabel) fail("Configured Control runner label is not the exact instance-scoped label");
+  const scoped = runners.filter(r => (r.labels || []).some(label => label.name === expectedLabel));
+  if (scoped.some(r => (r.labels || []).filter(label => label.name === expectedLabel).length !== 1 || (r.labels || []).some(label => label.name.startsWith("codex-orchestrator-") && label.name !== expectedLabel))) fail("Actions runner has an ambiguous instance-scoped label; native intake refuses the race");
+  if (scoped.some(r => String(r.status).toLowerCase() !== "offline")) fail("The configured Control runner is not proven offline; native intake refuses the race");
+  if (runners.length && !scoped.length) fail("Actions runner inventory has no exact instance-scoped label; native intake refuses the race");
+  const online = scoped.filter(r => String(r.status).toLowerCase() === "online");
   if (online.length) fail("The configured Control runner is online; native intake refuses the race");
-  if (!sameTitle.length) return "CONTROL_QUEUE_CLEAR";
-  const ids = sameTitle.map(run => run.id || run.databaseId).filter(id => Number.isInteger(Number(id)) && Number(id) > 0);
-  if (ids.length !== sameTitle.length) fail("Matching Actions run has no stable run ID; native intake refuses the race");
-  for (const run of sameTitle) {
+  if (!exact.length && !unproven.length) return "CONTROL_QUEUE_CLEAR";
+  const exactIds = exact.map(run => run.id || run.databaseId).filter(id => Number.isInteger(Number(id)) && Number(id) > 0);
+  const unprovenIds = unproven.map(run => run.id || run.databaseId).filter(id => Number.isInteger(Number(id)) && Number(id) > 0);
+  if (exactIds.length !== exact.length || unprovenIds.length !== unproven.length) fail("Matching Actions run has no stable run ID; native intake refuses the race");
+  for (const run of [...exact, ...unproven]) {
     const status = String(run.status || "").toLowerCase();
     if (!["queued", "waiting", "requested", "pending"].includes(status)) fail(`Registration Actions run is ${run.status}; native intake refuses the race`);
   }
-  return `CONTROL_QUEUE_UNRESOLVED run_id=${ids.join(",")} instruction="An authorized human must inspect this old queued registration run and explicitly decide cancellation or migration; native intake performed no GitHub mutation."`;
+  const messages = [];
+  if (exactIds.length) messages.push(`CONTROL_QUEUE_UNRESOLVED run_id=${exactIds.join(",")} instruction="An authorized human must inspect this exact Issue-owned queued registration run and explicitly decide cancellation or migration; native intake performed no GitHub mutation."`);
+  if (unprovenIds.length) messages.push(`CONTROL_QUEUE_UNPROVEN_CANDIDATE run_id=${unprovenIds.join(",")} warning="Legacy Actions metadata has no signed Issue number. Human reconciliation is required; native intake does not claim queue ownership or cancellation and does not block this local route on the title match."`);
+  return messages.join(" ");
 }
 
 function main() {
@@ -149,6 +171,7 @@ function main() {
   const projects = decodeContents(gh(["api", `repos/${repo}/contents/projects.json`]), "projects.json");
   const expectedRepoName = `chatgpt-codex-orchestrator-control-${instance.instance_id || ""}`;
   if (!ID.test(instance.instance_id || "") || repoEvidence.name !== expectedRepoName || (instance.control_repository && instance.control_repository.toLowerCase() !== repo.toLowerCase()) || (instance.trusted_github_username && instance.trusted_github_username !== args.trusted_github_username) || viewer.login !== issue.user.login || !projects.projects || typeof projects.projects !== "object") fail("Private Control metadata does not match the generated Control identity");
+  const action = reconcileQueuedRegistration(repo, issue, instance);
   const temp = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "codex-native-chat-register-"));
   try {
     fs.writeFileSync(path.join(temp, "instance.json"), JSON.stringify(instance));
@@ -168,7 +191,6 @@ function main() {
     }
     const trustedProof = delivery?.verified_by === "committed-user-turn" || delivery?.verified_by === "existing-user-message";
     if (delivery.delivery_state === "DELIVERED" && !trustedProof) fail("Local DELIVERED callback record lacks trusted user-role proof");
-    const action = reconcileQueuedRegistration(repo, issue, instance);
     if (args.deliver && delivery.delivery_state !== "DELIVERED") {
       const deliverChild = spawnSync(process.execPath, [...childArgs, "--deliver"], {env:process.env, encoding:"utf8"});
       if (deliverChild.stdout) process.stdout.write(deliverChild.stdout);
