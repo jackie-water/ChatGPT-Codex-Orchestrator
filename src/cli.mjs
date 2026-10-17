@@ -14,6 +14,7 @@ import { renderProjectInstructions } from "./lib/project-instructions.mjs";
 import { ensureInstallerChatRegistration, normalizeChatUrl } from "./lib/chat-registration.mjs";
 import { pendingCallbackCount, doctorHealth, repairHealth } from "./lib/runtime-health.mjs";
 import { macosPrerequisites, migrationPreflight, macosRuntimeAction, prepareMigrationIntent } from "./lib/macos-platform.mjs";
+import { diagnoseMacosControlRunnerReadiness } from "./lib/macos-control-runner-readiness.mjs";
 import {
   sandboxSmokeStatus,
   startSandboxSmoke,
@@ -782,13 +783,47 @@ function githubLogin() {
   emit({status:"PASS",preferred_language:lang,message:t(lang,"github_cli.login.success"),resume_command:"node src/cli.mjs resume --json"});
 }
 
+function macosRunnerReadiness(state, launchStatus) {
+  let control = {};
+  try {
+    const metadata = JSON.parse(fs.readFileSync(path.join(state.control_clone_path || "", "instance.json"), "utf8"));
+    control = { repository: metadata.control_repository, instance_id: metadata.instance_id };
+  } catch { /* diagnosis remains fail-closed */ }
+  const route = state.route_record || state.chat_route_record || (state.review_route ? {
+    status: state.route_status || "unknown",
+    project: state.project_key,
+    route: state.review_route
+  } : null);
+  return diagnoseMacosControlRunnerReadiness({
+    state,
+    observations: {
+      control,
+      workflow: state.workflow || { state: state.workflow_state || state.workflow_status, enabled: state.workflow_enabled },
+      runner: state.runner_registration || state.actions_runner,
+      launchAgent: {
+        label: state.launch_agent_label,
+        owned: launchStatus?.preflight?.inventory?.runner?.ownership === "OTHER_OR_CURRENT" && state.plist_owned === true,
+        loaded: launchStatus?.launchctl_state === "loaded",
+        ownership_conflict: launchStatus?.preflight?.inventory?.runner?.ownership === "OTHER"
+      },
+      route,
+      callback: state.callback_observation
+    }
+  });
+}
+
 function runtimeChecks(state) {
   if(process.platform==="darwin") {
     const result=macosRuntimeAction("status",{state});
+    const readiness=macosRunnerReadiness(state,result);
     return {control_repository:Boolean(state.control_repository),control_clone:Boolean(state.control_clone_path&&fs.existsSync(state.control_clone_path)),
-      project_clone:Boolean(state.project_clone_path&&fs.existsSync(state.project_clone_path)),runner_configured:Boolean(state.runner_path),
-      runner_running:Boolean(result.launchctl_state==="loaded"&&result.launchctl_checked===true&&result.preflight?.inventory?.runner?.ownership==="OTHER_OR_CURRENT"),reviewer_browser:false,
-      codex_authenticated:macosPrerequisites().session_auth,pending_callbacks:pendingCallbackCount(state),migration:result.status};
+      project_clone:Boolean(state.project_clone_path&&fs.existsSync(state.project_clone_path)),runner_configured:readiness.evidence.runner_configured,
+      runner_running:Boolean(readiness.evidence.control_repository_match&&readiness.evidence.instance_match&&
+        readiness.evidence.runner_configured&&readiness.evidence.runner_registration_match&&readiness.evidence.runner_inventory_fresh&&
+        readiness.evidence.runner_online&&readiness.evidence.launch_agent_owned&&readiness.evidence.launch_agent_loaded&&
+        readiness.evidence.workflow_fresh&&readiness.evidence.workflow_enabled),reviewer_browser:false,
+      codex_authenticated:macosPrerequisites().session_auth,pending_callbacks:pendingCallbackCount(state),migration:result.status,
+      macos_runner_readiness:readiness};
   }
   const pendingCallbacks=pendingCallbackCount(state);
 
@@ -839,7 +874,10 @@ function doctor() {
     reviewer_chat_configured:Boolean(state.reviewer_chat_url),
     ...runtimeChecks(state)
   };
-  if(process.platform==="darwin") checks.migration_preflight=migrationPreflight({state});
+  if(process.platform==="darwin") {
+    checks.migration_preflight=migrationPreflight({state});
+    checks.macos_runner_ready=checks.macos_runner_readiness?.status === "READY";
+  }
 
   let preflight=true;
   let preflightDetails=null;

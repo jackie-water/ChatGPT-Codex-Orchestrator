@@ -6,7 +6,7 @@ import { spawnSafeSync } from "./spawn-safe.mjs";
 import { canonicalInstallationId } from "./control-render.mjs";
 
 const HOME = () => process.env.HOME || os.homedir();
-const cmd = (name,args=[],options={}) => { const r=spawnSafeSync(name,args,{encoding:"utf8",...options}); return {ok:r.status===0, output:(r.stdout||r.stderr||"").trim()}; };
+const cmd = (name,args=[],options={}) => { const r=spawnSafeSync(name,args,{encoding:"utf8",timeout:2000,...options}); return {ok:r.status===0, output:(r.stdout||r.stderr||"").trim()}; };
 const owner = () => typeof process.getuid === "function" ? process.getuid() : null;
 const homeContained = value => {
   if(!value) return false;
