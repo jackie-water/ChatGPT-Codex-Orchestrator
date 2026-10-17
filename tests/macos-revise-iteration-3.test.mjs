@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { isOptionalPushurlQuery, normalizeOptionalPushurlResult, spawnSync as dispatcherSpawnSync, validateSandboxRemotes } from "../runtime/scripts/macos-dispatch.mjs";
 
 const cli = fs.readFileSync("src/cli.mjs", "utf8");
 const env = fs.readFileSync("src/lib/control-env.mjs", "utf8");
@@ -28,6 +29,69 @@ test("macOS dispatcher binds the enabled Sandbox to its configured private repos
   assert.match(dispatch, /config\",\"--get-all\",\"remote\.origin\.pushurl/);
   assert.match(dispatch, /fetch and effective push URLs do not exactly match/);
   assert.match(dispatch, /Sandbox fetch and effective push URLs do not exactly match the private configured repository/);
+});
+
+test("macOS dispatcher validates actual local Sandbox remotes and fails closed", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-macos-remotes-"));
+  const repo = path.join(root, "sandbox");
+  const expected = "trusted/sandbox-fixture";
+  const git = args => { const result = spawnSync("git", ["-C", repo, ...args], { encoding: "utf8" }); assert.equal(result.status, 0, result.stderr); return result; };
+  const makeRepo = () => { fs.mkdirSync(repo, { recursive: true }); assert.equal(spawnSync("git", ["-C", repo, "init", "-q"], { encoding: "utf8" }).status, 0); git(["remote", "add", "origin", `https://github.com/${expected}.git`]); };
+  const rejects = (fn, message) => assert.throws(fn, /Sandbox (?:fetch and effective push URLs|remote configuration)/, message);
+  try {
+    makeRepo();
+    const calls = [];
+    const observedExec = (command, args, options) => { calls.push([command, args]); assert.notEqual(command, "codex"); return dispatcherSpawnSync(command, args, options); };
+    assert.deepEqual(validateSandboxRemotes(repo, expected, observedExec).pushUrls, [`https://github.com/${expected}.git`]);
+    assert.deepEqual(calls.map(x => x[1].slice(2)), [["config", "--get-all", "remote.origin.url"], ["config", "--get-all", "remote.origin.pushurl"]]);
+    git(["config", "--add", "remote.origin.pushurl", `git@github.com:${expected}.git`]);
+    assert.equal(validateSandboxRemotes(repo, expected, observedExec).pushUrls.length, 1);
+
+    git(["config", "--unset-all", "remote.origin.pushurl"]);
+    git(["config", "--add", "remote.origin.pushurl", "https://github.com/wrong/repository.git"]);
+    rejects(() => validateSandboxRemotes(repo, expected), "wrong pushurl");
+    git(["config", "--add", "remote.origin.pushurl", `https://github.com/${expected}.git`]);
+    rejects(() => validateSandboxRemotes(repo, expected), "multiple pushurls");
+    git(["config", "--unset-all", "remote.origin.pushurl"]);
+    git(["config", "--add", "remote.origin.pushurl", "not-a-github-remote"]);
+    rejects(() => validateSandboxRemotes(repo, expected), "malformed pushurl");
+    git(["config", "--unset-all", "remote.origin.pushurl"]);
+    git(["config", "--add", "remote.origin.url", "https://github.com/other/repository.git"]);
+    rejects(() => validateSandboxRemotes(repo, expected), "wrong origin");
+    git(["config", "--unset-all", "remote.origin.url"]);
+    rejects(() => validateSandboxRemotes(repo, expected), "missing origin");
+    git(["config", "--add", "remote.origin.url", `https://github.com/${expected}.git`]);
+    git(["config", "--add", "remote.origin.url", `https://github.com/${expected}.git`]);
+    rejects(() => validateSandboxRemotes(repo, expected), "multiple origins");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("macOS dispatcher recognizes only the exact optional pushurl argv shape", () => {
+  const repo = "/isolated/home/.chatgpt-codex-orchestrator/instances/i/automation/sandbox-x";
+  assert.equal(isOptionalPushurlQuery("git", ["-C", repo, "config", "--get-all", "remote.origin.pushurl"]), true);
+  assert.equal(isOptionalPushurlQuery("git", ["config", "--get-all", "remote.origin.pushurl"]), false);
+  assert.equal(isOptionalPushurlQuery("git", ["-C", repo, "config", "--get-all", "remote.origin.pushurl", "extra"]), false);
+  assert.equal(isOptionalPushurlQuery("git", ["-C", "", "config", "--get-all", "remote.origin.pushurl"]), false);
+  assert.equal(isOptionalPushurlQuery("gh", ["-C", repo, "config", "--get-all", "remote.origin.pushurl"]), false);
+  const query = ["-C", repo, "config", "--get-all", "remote.origin.pushurl"];
+  assert.equal(normalizeOptionalPushurlResult("git", query, { status: 1, stdout: "", stderr: "" }).status, 0);
+  for (const result of [
+    { status: 1, stdout: "unexpected\n", stderr: "" },
+    { status: 1, stdout: "", stderr: "fatal\n" },
+    { status: 2, stdout: "", stderr: "" },
+    { status: null, stdout: "", stderr: "", error: new Error("spawn") },
+  ]) assert.notEqual(normalizeOptionalPushurlResult("git", query, result).status, 0);
+  assert.equal(normalizeOptionalPushurlResult("git", ["-C", repo, "config", "--get-all", "remote.origin.url"], { status: 1, stdout: "", stderr: "" }).status, 1);
+});
+
+test("macOS dispatcher rejects remote config status, stderr, and spawn failures", () => {
+  const repo = "/isolated/repo";
+  const good = (command, args) => ({ status: 0, stdout: args.at(-1) === "remote.origin.url" ? "https://github.com/trusted/sandbox-fixture.git\n" : "", stderr: "" });
+  for (const failure of [
+    { status: 2, stdout: "", stderr: "" },
+    { status: 0, stdout: "", stderr: "fatal\n" },
+    { status: null, stdout: "", stderr: "", error: new Error("spawn failed") },
+  ]) assert.throws(() => validateSandboxRemotes(repo, "trusted/sandbox-fixture", (command, args) => args.at(-1) === "remote.origin.url" ? failure : good(command, args)), /Sandbox remote configuration could not be read/);
 });
 
 test("Darwin CLI records exact post-creation GitHub authorization without inferring a Sandbox route", { skip: process.platform !== "darwin" }, () => {
