@@ -85,10 +85,10 @@ function fallbackReceiptLockIdentity() {
 function ownerLiveness({ pid, process_start_identity, kill = process.kill, identity = processStartIdentity }) {
   if (!Number.isInteger(pid) || pid <= 0 || typeof process_start_identity !== "string" || !process_start_identity) return "unknown";
   try { kill(pid, 0); }
-  catch (error) { return error?.code === "ESRCH" ? "dead" : "unknown"; }
+  catch (error) { return error?.code === "ESRCH" ? "orphan" : "unknown"; }
   try {
     const current = identity(pid);
-    return current === null ? "unknown" : current === process_start_identity ? "live" : "unknown";
+    return current === null ? "unknown" : current === process_start_identity ? "live" : "replaced";
   } catch { return "unknown"; }
 }
 
@@ -121,7 +121,7 @@ export function readMacosDurableStatus({ snapshot, paths = stateFilePaths(snapsh
   return safeReceipt(reconcileMacosDurableWorker({ receiptPath: paths.receiptPath, key: paths.key }), paths);
 }
 
-export function updateMacosDurableStatus({ receiptPath, expected = ["ACCEPTED", "RUNNING"], patch }) {
+export function updateMacosDurableStatus({ receiptPath, expected = ["ACCEPTED", "RUNNING"], patch, lockOwnerIdentity }) {
   const lockPath = `${receiptPath}.lock`; privateFile(lockPath, true);
   let fd;
   try { fd = fs.openSync(lockPath, "wx", 0o600); }
@@ -131,18 +131,20 @@ export function updateMacosDurableStatus({ receiptPath, expected = ["ACCEPTED", 
     try { lock = JSON.parse(fs.readFileSync(privateFile(lockPath), "utf8")); }
     catch { throw Object.assign(new Error("Receipt lock is active or uncertain"), { code: "RECEIPT_LOCK_CONTENTION" }); }
     const lockState = lock?.version === 1 ? ownerLiveness(lock) : "unknown";
-    if (lockState === "dead") {
+    if (lockState === "orphan") {
       try { fs.rmSync(lockPath); } catch (removeError) { if (removeError.code !== "ENOENT") throw removeError; }
       return updateMacosDurableStatus({ receiptPath, expected, patch: { status: "UNKNOWN", failure_code: "RECEIPT_LOCK_ORPHANED" } });
     }
     throw Object.assign(new Error("Receipt lock is held by a live writer"), { code: "RECEIPT_LOCK_CONTENTION" });
   }
   try {
-    let process_start_identity;
-    try { process_start_identity = processStartIdentity(process.pid); }
-    catch (error) {
-      if (!macosNativeProcessIdentityEnabled() || !String(error?.code || "").startsWith("NATIVE_PROCESS_IDENTITY_HELPER_UNAVAILABLE")) throw error;
-      process_start_identity = fallbackReceiptLockIdentity();
+    let process_start_identity = lockOwnerIdentity;
+    if (!process_start_identity) {
+      try { process_start_identity = processStartIdentity(process.pid); }
+      catch (error) {
+        if (!macosNativeProcessIdentityEnabled() || !String(error?.code || "").startsWith("NATIVE_PROCESS_IDENTITY_HELPER_UNAVAILABLE")) throw error;
+        process_start_identity = fallbackReceiptLockIdentity();
+      }
     }
     if (!process_start_identity) throw Object.assign(new Error("Unable to establish receipt lock owner identity"), { code: "OWNER_IDENTITY_UNAVAILABLE" });
     fs.writeFileSync(fd, JSON.stringify({ version: 1, pid: process.pid, process_start_identity, locked_at_utc: new Date().toISOString() }) + "\n"); fs.fsyncSync(fd);
@@ -175,12 +177,12 @@ export function reconcileMacosDurableWorker({ receiptPath, key }) {
   if (macosNativeProcessIdentityEnabled()) {
     try { nativeProcessStartIdentity(claim.pid); }
     catch (error) {
-      if (error?.code === "NATIVE_PROCESS_IDENTITY_HELPER_UNAVAILABLE") return updateMacosDurableStatus({ receiptPath, expected: ["ACCEPTED", "RUNNING"], patch: { status: "UNKNOWN", failure_code: "OWNER_IDENTITY_UNAVAILABLE" } });
+      if (error?.code === "NATIVE_PROCESS_IDENTITY_HELPER_UNAVAILABLE") return updateMacosDurableStatus({ receiptPath, expected: ["ACCEPTED", "RUNNING"], patch: { status: "UNKNOWN", failure_code: "OWNER_IDENTITY_UNAVAILABLE" }, lockOwnerIdentity: fallbackReceiptLockIdentity() });
     }
   }
   const claimState = ownerLiveness(claim);
   if (claimState === "live" || claimState === "unknown") return receipt;
-  return updateMacosDurableStatus({ receiptPath, expected: ["ACCEPTED", "RUNNING"], patch: { status: "UNKNOWN", failure_code: "WORKER_ORPHANED" } });
+  return updateMacosDurableStatus({ receiptPath, expected: ["ACCEPTED", "RUNNING"], patch: { status: "UNKNOWN", failure_code: claimState === "replaced" ? "WORKER_PID_REUSED" : "WORKER_ORPHANED" } });
 }
 
 export function claimMacosDurableWorker({ receiptPath, key }) {
@@ -213,7 +215,10 @@ export function submitMacosDurableIntent({ event, controlRoot, controlRepository
   }
   if (existing) return readMacosDurableStatus({ snapshot, paths });
   if (macosNativeProcessIdentityEnabled()) {
-    try { nativeProcessStartIdentity(process.pid); }
+    try {
+      const identity = nativeProcessStartIdentity(process.pid);
+      if (!identity) throw Object.assign(new Error("Darwin native process identity preflight returned no identity"), { code: "NATIVE_PROCESS_IDENTITY_MISSING" });
+    }
     catch (error) {
       throw Object.assign(new Error("Darwin native process identity preflight failed; no durable intent was accepted"), {
         code: error?.code || "NATIVE_PROCESS_IDENTITY_PREFLIGHT_FAILED", cause: error

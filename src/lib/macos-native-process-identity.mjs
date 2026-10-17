@@ -47,9 +47,10 @@ function trustedHelper(file) {
   if (typeof file !== "string" || !path.isAbsolute(file)) return null;
   const uid = typeof process.getuid === "function" ? process.getuid() : null;
   const trustedOwner = st => uid === null || st.uid === uid || st.uid === 0;
-  const validateChain = (start, resolved) => {
-    let current = path.parse(start).root;
-    for (const part of start.slice(current.length).split(path.sep).filter(Boolean)) {
+  const validateChain = start => {
+    const normalized = path.normalize(start);
+    let current = path.parse(normalized).root;
+    for (const part of normalized.slice(current.length).split(path.sep).filter(Boolean)) {
       current = path.join(current, part);
       let st;
       try { st = fs.lstatSync(current); } catch { return false; }
@@ -57,14 +58,27 @@ function trustedHelper(file) {
       if (st.isSymbolicLink()) {
         let target;
         try { target = fs.realpathSync(current); } catch { return false; }
-        if (!validateChain(target, target)) return false;
-      } else if (current !== start && !st.isDirectory()) return false;
+        if (!validateChain(target)) return false;
+      } else if (current !== normalized && !st.isDirectory()) return false;
+    }
+    return true;
+  };
+  const validateOriginalAncestors = original => {
+    const root = path.parse(original).root;
+    let current = root;
+    for (const part of original.slice(root.length).split(path.sep).filter(Boolean)) {
+      if (part === ".") continue;
+      const candidate = part === ".." ? path.dirname(current) : path.join(current, part);
+      let st;
+      try { st = fs.lstatSync(candidate); } catch { return false; }
+      if (!trustedOwner(st) || (st.isDirectory() && (st.mode & 0o022) !== 0)) return false;
+      current = candidate;
     }
     return true;
   };
   let resolved;
   try { resolved = fs.realpathSync(file); } catch { return null; }
-  if (!validateChain(file, resolved) || !validateChain(resolved, resolved)) return null;
+  if (!validateOriginalAncestors(file) || !validateChain(file) || !validateChain(resolved)) return null;
   let stat;
   try { stat = fs.lstatSync(resolved); } catch { return null; }
   if (!stat.isFile() || stat.nlink !== 1 || (stat.mode & 0o111) === 0 || (stat.mode & 0o022) !== 0 || !trustedOwner(stat)) return null;

@@ -141,10 +141,39 @@ test("duplicate tampered intent validates before reconciliation and does not mut
 });
 
 test("worker owner provenance distinguishes PID reuse, kernel-dead, and ambiguous owners", () => {
-  assert.equal(processOwnerLiveness({ pid: 123, process_start_identity: "old", kill: () => {}, identity: () => "new" }), "unknown");
-  assert.equal(processOwnerLiveness({ pid: 123, process_start_identity: "old", kill: () => { throw Object.assign(new Error(), { code: "ESRCH" }); }, identity: () => "old" }), "dead");
+  assert.equal(processOwnerLiveness({ pid: 123, process_start_identity: "old", kill: () => {}, identity: () => "new" }), "replaced");
+  assert.equal(processOwnerLiveness({ pid: 123, process_start_identity: "old", kill: () => { throw Object.assign(new Error(), { code: "ESRCH" }); }, identity: () => "old" }), "orphan");
   assert.equal(processOwnerLiveness({ pid: 123, process_start_identity: "old", kill: () => { throw Object.assign(new Error(), { code: "EPERM" }); }, identity: () => "old" }), "unknown");
   assert.equal(processOwnerLiveness({ pid: 123, kill: () => {} }), "unknown");
+});
+
+test("PID reuse reconciles to UNKNOWN without removing the replacement claim", () => {
+  const f = fixture();
+  try { withHome(f.home, () => {
+    const first = submitMacosDurableIntent({ ...f.args, event: f.event, spawnWorker: fakeSpawn([]) });
+    const claimPath = first.receipt_path.replace(".receipt.json", ".worker-claim");
+    write(claimPath, { version: 1, key: first.task_id, pid: process.pid, process_start_identity: "different-start-microseconds" });
+    const reconciled = reconcileMacosDurableWorker({ receiptPath: first.receipt_path, key: first.task_id });
+    assert.equal(reconciled.status, "UNKNOWN"); assert.equal(reconciled.failure_code, "WORKER_PID_REUSED");
+    assert.equal(fs.existsSync(claimPath), true);
+  }); } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("native MISSING own PID rejects before durable writes or worker spawn", { skip: process.platform !== "darwin" }, () => {
+  const f = fixture(), calls = [], oldFlag = process.env.ORCHESTRATOR_MACOS_NATIVE_PROCESS_IDENTITY;
+  const oldHelper = process.env.ORCHESTRATOR_MACOS_NATIVE_HELPER;
+  const helper = path.join(f.root, "missing-identity-helper");
+  fs.writeFileSync(helper, '#!/bin/sh\nprintf \'{"status":"MISSING","pid":%s,"errno":3}\\n\' "$1"\n', { mode: 0o700 });
+  process.env.ORCHESTRATOR_MACOS_NATIVE_PROCESS_IDENTITY = "1"; process.env.ORCHESTRATOR_MACOS_NATIVE_HELPER = helper;
+  try { withHome(f.home, () => {
+    assert.throws(() => submitMacosDurableIntent({ ...f.args, event: f.event, spawnWorker: fakeSpawn(calls) }), /preflight|identity|MISSING/i);
+    const dir = path.join(f.home, ".chatgpt-codex-orchestrator", "instances", "durable-test", "macos-durable-intake");
+    assert.equal(fs.readdirSync(dir).length, 0); assert.equal(calls.length, 0);
+  }); } finally {
+    if (oldFlag === undefined) delete process.env.ORCHESTRATOR_MACOS_NATIVE_PROCESS_IDENTITY; else process.env.ORCHESTRATOR_MACOS_NATIVE_PROCESS_IDENTITY = oldFlag;
+    if (oldHelper === undefined) delete process.env.ORCHESTRATOR_MACOS_NATIVE_HELPER; else process.env.ORCHESTRATOR_MACOS_NATIVE_HELPER = oldHelper;
+    fs.rmSync(f.root, { recursive: true, force: true });
+  }
 });
 
 test("RUNNING without a claim becomes UNKNOWN while ACCEPTED remains waiting", () => {

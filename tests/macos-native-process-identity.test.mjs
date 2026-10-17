@@ -51,6 +51,14 @@ test("malicious PID text cannot alter argv and runner is shell-free with bounded
   assert.equal(parseMacosNativeProcessIdentity(record(42, 9, 8), 42).status, "OK");
 });
 
+test("trusted helper accepts normalized absolute paths while checking lexical ancestors", () => {
+  const observed = readMacosNativeProcessIdentity(42, {
+    platform: "darwin", helperPath: "/bin/../bin/sh",
+    spawnSync: () => ({ status: 0, signal: null, stdout: record(42, 9, 8) })
+  });
+  assert.equal(observed.status, "OK");
+});
+
 test("missing native helper is actionable and never falls back to ps", () => {
   const observed = readMacosNativeProcessIdentity(42, { platform: "darwin", helperPath: "/private/tmp/no-such-process-identity-helper" });
   assert.equal(observed.status, "HELPER_UNAVAILABLE"); assert.match(observed.actionable, /Install/);
@@ -73,5 +81,6 @@ test("helper trust covers private ancestors, symlink targets, and target replace
     assert.equal(readMacosNativeProcessIdentity(42, { platform: "darwin", helperPath: link, spawnSync: spawn }).status, "HELPER_UNAVAILABLE");
     fs.chmodSync(unsafe, 0o777);
     assert.equal(readMacosNativeProcessIdentity(42, { platform: "darwin", helperPath: path.join(unsafe, "missing"), spawnSync: spawn }).status, "HELPER_UNAVAILABLE");
+    assert.equal(readMacosNativeProcessIdentity(42, { platform: "darwin", helperPath: path.join(unsafe, "..", "safe", "helper"), spawnSync: spawn }).status, "HELPER_UNAVAILABLE");
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
