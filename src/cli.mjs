@@ -9,7 +9,7 @@ import { t, normalizeLanguage } from "./lib/i18n.mjs";
 import { ERROR_CATALOG } from "./lib/errors.mjs";
 import { sanitizeObject } from "./lib/sanitize.mjs";
 import { submitDiagnosticReport } from "./lib/reporting.mjs";
-import { prepareControlEnvironment, activateTargetProject, upgradeControlEnvironment, refreshControlRuntime } from "./lib/control-env.mjs";
+import { prepareControlEnvironment, activateTargetProject, upgradeControlEnvironment, refreshControlRuntime, githubLogin as authenticatedGithubLogin } from "./lib/control-env.mjs";
 import { renderProjectInstructions } from "./lib/project-instructions.mjs";
 import { ensureInstallerChatRegistration, normalizeChatUrl } from "./lib/chat-registration.mjs";
 import { pendingCallbackCount, doctorHealth, repairHealth } from "./lib/runtime-health.mjs";
@@ -274,6 +274,7 @@ function runSetup() {
     if(!/^https:\/\/chatgpt\.com\//i.test(state.reviewer_chat_url)) return emit({status:"ERROR",error_id:"SETUP-006",recoverable:true,preferred_language:lang,message:"Reviewer Chat URL is invalid; no installation mutation was performed.",mutations_performed:false},1);
     state.installation_id ||= crypto.randomUUID();
     try {
+      state.github_login=authenticatedGithubLogin();
       const intent=prepareMigrationIntent({state,sourceRoot:process.cwd(),home:os.homedir()});
       state.migration_intent_path=intent.path;
       state.migration_intent_phase=intent.phase;
@@ -283,7 +284,7 @@ function runSetup() {
       return emit({status:"ERROR",error_id:"MACOS-MIGRATION-INTENT",recoverable:true,preferred_language:lang,message:"Durable macOS migration intent could not be prepared; no Control/Sandbox mutation was performed.",details:String(error.message||error),mutations_performed:false},1);
     }
     if(!state.control_environment_ready){
-      try { const control=prepareControlEnvironment({installationId:state.installation_id,targetRepository:state.target_repository,reviewerChatUrl:state.reviewer_chat_url,sourceRoot:process.cwd(),home:os.homedir()}); Object.assign(state,control,{control_environment_ready:true,routing_architecture:"explicit-route-v1",target_environment_ready:false,macos_rollback:{available:true,automatic:false,created_at:new Date().toISOString()}}); saveState(state); }
+      try { const control=prepareControlEnvironment({installationId:state.installation_id,targetRepository:state.target_repository,reviewerChatUrl:state.reviewer_chat_url,trustedGithubLogin:state.github_login,sourceRoot:process.cwd(),home:os.homedir()}); Object.assign(state,control,{control_environment_ready:true,routing_architecture:"explicit-route-v1",target_environment_ready:false,macos_rollback:{available:true,automatic:false,created_at:new Date().toISOString()}}); saveState(state); }
       catch(error){ state.last_error={error_id:"SETUP-011",message:String(error.message||error),at:new Date().toISOString()}; saveState(state); return emit({status:"ERROR",error_id:"SETUP-011",recoverable:true,preferred_language:lang,message:"Native macOS Control/Sandbox preparation failed; no runner or service was started.",details:String(error.message||error)},1); }
     }
     if(state.github_plugin_authorization_verified!==true || state.github_plugin_authorization_installation_id!==state.installation_id || state.github_plugin_authorization_control_repository!==state.control_repository || state.github_plugin_authorization_sandbox_repository!==state.sandbox_repository || state.github_plugin_authorization_chat_url!==state.reviewer_chat_url) return emit(action(state,"generated_repo_authorization","setup.generated_repo.connect",{repositories:[state.control_repository,state.sandbox_repository],chat_url:state.reviewer_chat_url,verification_requirement:"The controlling Chat must confirm access to these exact generated private repositories and record this exact current Chat URL; local gh status and boolean answers are not proof.",mutations_performed:true}));

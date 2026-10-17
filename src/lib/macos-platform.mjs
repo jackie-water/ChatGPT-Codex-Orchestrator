@@ -76,7 +76,9 @@ export function migrationIntentPath({home=HOME(),installationId}={}){
 }
 export function prepareMigrationIntent({state={},sourceRoot=process.cwd(),home=HOME()}={}){
   const id=String(state.installation_id||""); if(!id) throw new Error("installation_id is required; refusing timestamp fallback");
-  const target=String(state.target_repository||""), login=String(state.github_login||target.split("/")[0]||""), short=canonicalInstallationId(id);
+  const login=String(state.github_login||"");
+  if(!/^[A-Za-z0-9-]+$/.test(login)) throw new Error("Verified GitHub login is required; refusing to prepare migration intent");
+  const short=canonicalInstallationId(id);
   const instanceRoot=path.join(home,".chatgpt-codex-orchestrator","instances",short), source=gitInventory(sourceRoot), destination=gitInventory(instanceRoot);
   const callbackStates=Object.fromEntries(Object.entries(state)
     .filter(([key,value])=>/(callback|wake|route)/i.test(key)&&value!==undefined&&value!==null)
@@ -89,7 +91,7 @@ export function prepareMigrationIntent({state={},sourceRoot=process.cwd(),home=H
   const intent={schema_version:1,phase:"PREPARED",installation_id:id,generated_repositories:{control:`${login}/chatgpt-codex-orchestrator-control-${short}`,sandbox:`${login}/chatgpt-codex-orchestrator-sandbox-${short}`},source:{path:path.resolve(sourceRoot),git:source},destination:{path:instanceRoot,git:destination},exact_refs:{source_head:source.head,destination_head:destination.head||null},preservation:{source_status:source.status||"",destination_status:destination.status||"",registry,callback_states:callbackStates,codex_sessions:{home:codexHome,entries:sessions}},chat:{review_route:state.review_route||state.sandbox_review_route||null,callback_ids:[state.callback_id,state.sandbox_callback_id].filter(Boolean)},rollback:{available:true,automatic:false,no_reset_clean_delete:true,created_at:new Date().toISOString()},created_at:new Date().toISOString()};
   const file=migrationIntentPath({home,installationId:id});
   if(fs.existsSync(file)){const st=fs.lstatSync(file); if(st.isSymbolicLink()||(owner()!==null&&st.uid!==owner())||(st.mode&0o077)) throw new Error("Existing migration intent is unsafe or has unexpected ownership"); const prior=JSON.parse(fs.readFileSync(file,"utf8"));
-    const same=(prior.installation_id===id&&prior.phase==="PREPARED"&&prior.generated_repositories?.control===intent.generated_repositories.control&&prior.generated_repositories?.sandbox===intent.generated_repositories.sandbox&&prior.source?.path===intent.source.path&&prior.destination?.path===intent.destination.path&&prior.exact_refs?.source_head===intent.exact_refs.source_head&&prior.exact_refs?.destination_head===intent.exact_refs.destination_head&&prior.source?.git?.dirty_count===intent.source.git.dirty_count&&prior.destination?.git?.dirty_count===intent.destination.git.dirty_count);
+    const same=(prior.installation_id===id&&prior.phase==="PREPARED"&&prior.generated_repositories?.control===intent.generated_repositories.control&&prior.generated_repositories?.sandbox===intent.generated_repositories.sandbox&&prior.preservation?.registry?.target_repository===intent.preservation.registry.target_repository&&prior.source?.path===intent.source.path&&prior.destination?.path===intent.destination.path&&prior.exact_refs?.source_head===intent.exact_refs.source_head&&prior.exact_refs?.destination_head===intent.exact_refs.destination_head&&prior.source?.git?.dirty_count===intent.source.git.dirty_count&&prior.destination?.git?.dirty_count===intent.destination.git.dirty_count);
     if(!same) throw new Error("Existing migration intent identity or binding conflicts with this installation"); return {...prior,path:file};
   }
   atomicPrivateJson(file,intent); return {...intent,path:file};

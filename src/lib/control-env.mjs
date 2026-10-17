@@ -422,6 +422,7 @@ export function prepareControlEnvironment({
   installationId,
   targetRepository,
   reviewerChatUrl,
+  trustedGithubLogin,
   sourceRoot=process.cwd(),
   home=os.homedir()
 }){
@@ -429,6 +430,7 @@ export function prepareControlEnvironment({
   if(!/^https:\/\/chatgpt\.com\//i.test(reviewerChatUrl)) throw new Error("Invalid reviewer Chat URL");
 
   const login=githubLogin();
+  if(trustedGithubLogin && String(trustedGithubLogin)!==login) throw new Error("Authenticated GitHub identity changed; refusing to retarget generated repositories");
   const target=repositoryInfo(targetRepository);
   const projectKey=safeKey(String(targetRepository).split("/").pop());
   const paths=defaultLocalPaths({home,installationId,projectKey});

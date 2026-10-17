@@ -11,17 +11,25 @@ test("P3 migration intent uses the shared exact-eight identity and isolates inst
   const source=fs.mkdtempSync(path.join(os.tmpdir(),"orch-p3-source-"));
   const old=process.env.HOME; process.env.HOME=home;
   try {
-    const a={installation_id:"4f28a5e3-c801-4e2b-9c00-000000000001",target_repository:"owner/app"};
-    const b={installation_id:"9a77bc11-2222-4e2b-9c00-000000000002",target_repository:"owner/app"};
+    const a={installation_id:"4f28a5e3-c801-4e2b-9c00-000000000001",target_repository:"organization/app",github_login:"owner"};
+    const b={installation_id:"9a77bc11-2222-4e2b-9c00-000000000002",target_repository:"organization/app",github_login:"owner"};
     const ia=prepareMigrationIntent({home,sourceRoot:source,state:a});
     const ib=prepareMigrationIntent({home,sourceRoot:source,state:b});
     assert.equal(ia.path,migrationIntentPath({home,installationId:a.installation_id}));
     assert.notEqual(ia.path,ib.path);
     assert.match(ia.path,/instances\/4f28a5e3\/migration-intent\.json$/);
+    assert.equal(ia.generated_repositories.control,"owner/chatgpt-codex-orchestrator-control-4f28a5e3");
     assert.equal(defaultLocalPaths({home,installationId:a.installation_id,projectKey:"app"}).runner,
       path.join(home,"ChatGPTCodexOrchestrator","runner-4f28a5e3"));
     assert.deepEqual(prepareMigrationIntent({home,sourceRoot:source,state:a}).path,ia.path);
     assert.throws(()=>prepareMigrationIntent({home,sourceRoot:source,state:{...a,target_repository:"other/app"}}),/conflicts/);
+    assert.throws(()=>prepareMigrationIntent({home,sourceRoot:source,state:{...a,github_login:"other"}}),/conflicts/);
+    const missing={...a,installation_id:"missing-login"};
+    const invalid={...a,installation_id:"invalid-login",github_login:"not valid"};
+    assert.throws(()=>prepareMigrationIntent({home,sourceRoot:source,state:{...missing,github_login:""}}),/Verified GitHub login/);
+    assert.throws(()=>prepareMigrationIntent({home,sourceRoot:source,state:invalid}),/Verified GitHub login/);
+    assert.equal(fs.existsSync(migrationIntentPath({home,installationId:missing.installation_id})),false);
+    assert.equal(fs.existsSync(migrationIntentPath({home,installationId:invalid.installation_id})),false);
   } finally { if(old===undefined) delete process.env.HOME; else process.env.HOME=old; fs.rmSync(home,{recursive:true,force:true}); fs.rmSync(source,{recursive:true,force:true}); }
 });
 
@@ -31,7 +39,7 @@ test("P3 migration intent refuses a symlinked instance ancestor",()=>{
   fs.mkdirSync(home,{recursive:true});
   const old=process.env.HOME; process.env.HOME=home;
   try { fs.symlinkSync(os.tmpdir(),root);
-    assert.throws(()=>prepareMigrationIntent({home,sourceRoot:home,state:{installation_id:"abc-123",target_repository:"owner/app"}}),/unsafe|symlink/i);
+    assert.throws(()=>prepareMigrationIntent({home,sourceRoot:home,state:{installation_id:"abc-123",target_repository:"owner/app",github_login:"owner"}}),/unsafe|symlink/i);
   } finally { if(old===undefined) delete process.env.HOME; else process.env.HOME=old; fs.rmSync(home,{recursive:true,force:true}); }
 });
 
