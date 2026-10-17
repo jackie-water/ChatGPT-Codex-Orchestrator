@@ -18,6 +18,9 @@ function readPrivateJson(file, label) {
   } finally { fs.closeSync(fd); }
 }
 const intent = readPrivateJson(intentPath, "intent");
+const canonical = value => value === null || typeof value !== "object" ? JSON.stringify(value)
+  : Array.isArray(value) ? `[${value.map(canonical).join(",")}]`
+    : `{${Object.keys(value).sort().filter(k => value[k] !== undefined).map(k => `${JSON.stringify(k)}:${canonical(value[k])}`).join(",")}}`;
 const receiptPath = intentPath.replace(/\.intent\.json$/, ".receipt.json");
 const logPath = intentPath.replace(/\.intent\.json$/, ".worker.log");
 const eventPath = intentPath.replace(/\.intent\.json$/, ".event.json");
@@ -42,9 +45,9 @@ try {
   const replanned = planMacosCodexRun({ event: intent.event, controlRoot: intent.control_root, controlRepository: intent.control_repository, trustedGithubUsername: intent.trusted_github_username });
   const snapshot = getValidatedMacosCodexPlan(replanned); const exact = durablePaths(snapshot);
   if (path.resolve(exact.intentPath) !== intentPath || exact.key !== intent.key || intent.authorization_digest !== snapshot.authorization_digest
-    || JSON.stringify(intent.trusted_github_username) !== JSON.stringify(snapshot.trustedGithubUsername)
-    || JSON.stringify(intent.identity) !== JSON.stringify(snapshot.identity)
-    || JSON.stringify(intent.authorized_snapshot) !== JSON.stringify(snapshot)) throw Object.assign(new Error("Authorized intent binding changed"), { code: "AUTHORIZATION_CONFLICT" });
+    || canonical(intent.trusted_github_username) !== canonical(snapshot.trustedGithubUsername)
+    || canonical(intent.identity) !== canonical(snapshot.identity)
+    || canonical(intent.authorized_snapshot) !== canonical(snapshot)) throw Object.assign(new Error("Authorized intent binding changed"), { code: "AUTHORIZATION_CONFLICT" });
   if (!claimMacosDurableWorker({ receiptPath, key: intent.key })) process.exit(0);
   if (updateMacosDurableStatus({ receiptPath, expected: ["ACCEPTED"], patch: { status: "RUNNING", worker_pid: process.pid, started_at_utc: new Date().toISOString() } }).status !== "RUNNING") process.exit(0);
   const eventFd = fs.openSync(eventPath, "wx", 0o600);

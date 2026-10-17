@@ -53,6 +53,11 @@ function replaceJson(file, value) {
   const fd = fs.openSync(temp, "wx", 0o600); try { fs.writeFileSync(fd, JSON.stringify(value, null, 2) + "\n"); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
   fs.renameSync(temp, file); fs.chmodSync(file, 0o600); syncDir(dir);
 }
+function processIsLive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; }
+  catch (error) { return error.code === "EPERM"; }
+}
 function stateFilePaths(snapshot) {
   const dir = secureDir(path.join(snapshot.instance_root, "macos-durable-intake"));
   const key = digest({ instance_id: snapshot.instance_id, project: snapshot.identity.project, issue: snapshot.identity.issue,
@@ -78,14 +83,26 @@ export function readMacosDurableStatus({ snapshot, paths = stateFilePaths(snapsh
   catch (e) { if (e.code === "ENOENT") fail("Durable intent is partial or missing", "UNCERTAIN_STATE"); throw e; }
   validateRecord(intent, paths.key, "intent");
   if (intent.authorization_digest !== snapshot.authorization_digest || canonical(intent.identity) !== canonical(snapshot.identity)) fail("Durable intent authorization conflict", "AUTHORIZATION_CONFLICT");
-  return safeReceipt(receipt, paths);
+  return safeReceipt(reconcileMacosDurableWorker({ receiptPath: paths.receiptPath, key: paths.key }), paths);
 }
 
 export function updateMacosDurableStatus({ receiptPath, expected = ["ACCEPTED", "RUNNING"], patch }) {
   const lockPath = `${receiptPath}.lock`; privateFile(lockPath, true);
   let fd;
   try { fd = fs.openSync(lockPath, "wx", 0o600); }
-  catch (error) { if (error.code === "EEXIST") return read(privateFile(receiptPath)); throw error; }
+  catch (error) {
+    if (error.code !== "EEXIST") throw error;
+    let lock;
+    try { lock = JSON.parse(fs.readFileSync(privateFile(lockPath), "utf8")); }
+    catch { throw Object.assign(new Error("Receipt lock is active or uncertain"), { code: "RECEIPT_LOCK_CONTENTION" }); }
+    if (lock?.version !== 1 || !processIsLive(lock.pid)) {
+      try { fs.rmSync(lockPath); } catch (removeError) { if (removeError.code !== "ENOENT") throw removeError; }
+      return updateMacosDurableStatus({ receiptPath, expected, patch: { status: "UNKNOWN", failure_code: "RECEIPT_LOCK_ORPHANED" } });
+    }
+    throw Object.assign(new Error("Receipt lock is held by a live writer"), { code: "RECEIPT_LOCK_CONTENTION" });
+  }
+  try { fs.writeFileSync(fd, JSON.stringify({ version: 1, pid: process.pid, locked_at_utc: new Date().toISOString() }) + "\n"); fs.fsyncSync(fd); }
+  catch (error) { try { fs.closeSync(fd); } catch {} try { fs.rmSync(lockPath, { force: true }); } catch {} throw error; }
   try {
     const current = read(privateFile(receiptPath)); if (!STATES.has(current.status) || !expected.includes(current.status)) return current;
     const rank = { ACCEPTED: 0, RUNNING: 1, SUCCEEDED: 2, FAILED: 2, UNKNOWN: 2 };
@@ -95,11 +112,26 @@ export function updateMacosDurableStatus({ receiptPath, expected = ["ACCEPTED", 
   } finally { fs.closeSync(fd); fs.rmSync(lockPath, { force: true }); }
 }
 
+export function reconcileMacosDurableWorker({ receiptPath, key }) {
+  const claimPath = `${receiptPath.replace(/\.receipt\.json$/, "")}.worker-claim`;
+  let receipt;
+  try { receipt = read(privateFile(receiptPath)); }
+  catch (error) { if (error.code === "ENOENT") fail("Durable receipt is missing", "UNCERTAIN_STATE"); throw error; }
+  if (receipt.key !== key || !STATES.has(receipt.status)) fail("Malformed or conflicting durable receipt", "UNCERTAIN_STATE");
+  if (["SUCCEEDED", "FAILED", "UNKNOWN"].includes(receipt.status)) return receipt;
+  let claim;
+  try { claim = read(privateFile(claimPath)); }
+  catch (error) { if (error.code === "ENOENT") return receipt; throw error; }
+  if (claim?.version !== 1 || claim.key !== key || !Number.isInteger(claim.pid) || claim.pid <= 0) fail("Malformed durable worker claim", "UNCERTAIN_STATE");
+  if (processIsLive(claim.pid)) return receipt;
+  return updateMacosDurableStatus({ receiptPath, expected: ["ACCEPTED", "RUNNING"], patch: { status: "UNKNOWN", failure_code: "WORKER_ORPHANED" } });
+}
+
 export function claimMacosDurableWorker({ receiptPath, key }) {
   const claimPath = `${receiptPath.replace(/\.receipt\.json$/, "")}.worker-claim`;
   privateFile(claimPath, true);
   try { exclusiveJson(claimPath, { version: 1, key, pid: process.pid, claimed_at_utc: new Date().toISOString() }); return true; }
-  catch (error) { if (error.code === "EEXIST") return false; throw error; }
+  catch (error) { if (error.code === "EEXIST") { reconcileMacosDurableWorker({ receiptPath, key }); return false; } throw error; }
 }
 
 export function submitMacosDurableIntent({ event, controlRoot, controlRepository, trustedGithubUsername, timeoutMs = 300000, workerPath = WORKER, spawnWorker = nativeSpawn }) {
@@ -125,6 +157,7 @@ export function submitMacosDurableIntent({ event, controlRoot, controlRepository
       updated_at_utc: new Date().toISOString(), pid: null });
   } catch (e) {
     if (e.code !== "EEXIST") throw Object.assign(e, { code: "DURABILITY_FAILED" });
+    reconcileMacosDurableWorker({ receiptPath: paths.receiptPath, key: paths.key });
     return readMacosDurableStatus({ snapshot, paths });
   }
   let child;
@@ -145,4 +178,5 @@ export function submitMacosDurableIntent({ event, controlRoot, controlRepository
 export const redactLog = value => String(value || "").slice(0, MAX_LOG)
   .replace(/\b(?:github_pat_|gh[opusr]_)[A-Za-z0-9_]+/gi, "[REDACTED]")
   .replace(/((?:authorization\s*:\s*)?(?:bearer|token)\s+)[A-Za-z0-9._~+/=-]+/gi, "$1[REDACTED]")
-  .replace(/((?:api[_-]?key|secret|token|password|prompt)\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\r\n,}\]]+?)(?=(?:\s+(?:api[_-]?key|secret|token|password|prompt)\s*[:=])|[,}\]]|$)/gi, "$1[REDACTED]");
+  .replace(/((?:api[_-]?key|secret|token|password|prompt)\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\r\n,}\]]+?)(?=(?:\r\n|\n|\r|\s+(?:api[_-]?key|secret|token|password|prompt)\s*[:=]|[,}\]]|$))/gi, "$1[REDACTED]")
+  .slice(0, MAX_LOG);

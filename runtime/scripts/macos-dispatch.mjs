@@ -19,10 +19,14 @@ export function validateSandboxRemotes(repo,expected,exec=spawnSync){
 import { planMacosCodexRun, getValidatedMacosCodexPlan, recordMacosPreflightFailure } from "../../src/lib/macos-codex-run-contract.mjs";
 import { executeMacosCodexRun } from "../../src/lib/macos-codex-execution.mjs";
 import { finalizeMacosCodexRun } from "../../src/lib/macos-postexecution-wrapper.mjs";
-export function parseArgs(){const out={};for(let i=2;i<process.argv.length;i++){const k=process.argv[i];if(!["--event-path","--control-root","--control-repository","--trusted-github-usernames","--timeout-ms"].includes(k)||out[k])throw Error("Invalid argument");out[k]=process.argv[++i];if(!out[k]||out[k].startsWith("--"))throw Error("Missing argument value");}return out;}
+export function parseArgs(){const out={};for(let i=2;i<process.argv.length;i++){const k=process.argv[i];if(!["--event-path","--control-root","--control-repository","--trusted-github-username","--trusted-github-usernames","--timeout-ms"].includes(k)||out[k])throw Error("Invalid argument");out[k]=process.argv[++i];if(!out[k]||out[k].startsWith("--"))throw Error("Missing argument value");}if(out["--trusted-github-username"]!==undefined&&out["--trusted-github-usernames"]!==undefined)throw Error("Ambiguous trusted username arguments");return out;}
+export function parseTrustedUsernames(args){
+if(args["--trusted-github-username"]!==undefined){if(!/^[A-Za-z0-9-]+$/.test(args["--trusted-github-username"]))throw Error("Trusted username must be a validated username");return [args["--trusted-github-username"]];}
+if(!args["--trusted-github-usernames"])throw Error("Missing --trusted-github-usernames");let trusted;try{trusted=JSON.parse(args["--trusted-github-usernames"]);}catch{throw Error("Trusted usernames must be JSON array");}if(!Array.isArray(trusted)||trusted.length===0||trusted.some(x=>typeof x!=="string"||!/^[A-Za-z0-9-]+$/.test(x))||new Set(trusted).size!==trusted.length)throw Error("Trusted usernames must be a unique validated array");return trusted;
+}
 async function main(){
-const a=parseArgs();for(const k of ["--event-path","--control-root","--control-repository","--trusted-github-usernames"])if(!a[k])throw Error(`Missing ${k}`);
-let trusted;try{trusted=JSON.parse(a["--trusted-github-usernames"]);}catch{throw Error("Trusted usernames must be JSON array");}if(!Array.isArray(trusted)||trusted.length===0||trusted.some(x=>typeof x!=="string"||!/^[A-Za-z0-9-]+$/.test(x))||new Set(trusted).size!==trusted.length)throw Error("Trusted usernames must be a unique validated array");
+const a=parseArgs();for(const k of ["--event-path","--control-root","--control-repository"])if(!a[k])throw Error(`Missing ${k}`);
+const trusted=parseTrustedUsernames(a);
 const event=JSON.parse(fs.readFileSync(a["--event-path"],"utf8").replace(/^\uFEFF/,""));const registry=JSON.parse(fs.readFileSync(path.join(a["--control-root"],"projects.json"),"utf8"));
 const metadata=JSON.parse(fs.readFileSync(path.join(a["--control-root"],"instance.json"),"utf8"));if(!metadata.trusted_github_username||!trusted.includes(metadata.trusted_github_username)||!metadata.instance_id)throw Error("Static trusted identity is missing or mismatched");
 const home=process.env.HOME||process.env.USERPROFILE;if(!home)throw Error("HOME is required");const codex=spawnSync("which",["codex"],{encoding:"utf8"}).stdout.trim();if(!codex||codex.includes("\n"))throw Error("Expected Codex executable is unavailable");
