@@ -1,0 +1,41 @@
+name: ChatGPT Codex Orchestrator (macOS)
+on:
+  issues:
+    types: [opened]
+concurrency:
+  group: chatgpt-codex-orchestrator
+  queue: max
+permissions:
+  contents: read
+  issues: read
+jobs:
+  register-chat:
+    if: startsWith(github.event.issue.title, '[CHAT-REGISTER]')
+    runs-on: [self-hosted, macOS, {{RUNNER_ARCH}}, {{RUNNER_LABEL}}]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Register explicit Chat callback route
+        env:
+          CODEX_EVENT_PATH: ${{ github.event_path }}
+        run: node scripts/register-chat.mjs --event-path "$CODEX_EVENT_PATH" --control-root "$GITHUB_WORKSPACE" --trusted-github-username "{{TRUSTED_GITHUB_USERNAME}}"
+  run-codex:
+    if: startsWith(github.event.issue.title, '[CODEX-RUN]')
+    runs-on: [self-hosted, macOS, {{RUNNER_ARCH}}, {{RUNNER_LABEL}}]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Execute native Codex run and finalize
+        env:
+          CODEX_EVENT_PATH: ${{ github.event_path }}
+        run: node scripts/macos-dispatch.mjs --event-path "$CODEX_EVENT_PATH" --control-root "$GITHUB_WORKSPACE" --control-repository "${{ github.repository }}" --trusted-github-username "{{TRUSTED_GITHUB_USERNAME}}"
+  code-review:
+    if: startsWith(github.event.issue.title, '[CODE-REVIEW]')
+    runs-on: [self-hosted, macOS, {{RUNNER_ARCH}}, {{RUNNER_LABEL}}]
+    steps:
+      - uses: actions/checkout@v4
+      - run: node scripts/macos-code-review.mjs
+  merge-approved:
+    if: startsWith(github.event.issue.title, '[MERGE-APPROVE]')
+    runs-on: [self-hosted, macOS, {{RUNNER_ARCH}}, {{RUNNER_LABEL}}]
+    steps:
+      - uses: actions/checkout@v4
+      - run: node scripts/macos-merge-approved.mjs

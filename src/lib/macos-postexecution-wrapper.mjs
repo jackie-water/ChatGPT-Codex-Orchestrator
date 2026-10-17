@@ -27,6 +27,52 @@ function safePath(value, missing = false) {
   return absolute;
 }
 function exists(file) { try { fs.lstatSync(file); return true; } catch (e) { if (e.code === "ENOENT") return false; throw e; } }
+function expectedBrowserPort(instanceId) {
+  const hex = String(instanceId).replace(/[^0-9a-f]/gi, "").slice(0, 6);
+  const n = Number.parseInt(hex || "0", 16);
+  return 10000 + (Number.isFinite(n) ? n % 40000 : 0);
+}
+function psValue(line, name) {
+  const match = line.match(new RegExp(`^\\$env:${name} = '((?:''|[^'])*)'$`));
+  if (!match) throw problem("INVALID_INSTANCE_CONFIG");
+  return match[1].replaceAll("''", "'");
+}
+export function verifiedBrowserBinding(snapshot) {
+  const root = safePath(snapshot.instance_root);
+  const config = safePath(path.join(root, "config.ps1"));
+  const routeFile = safePath(path.join(root, "chat-routes.json"));
+  const lines = privateFile(config).toString("utf8").split(/\r?\n/).filter(Boolean);
+  const fields = new Map();
+  for (const line of lines) {
+    if (!line.startsWith("$env:")) continue;
+    const match = line.match(/^\$env:([A-Z0-9_]+) = '/);
+    if (!match || fields.has(match[1])) throw problem("INVALID_INSTANCE_CONFIG");
+    fields.set(match[1], psValue(line, match[1]));
+  }
+  const expectedProfile = path.join(root, "browser-profile");
+  const expected = {
+    ORCHESTRATOR_INSTANCE_ID: `runner-${snapshot.instance_id}`,
+    ORCHESTRATOR_BROWSER_DEBUG_PORT: String(expectedBrowserPort(snapshot.instance_id)),
+    ORCHESTRATOR_BROWSER_PROFILE: expectedProfile,
+    CODEX_CHAT_ROUTE_FILE: routeFile
+  };
+  for (const [key, value] of Object.entries(expected)) if (fields.get(key) !== value) throw problem("INSTANCE_CONFIG_MISMATCH");
+  const port = Number(fields.get("ORCHESTRATOR_BROWSER_DEBUG_PORT"));
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw problem("INVALID_BROWSER_PORT");
+  const routes = JSON.parse(privateFile(routeFile).toString("utf8"));
+  if (!Array.isArray(routes.routes)) throw problem("ROUTE_FILE_MISMATCH");
+  const routeKeyMatches = routes.routes.filter(record => record?.route === snapshot.plan.review_route);
+  const matches = routeKeyMatches.filter(record => record?.project === snapshot.plan.project
+    && record?.status === "active" && record?.chat_url === snapshot.authorization.chat_url);
+  if (routeKeyMatches.length !== 1 || matches.length !== 1) throw problem("ROUTE_FILE_MISMATCH");
+  return { port, profile: expectedProfile, instanceId: `runner-${snapshot.instance_id}` };
+}
+export function attemptMacosChatDelivery(snapshot, callback, spawnWake = childProcess.spawnSync) {
+  if(!callback?.callback_id || callback.callback_state === "DELIVERED") return callback;
+  const file=path.join(snapshot.instance_root,"pending-wakes",`${callback.callback_id}.json`);
+  const wake=path.join(snapshot.controlRoot,"scripts","wake-chat.mjs");
+  try { const stored=JSON.parse(fs.readFileSync(file,"utf8")); if(stored.callback_id!==callback.callback_id||stored.chat_url!==snapshot.authorization.chat_url)throw problem("CALLBACK_IDENTITY_CONFLICT"); const binding=verifiedBrowserBinding(snapshot); const reconcileOnly=stored.delivery_state!=="PENDING"; spawnWake(process.execPath,[wake,stored.message],{encoding:"utf8",timeout:95000,env:{...process.env,ORCHESTRATOR_CHAT_URL:snapshot.authorization.chat_url,ORCHESTRATOR_BROWSER_DEBUG_PORT:String(binding.port),ORCHESTRATOR_BROWSER_PROFILE:binding.profile,ORCHESTRATOR_INSTANCE_ID:binding.instanceId,CODEX_CALLBACK_ID:callback.callback_id,CODEX_CALLBACK_STATE_FILE:file,CODEX_CALLBACK_EXPECTED_FINGERPRINT:digest(fs.readFileSync(file)),...(reconcileOnly?{CODEX_RECONCILE_ONLY:"1"}:{})}}); const final=JSON.parse(fs.readFileSync(file,"utf8")); const delivered=final.callback_id===callback.callback_id&&final.chat_url===snapshot.authorization.chat_url&&final.delivery_state==="DELIVERED"&&hasTrustedDeliveryProof(final); const callbackState=delivered?"DELIVERED":final.delivery_state==="DELIVERED"?"PENDING":final.delivery_state; return {callback_id:callback.callback_id,callback_state:callbackState,delivery_status:delivered?"DELIVERED":"PENDING"}; } catch { return {...callback,delivery_status:"PENDING"}; }
+}
 function directory(dir) {
   safePath(dir, true);
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -307,7 +353,7 @@ export async function finalizeMacosCodexRun({ planned, repoPath, controlRoot, tr
         exactReport(git, data.checkpoint_commit, data.checkpoint_path, data.report);
         const allowCreate = data.phase !== "COMPLETE" && !data.callback_id;
         save({ phase: "PUBLISHED" });
-        const callback = queueCallback(snapshot, data, allowCreate);
+        const callback = attemptMacosChatDelivery(snapshot, queueCallback(snapshot, data, allowCreate));
         save({ phase: "COMPLETE", execution_state: "READY_FOR_REVIEW", state: "READY_FOR_REVIEW", ...callback });
         return data;
       }
@@ -377,7 +423,7 @@ export async function finalizeMacosCodexRun({ planned, repoPath, controlRoot, tr
     publicationGuard();
     if (remoteHead(git, plan.checkpoint_branch) !== coordinates.checkpoint_commit) throw problem("CHECKPOINT_PUBLICATION_DRIFT");
     save({ ...coordinates, phase: "PUBLISHED" });
-    const callback = queueCallback(snapshot, data);
+    const callback = attemptMacosChatDelivery(snapshot, queueCallback(snapshot, data));
     save({ ...callback, phase: "COMPLETE", execution_state: "READY_FOR_REVIEW", state: "READY_FOR_REVIEW" });
     return data;
   } catch (error) {

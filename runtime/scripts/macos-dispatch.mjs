@@ -1,0 +1,31 @@
+#!/usr/bin/env node
+import fs from "node:fs";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
+import { spawnSync as nativeSpawnSync } from "node:child_process";
+const OPTIONAL_PUSHURL_QUERY="remote.origin.pushurl";
+export const isOptionalPushurlQuery=(command,args)=>command==="git"&&Array.isArray(args)&&args.length===5&&args[0]==="-C"&&typeof args[1]==="string"&&args[1].length>0&&args[2]==="config"&&args[3]==="--get-all"&&args[4]===OPTIONAL_PUSHURL_QUERY;
+export const normalizeOptionalPushurlResult=(command,args,result)=>isOptionalPushurlQuery(command,args)&&result.status===1&&(result.stdout||"")===""&&(result.stderr||"")===""?{...result,status:0}:result;
+export const spawnSync=(command,args,options)=>normalizeOptionalPushurlResult(command,args,nativeSpawnSync(command,args,options));
+const normalizeRemote=value=>{const m=String(value||"").trim().match(/^(?:https:\/\/github\.com\/|git@github\.com:)([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\.git)?\/?$/i);return m?.[1].toLowerCase()||null;};
+export function validateSandboxRemotes(repo,expected,exec=spawnSync){
+  const read=(args,optional=false)=>{const full=["-C",repo,...args];const result=optional?normalizeOptionalPushurlResult("git",full,exec("git",full,{encoding:"utf8"})):exec("git",full,{encoding:"utf8"});if(result?.error||result?.status!==0||(result?.stdout||"")!==""&&typeof result?.stdout!=="string"||result?.stderr!=="")throw Error("Sandbox remote configuration could not be read");return (result.stdout||"").split(/\r?\n/).map(x=>x.trim()).filter(Boolean);};
+  const fetchUrls=read(["config","--get-all","remote.origin.url"]);
+  const configuredPushUrls=read(["config","--get-all","remote.origin.pushurl"],true);
+  const pushUrls=configuredPushUrls.length?configuredPushUrls:fetchUrls;
+  if(fetchUrls.length!==1||normalizeRemote(fetchUrls[0])!==String(expected).toLowerCase()||pushUrls.length!==1||normalizeRemote(pushUrls[0])!==String(expected).toLowerCase())throw Error("Sandbox fetch and effective push URLs do not exactly match the private configured repository");
+  return {fetchUrls,pushUrls};
+}
+import { planMacosCodexRun, getValidatedMacosCodexPlan, recordMacosPreflightFailure } from "../../src/lib/macos-codex-run-contract.mjs";
+import { executeMacosCodexRun } from "../../src/lib/macos-codex-execution.mjs";
+import { finalizeMacosCodexRun } from "../../src/lib/macos-postexecution-wrapper.mjs";
+export function parseArgs(){const out={};for(let i=2;i<process.argv.length;i++){const k=process.argv[i];if(!["--event-path","--control-root","--control-repository","--trusted-github-username"].includes(k)||out[k])throw Error("Invalid argument");out[k]=process.argv[++i];if(!out[k]||out[k].startsWith("--"))throw Error("Missing argument value");}return out;}
+async function main(){
+const a=parseArgs();for(const k of ["--event-path","--control-root","--control-repository","--trusted-github-username"])if(!a[k])throw Error(`Missing ${k}`);
+const event=JSON.parse(fs.readFileSync(a["--event-path"],"utf8").replace(/^\uFEFF/,""));const registry=JSON.parse(fs.readFileSync(path.join(a["--control-root"],"projects.json"),"utf8"));
+const metadata=JSON.parse(fs.readFileSync(path.join(a["--control-root"],"instance.json"),"utf8"));if(metadata.trusted_github_username!==a["--trusted-github-username"]||!metadata.instance_id)throw Error("Static trusted identity is missing or mismatched");
+const home=process.env.HOME||process.env.USERPROFILE;if(!home)throw Error("HOME is required");const codex=spawnSync("which",["codex"],{encoding:"utf8"}).stdout.trim();if(!codex||codex.includes("\n"))throw Error("Expected Codex executable is unavailable");
+const trusted=[a["--trusted-github-username"]];const planned=planMacosCodexRun({event,controlRoot:a["--control-root"],controlRepository:a["--control-repository"],trustedGithubUsername:trusted});const failPreflight=(message)=>{try{recordMacosPreflightFailure({planned,controlRoot:a["--control-root"],trustedGithubUsername:trusted,code:"MACOS_PRIVATE_PREFLIGHT"});}catch{}throw Error(message);};const expected=String(planned.plan.repository).toLowerCase();const projectKey=planned.plan.project;const project=registry.projects?.[projectKey];if(!project?.enabled||!project.local_path_key||!/^sandbox-[a-z0-9-]+$/.test(projectKey))failPreflight("Only the enabled private Sandbox project may execute before target activation");if(project.repository!==planned.plan.repository)failPreflight("Event project does not match the enabled Sandbox mapping");if(metadata.instance_id!==planned.normalized.context.instance_id)failPreflight("Control instance metadata does not match the authorized event");if(Object.values(registry.projects||{}).some(x=>x!==project&&x.enabled===true))failPreflight("Target project is enabled unexpectedly");const instanceRoot=path.join(home,".chatgpt-codex-orchestrator","instances",metadata.instance_id);const automationRoot=path.join(instanceRoot,"automation");const repo=path.join(automationRoot,project.local_path_key);let resolvedRoot,resolvedRepo;try{resolvedRoot=fs.realpathSync(automationRoot);resolvedRepo=fs.realpathSync(repo);}catch{failPreflight("Sandbox clone or private automation path is unavailable");}if(resolvedRepo!==resolvedRoot&&!resolvedRepo.startsWith(resolvedRoot+path.sep))failPreflight("Sandbox clone is outside the authorized instance automation root");try{validateSandboxRemotes(repo,expected);}catch(error){failPreflight(error.message);}const executed=await executeMacosCodexRun({planned,repoPath:repo,codexExecutable:codex,controlRoot:a["--control-root"],trustedGithubUsername:trusted});
+if(executed?.execution_state!=="EXECUTED_UNVALIDATED"){console.log(JSON.stringify(executed));process.exitCode=1;}else{const finalized=await finalizeMacosCodexRun({planned,repoPath:repo,controlRoot:a["--control-root"],trustedGithubUsername:trusted});console.log(JSON.stringify(finalized));if(finalized?.state!=="READY_FOR_REVIEW")process.exitCode=1;}
+}
+if (import.meta.url === pathToFileURL(process.argv[1]).href) main().catch(error=>{console.error(error.message);process.exitCode=1;});

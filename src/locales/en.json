@@ -66,4 +66,5 @@
   "setup.routing_upgrade.failed": "The existing installation could not be upgraded to explicit Chat routing. No fallback Chat will be used; repair this upgrade before continuing.",
   "runtime.refresh.success": "Control runtime refresh completed.",
   "runtime.refresh.failed": "Control runtime refresh was not completed."
+  ,"setup.macos.approval": "macOS preflight passed. Approve the native setup step before any instance or LaunchAgent mutation."
 }

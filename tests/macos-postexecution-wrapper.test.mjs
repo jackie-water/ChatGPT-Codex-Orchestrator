@@ -7,7 +7,8 @@ import crypto from "node:crypto";
 import childProcess from "node:child_process";
 import { planMacosCodexRun, getValidatedMacosCodexPlan } from "../src/lib/macos-codex-run-contract.mjs";
 import { executeMacosCodexRun } from "../src/lib/macos-codex-execution.mjs";
-import { finalizeMacosCodexRun } from "../src/lib/macos-postexecution-wrapper.mjs";
+import { finalizeMacosCodexRun, verifiedBrowserBinding, attemptMacosChatDelivery } from "../src/lib/macos-postexecution-wrapper.mjs";
+import { renderConfigPs1 } from "../src/lib/control-render.mjs";
 import { deliverCallback } from "../runtime/scripts/callback-delivery.mjs";
 
 // This POSIX process-group controller is native macOS work. Windows keeps its
@@ -124,6 +125,67 @@ async function isolated(options, fn) {
 }
 const finalize = (f, extra = {}) => finalizeMacosCodexRun({ planned: f.planned, repoPath: f.repo, controlRoot: f.control, trustedGithubUsername: ["trusted"], timeoutMs: 5000, ...extra });
 const mutations = calls => calls.filter(c => ["add", "commit", "fetch", "push", "read-tree", "update-index", "write-tree", "commit-tree", "hash-object"].includes(c.verb));
+
+test("native callback binding uses the official runner-prefixed config and selects exactly one active route", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "macos-binding-")));
+  const instanceId = "a1b2c3";
+  const instanceRoot = path.join(root, "instances", instanceId);
+  const controlRoot = path.join(root, "control");
+  fs.mkdirSync(instanceRoot, { recursive: true, mode: 0o700 }); fs.mkdirSync(controlRoot, { mode: 0o700 });
+  const config = path.join(instanceRoot, "config.ps1"), routeFile = path.join(instanceRoot, "chat-routes.json");
+  const profile = path.join(instanceRoot, "browser-profile");
+  fs.writeFileSync(config, renderConfigPs1({ githubLogin: "trusted", projectKey: "demo", projectClonePath: root,
+    runnerPath: path.join(root, "ChatGPTCodexOrchestrator", `runner-${instanceId}`), browserPort: 10000 + (0xa1b2c3 % 40000), browserProfile: profile, chatRouteFile: routeFile }), { mode: 0o600 });
+  write(routeFile, { routes: [
+    { project: "demo", route: "chat-other", status: "active", chat_url: "https://chatgpt.com/c/other" },
+    { project: "demo", route: "chat-232", status: "active", chat_url: "https://chatgpt.com/c/chat-232" }
+  ] });
+  const snapshot = { instance_id: instanceId, instance_root: instanceRoot, controlRoot,
+    plan: { project: "demo", review_route: "chat-232" }, authorization: { chat_url: "https://chatgpt.com/c/chat-232" } };
+  const binding = verifiedBrowserBinding(snapshot);
+  assert.equal(binding.port, 10000 + (0xa1b2c3 % 40000)); assert.equal(binding.instanceId, `runner-${instanceId}`); assert.equal(binding.profile, profile);
+  const callbackId = "codex-demo-253-13-test", pending = path.join(instanceRoot, "pending-wakes", `${callbackId}.json`);
+  fs.mkdirSync(path.dirname(pending), { mode: 0o700 }); write(pending, { callback_id: callbackId, chat_url: snapshot.authorization.chat_url, delivery_state: "PENDING", message: "test" });
+  const oldPort = process.env.ORCHESTRATOR_BROWSER_DEBUG_PORT;
+  try {
+    process.env.ORCHESTRATOR_BROWSER_DEBUG_PORT = "9333";
+    let sent, sends = 0;
+    const result = attemptMacosChatDelivery(snapshot, { callback_id: callbackId, callback_state: "PENDING" }, (_bin, _args, options) => { sent = options; sends++; return { status: 0 }; });
+    assert.equal(result.delivery_status, "PENDING"); assert.equal(sent.env.ORCHESTRATOR_BROWSER_DEBUG_PORT, String(binding.port));
+    assert.equal(sent.env.ORCHESTRATOR_INSTANCE_ID, `runner-${instanceId}`); assert.equal(sent.env.ORCHESTRATOR_BROWSER_PROFILE, profile);
+
+    write(pending, { callback_id: callbackId, chat_url: snapshot.authorization.chat_url, delivery_state: "SUBMISSION_ATTEMPTED", message: "test" });
+    const attempted = attemptMacosChatDelivery(snapshot, { callback_id: callbackId, callback_state: "SUBMISSION_ATTEMPTED" }, (_bin, _args, options) => { sent = options; sends++; return { error: new Error("endpoint timeout") }; });
+    assert.equal(attempted.delivery_status, "PENDING"); assert.equal(sent.env.CODEX_RECONCILE_ONLY, "1"); assert.equal(read(pending).delivery_state, "SUBMISSION_ATTEMPTED"); assert.equal(sends, 2);
+
+    const fakeReceipt = verifiedBy => (_bin, _args, options) => { write(pending, { ...read(pending), delivery_state: "DELIVERED", verified_by: verifiedBy }); return { status: 0 }; };
+    write(pending, { callback_id: callbackId, chat_url: snapshot.authorization.chat_url, delivery_state: "PENDING", message: "test" });
+    const untrusted = attemptMacosChatDelivery(snapshot, { callback_id: callbackId, callback_state: "PENDING" }, fakeReceipt("draft-text"));
+    assert.notEqual(untrusted.delivery_status, "DELIVERED"); assert.notEqual(untrusted.callback_state, "DELIVERED");
+    write(pending, { callback_id: callbackId, chat_url: snapshot.authorization.chat_url, delivery_state: "PENDING", message: "test" });
+    assert.equal(attemptMacosChatDelivery(snapshot, { callback_id: callbackId, callback_state: "PENDING" }, fakeReceipt("existing-user-message")).delivery_status, "DELIVERED");
+  } finally {
+    if (oldPort === undefined) delete process.env.ORCHESTRATOR_BROWSER_DEBUG_PORT; else process.env.ORCHESTRATOR_BROWSER_DEBUG_PORT = oldPort;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("native callback binding rejects tampering, duplicate matches, symlinks, and missing config before wake", { skip: process.platform === "win32" }, () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "macos-binding-reject-"))), instanceId = "a1b2c3", instanceRoot = path.join(root, "instances", instanceId);
+  fs.mkdirSync(instanceRoot, { recursive: true, mode: 0o700 });
+  const snapshot = { instance_id: instanceId, instance_root: instanceRoot, controlRoot: path.join(root, "control"), plan: { project: "demo", review_route: "chat-232" }, authorization: { chat_url: "https://chatgpt.com/c/chat-232" } };
+  const config = path.join(instanceRoot, "config.ps1"), routeFile = path.join(instanceRoot, "chat-routes.json"), profile = path.join(instanceRoot, "browser-profile");
+  const validPort = 10000 + (0xa1b2c3 % 40000);
+  const configText = renderConfigPs1({ githubLogin: "trusted", projectKey: "demo", projectClonePath: root, runnerPath: path.join(root, "ChatGPTCodexOrchestrator", `runner-${instanceId}`), browserPort: validPort, browserProfile: profile, chatRouteFile: routeFile });
+  const validRoutes = { routes: [{ project: "demo", route: "chat-232", status: "active", chat_url: snapshot.authorization.chat_url }] };
+  for (const mutate of [text => text.replace("runner-a1b2c3", "a1b2c3"), text => text.replace(String(validPort), "9333"), text => text.replace(profile, path.join(root, "foreign"))]) {
+    fs.writeFileSync(config, mutate(configText), { mode: 0o600 }); write(routeFile, validRoutes); assert.throws(() => verifiedBrowserBinding(snapshot));
+  }
+  fs.writeFileSync(config, configText, { mode: 0o600 }); write(routeFile, { routes: [...validRoutes.routes, { project: "other", route: "chat-232", status: "active", chat_url: "https://chatgpt.com/c/foreign" }] }); assert.throws(() => verifiedBrowserBinding(snapshot));
+  write(routeFile, validRoutes); fs.unlinkSync(config); assert.throws(() => verifiedBrowserBinding(snapshot));
+  fs.symlinkSync(routeFile, config); assert.throws(() => verifiedBrowserBinding(snapshot));
+  try { assert.throws(() => verifiedBrowserBinding(snapshot)); } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
 function failure(f, result, source = null) {
   assert.notEqual(result.state, "READY_FOR_REVIEW");
   assert.equal(result.failure.source_commit, source);

@@ -3,13 +3,15 @@ import path from "node:path";
 import os from "node:os";
 import {spawnSafeSync} from "./spawn-safe.mjs";
 import {detectProjectProfile} from "./project-detect.mjs";
+import {assertSafeRuntimePath,prepareControlRuntimeFiles,writeControlRuntimeFiles} from "./control-runtime-bundle.mjs";
 import {
   defaultLocalPaths,
   projectEntry,
   renderProjectsRegistry,
   renderConfigPs1,
   renderWorkflow,
-  safeKey
+  safeKey,
+  canonicalInstallationId
 } from "./control-render.mjs";
 
 function run(command,args,{cwd,allowFailure=false}={}){
@@ -62,14 +64,23 @@ function ensureClone(repository,target){
   run("gh",["repo","clone",repository,target]);
 }
 
-function copyDirectory(src,dst){
-  fs.mkdirSync(dst,{recursive:true});
-  for(const entry of fs.readdirSync(src,{withFileTypes:true})){
-    const from=path.join(src,entry.name);
-    const to=path.join(dst,entry.name);
-    if(entry.isDirectory()) copyDirectory(from,to);
-    else fs.copyFileSync(from,to);
-  }
+function inspectExistingClone(target, purpose){
+  if(!fs.existsSync(target)) return;
+  const st=fs.lstatSync(target);
+  if(st.isSymbolicLink() || !st.isDirectory() || (typeof process.getuid === "function" && st.uid !== process.getuid())) throw new Error(`${purpose} clone directory is symlinked, foreign-owned, or not a directory`);
+  const git=path.join(target,".git");
+  if(fs.existsSync(git)) {
+    const gs=fs.lstatSync(git);
+    if(gs.isSymbolicLink() || (typeof process.getuid === "function" && gs.uid !== process.getuid())) throw new Error(`${purpose} clone Git directory is symlinked or foreign-owned`);
+    const status=run("git",["status","--porcelain","--untracked-files=all"],{cwd:target}).stdout;
+    if(status) throw new Error(`${purpose} clone contains dirty or untracked state; refusing to fetch or overwrite it`);
+  } else if(fs.readdirSync(target).length) throw new Error(`${purpose} clone directory is not an empty Git checkout`);
+}
+
+function requireCleanOwnedClone(target, purpose){
+  if(!fs.existsSync(path.join(target,".git"))) return;
+  const status=run("git",["status","--porcelain","--untracked-files=all"],{cwd:target}).stdout;
+  if(status) throw new Error(`${purpose} clone contains dirty or untracked state; refusing to overwrite it`);
 }
 
 function commitAndPush({repoPath,message,branch="main"}){
@@ -189,7 +200,7 @@ function stopRetiredOriginRouter(controlPath){
 }
 
 function installationShortId(value){
-  return String(value||"").replace(/[^A-Za-z0-9]/g,"").slice(0,8).toLowerCase()||"default";
+  return canonicalInstallationId(value);
 }
 
 function browserPortForInstallation(shortId){
@@ -198,12 +209,56 @@ function browserPortForInstallation(shortId){
   return 10000+(Number.isFinite(n)?n%40000:0);
 }
 
-function writeInstanceMetadata(controlPath,{instanceId}){
+function requireRuntimePlatform(platform,arch){
+  if((platform==="darwin"&&(arch==="arm64"||arch==="x64"))||(platform==="win32"&&arch==="x64")) return;
+  throw new Error("Instance platform or architecture is missing or unsupported for runtime refresh");
+}
+
+function writeInstanceMetadata(controlPath,{instanceId,trustedGithubUsername,launchAgentLabel,runnerLabel,controlRepository,platform=process.platform,arch=process.arch}){
+  requireRuntimePlatform(platform,arch);
   if(!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(instanceId)) throw new Error("Invalid instance id");
+  if(!/^[A-Za-z0-9-]+$/.test(String(trustedGithubUsername||""))) throw new Error("Invalid trusted GitHub login");
+  if(!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(String(runnerLabel||""))) throw new Error("Invalid runner identity");
+  if(!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(String(controlRepository||""))) throw new Error("Invalid Control repository identity");
+  if(launchAgentLabel!==undefined&&launchAgentLabel!==null&&!/^com\.chatgpt\.codex\.[A-Za-z0-9-]+$/.test(launchAgentLabel)) throw new Error("Invalid LaunchAgent label");
+  assertSafeRuntimePath(path.join(controlPath,"instance.json"),{allowMissing:true,type:"file"});
   fs.writeFileSync(path.join(controlPath,"instance.json"),JSON.stringify({
     schema_version:1,
-    instance_id:instanceId
+    instance_id:instanceId,
+    platform,
+    arch,
+    runner_label:runnerLabel,
+    control_repository:controlRepository,
+    trusted_github_username:trustedGithubUsername,
+    launch_agent_label:launchAgentLabel||null
   },null,2)+"\n");
+}
+
+function runtimeRefreshIdentity(state){
+  const {instance_platform:platform,instance_arch:arch}=state;
+  requireRuntimePlatform(platform,arch);
+  if(!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(String(state.instance_id||""))||
+    !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(String(state.runner_label||""))||
+    !/^[A-Za-z0-9-]+$/.test(String(state.github_login||""))) throw new Error("Existing instance or trusted runner identity is incomplete for runtime refresh");
+  const metadataPath=path.join(state.control_clone_path,"instance.json");
+  assertSafeRuntimePath(metadataPath,{type:"file"});
+  const metadata=JSON.parse(fs.readFileSync(metadataPath,"utf8"));
+  if(metadata.schema_version!==1||metadata.instance_id!==state.instance_id||metadata.platform!==platform||metadata.arch!==arch||
+    metadata.trusted_github_username!==state.github_login||metadata.runner_label!==state.runner_label||metadata.control_repository!==state.control_repository) throw new Error("Persisted Control instance identity does not match installation state for runtime refresh");
+  if(platform==="darwin"&&(!/^com\.chatgpt\.codex\.[A-Za-z0-9-]+$/.test(String(state.launch_agent_label||""))||metadata.launch_agent_label!==state.launch_agent_label)) throw new Error("Existing macOS LaunchAgent identity is incomplete or mismatched for runtime refresh");
+  if(platform==="win32"&&(metadata.launch_agent_label!==null||state.launch_agent_label!=null)) throw new Error("Persisted Windows instance has an ambiguous LaunchAgent identity");
+  if(state.environment?.platform&&state.environment.platform!==platform) throw new Error("Persisted instance platform conflicts with installation environment");
+  if(state.environment?.arch&&state.environment.arch!==arch) throw new Error("Persisted instance architecture conflicts with installation environment");
+  return {platform,arch,runnerLabel:state.runner_label,trustedGithubUsername:metadata.trusted_github_username};
+}
+
+function prepareRuntimeWorkflow({sourceRoot,controlPath,platform,arch,runnerLabel,trustedGithubUsername}){
+  requireRuntimePlatform(platform,arch);
+  const templatePath=path.join(sourceRoot,"templates","control-repo",platform==="darwin"?"orchestrator.macos.yml.template":"orchestrator.yml.template");
+  assertSafeRuntimePath(templatePath,{type:"file"});
+  const workflowPath=path.join(controlPath,".github","workflows","orchestrator.yml");
+  assertSafeRuntimePath(workflowPath,{allowMissing:true,type:"file"});
+  return {workflowPath,content:renderWorkflow(fs.readFileSync(templatePath,"utf8"),{runnerLabel,platform,arch,trustedGithubUsername})};
 }
 
 function retireLegacyGlobalPending({home,instanceRoot}){
@@ -265,23 +320,21 @@ export function upgradeControlEnvironment({state,sourceRoot=process.cwd(),home=o
     throw new Error("Existing installation state is incomplete for upgrade");
   }
 
+  const runtimeFiles=prepareControlRuntimeFiles({sourceRoot,controlRoot:state.control_clone_path});
+  const workflow=prepareRuntimeWorkflow({sourceRoot,controlPath:state.control_clone_path,platform:process.platform,arch:process.arch,runnerLabel:state.runner_label,trustedGithubUsername:state.github_login});
   const stopped=stopRetiredOriginRouter(state.control_clone_path);
   const scriptsDir=path.join(state.control_clone_path,"scripts");
-  copyDirectory(path.join(sourceRoot,"runtime","scripts"),scriptsDir);
+  writeControlRuntimeFiles({controlRoot:state.control_clone_path,files:runtimeFiles});
   for(const name of RETIRED_ROUTING_SCRIPTS){
     fs.rmSync(path.join(scriptsDir,name),{force:true});
   }
   removeLegacyDefaultReviewRoutes(path.join(state.control_clone_path,"projects.json"));
 
-  const workflowTemplate=fs.readFileSync(path.join(sourceRoot,"templates","control-repo","orchestrator.yml.template"),"utf8");
-  fs.mkdirSync(path.join(state.control_clone_path,".github","workflows"),{recursive:true});
-  fs.writeFileSync(
-    path.join(state.control_clone_path,".github","workflows","orchestrator.yml"),
-    renderWorkflow(workflowTemplate,{runnerLabel:state.runner_label})
-  );
+  fs.mkdirSync(path.dirname(workflow.workflowPath),{recursive:true});
+  fs.writeFileSync(workflow.workflowPath,workflow.content);
 
   const instanceId=installationShortId(state.installation_id)||path.basename(state.runner_path);
-  writeInstanceMetadata(state.control_clone_path,{instanceId});
+  writeInstanceMetadata(state.control_clone_path,{instanceId,trustedGithubUsername:state.github_login,launchAgentLabel:state.launch_agent_label,runnerLabel:state.runner_label,controlRepository:state.control_repository});
 
   const configRoot=path.join(home,".chatgpt-codex-orchestrator");
   const instanceRoot=path.join(configRoot,"instances",instanceId);
@@ -303,10 +356,16 @@ export function upgradeControlEnvironment({state,sourceRoot=process.cwd(),home=o
 
   const pendingMigration=retireLegacyGlobalPending({home,instanceRoot});
   const commit=commitControlRepo(state.control_clone_path);
+  // The CLI's legacy-upgrade caller saves this object but only consumes the
+  // historical return fields. Persist the platform of the completed upgrade too.
+  state.instance_platform=process.platform;
+  state.instance_arch=process.arch;
 
   return {
     changed:commit.changed,
     instance_id:instanceId,
+    instance_platform:process.platform,
+    instance_arch:process.arch,
     instance_root:instanceRoot,
     stopped_retired_router_processes:stopped.stopped,
     chat_route_file:chatRouteFile,
@@ -323,41 +382,36 @@ export function refreshControlRuntime({state,sourceRoot=process.cwd(),gitRun=run
   if(!state?.control_clone_path||!fs.existsSync(path.join(state.control_clone_path,".git"))){
     throw new Error("Existing control clone is unavailable for runtime refresh");
   }
+  assertSafeRuntimePath(state.control_clone_path,{type:"directory"});
+  assertSafeRuntimePath(path.join(state.control_clone_path,".git"),{type:"directory"});
   const fetchUrl=gitRun("git",["config","--get","remote.origin.url"],{cwd:state.control_clone_path}).stdout;
   const pushUrls=gitRun("git",["config","--get-all","remote.origin.pushurl"],{cwd:state.control_clone_path,allowFailure:true}).stdout.split(/\r?\n/).filter(Boolean);
   if(normalizedGithubRepository(fetchUrl)!==repository.toLowerCase()||
     pushUrls.some(url=>normalizedGithubRepository(url)!==repository.toLowerCase())){
     throw new Error("Control clone push destination does not match control repository");
   }
+  const topLevel=gitRun("git",["rev-parse","--show-toplevel"],{cwd:state.control_clone_path}).stdout;
+  if(!path.isAbsolute(topLevel)||path.resolve(topLevel)!==path.resolve(state.control_clone_path)) throw new Error("Control clone path does not match Git repository root");
   if(gitRun("git",["branch","--show-current"],{cwd:state.control_clone_path}).stdout!=="main") throw new Error("Control clone must be on main for runtime refresh");
   const localHead=gitRun("git",["rev-parse","HEAD"],{cwd:state.control_clone_path}).stdout;
   if(!/^[0-9a-f]{40}$/i.test(localHead)) throw new Error("Control repository HEAD is invalid for runtime refresh");
   const remoteMain=gitRun("git",["ls-remote","--heads","origin","refs/heads/main"],{cwd:state.control_clone_path,allowFailure:true});
   const remoteMatch=remoteMain.stdout.match(/^([0-9a-f]{40})\trefs\/heads\/main$/i);
   if(!remoteMain.ok||!remoteMatch||remoteMatch[1].toLowerCase()!==localHead.toLowerCase()) throw new Error("Control repository local HEAD must match remote main for runtime refresh");
-  if(!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(String(state.runner_label||""))){
-    throw new Error("Existing runner identity is incomplete or invalid for runtime refresh");
-  }
-
-  const scriptsSource=path.join(sourceRoot,"runtime","scripts");
-  const workflowTemplatePath=path.join(sourceRoot,"templates","control-repo","orchestrator.yml.template");
-  if(!fs.existsSync(scriptsSource)||!fs.existsSync(workflowTemplatePath)){
-    throw new Error("Current runtime source tree is incomplete");
-  }
+  const identity=runtimeRefreshIdentity(state);
+  const runtimeFiles=prepareControlRuntimeFiles({sourceRoot,controlRoot:state.control_clone_path});
+  const workflow=prepareRuntimeWorkflow({sourceRoot,controlPath:state.control_clone_path,...identity});
+  const scriptsDir=path.join(state.control_clone_path,"scripts");
+  for(const name of RETIRED_ROUTING_SCRIPTS) assertSafeRuntimePath(path.join(scriptsDir,name),{allowMissing:true,type:"file"});
   if(!gitRun("git",["diff","--cached","--quiet"],{cwd:state.control_clone_path,allowFailure:true}).ok) throw new Error("Control repository index contains pre-staged unrelated changes");
 
-  const scriptsDir=path.join(state.control_clone_path,"scripts");
-  copyDirectory(scriptsSource,scriptsDir);
+  writeControlRuntimeFiles({controlRoot:state.control_clone_path,files:runtimeFiles});
   for(const name of RETIRED_ROUTING_SCRIPTS) fs.rmSync(path.join(scriptsDir,name),{force:true});
 
-  const workflowPath=path.join(state.control_clone_path,".github","workflows","orchestrator.yml");
-  fs.mkdirSync(path.dirname(workflowPath),{recursive:true});
-  fs.writeFileSync(workflowPath,renderWorkflow(
-    fs.readFileSync(workflowTemplatePath,"utf8"),
-    {runnerLabel:state.runner_label}
-  ));
+  fs.mkdirSync(path.dirname(workflow.workflowPath),{recursive:true});
+  fs.writeFileSync(workflow.workflowPath,workflow.content);
 
-  const ownedPaths=[...fs.readdirSync(scriptsSource).map(name=>path.posix.join("scripts",name)),".github/workflows/orchestrator.yml"];
+  const ownedPaths=[...runtimeFiles.map(file=>file.path),".github/workflows/orchestrator.yml"];
   return {
     ...refreshControlCommit(state.control_clone_path,ownedPaths,gitRun),
     retired_scripts:RETIRED_ROUTING_SCRIPTS
@@ -368,6 +422,7 @@ export function prepareControlEnvironment({
   installationId,
   targetRepository,
   reviewerChatUrl,
+  trustedGithubLogin,
   sourceRoot=process.cwd(),
   home=os.homedir()
 }){
@@ -375,36 +430,35 @@ export function prepareControlEnvironment({
   if(!/^https:\/\/chatgpt\.com\//i.test(reviewerChatUrl)) throw new Error("Invalid reviewer Chat URL");
 
   const login=githubLogin();
+  if(trustedGithubLogin && String(trustedGithubLogin)!==login) throw new Error("Authenticated GitHub identity changed; refusing to retarget generated repositories");
   const target=repositoryInfo(targetRepository);
   const projectKey=safeKey(String(targetRepository).split("/").pop());
   const paths=defaultLocalPaths({home,installationId,projectKey});
   const short=installationShortId(installationId);
 
+  inspectExistingClone(paths.project,"Target");
   ensureClone(targetRepository,paths.project);
   const validationProfile=detectProjectProfile(paths.project);
 
   const sandboxProjectKey="sandbox-"+short;
   const sandboxRepository=login+"/chatgpt-codex-orchestrator-sandbox-"+short;
-  const sandboxClonePath=path.join(home,"ChatGPTCodexOrchestrator","sandbox-"+short);
+  const sandboxClonePath=path.join(home,".chatgpt-codex-orchestrator","instances",short,"automation",sandboxProjectKey);
   ensureOwnedPrivateRepo({fullName:sandboxRepository,installationId,purpose:"sandbox"});
+  inspectExistingClone(sandboxClonePath,"Sandbox");
   ensureClone(sandboxRepository,sandboxClonePath);
   seedSandbox({repoPath:sandboxClonePath,installationId});
   const sandboxValidationProfile=detectProjectProfile(sandboxClonePath);
 
   const controlRepository=login+"/chatgpt-codex-orchestrator-control-"+short;
   ensureOwnedPrivateRepo({fullName:controlRepository,installationId,purpose:"control"});
+  inspectExistingClone(paths.control,"Control");
   ensureClone(controlRepository,paths.control);
-  writeInstanceMetadata(paths.control,{instanceId:short});
-
-  const scriptsSource=path.join(sourceRoot,"runtime","scripts");
-  const workflowTemplate=fs.readFileSync(path.join(sourceRoot,"templates","control-repo","orchestrator.yml.template"),"utf8");
-
-  copyDirectory(scriptsSource,path.join(paths.control,"scripts"));
-  fs.mkdirSync(path.join(paths.control,".github","workflows"),{recursive:true});
-  fs.writeFileSync(
-    path.join(paths.control,".github","workflows","orchestrator.yml"),
-    renderWorkflow(workflowTemplate,{runnerLabel:paths.runnerLabel})
-  );
+  const runtimeFiles=prepareControlRuntimeFiles({sourceRoot,controlRoot:paths.control});
+  const workflow=prepareRuntimeWorkflow({sourceRoot,controlPath:paths.control,platform:process.platform,arch:process.arch,runnerLabel:paths.runnerLabel,trustedGithubUsername:login});
+  writeInstanceMetadata(paths.control,{instanceId:short,trustedGithubUsername:login,launchAgentLabel:process.platform==="darwin"?`com.chatgpt.codex.${short.toLowerCase()}`:null,runnerLabel:paths.runnerLabel,controlRepository});
+  writeControlRuntimeFiles({controlRoot:paths.control,files:runtimeFiles});
+  fs.mkdirSync(path.dirname(workflow.workflowPath),{recursive:true});
+  fs.writeFileSync(workflow.workflowPath,workflow.content);
 
   const targetEntry=projectEntry({
     projectKey,
@@ -477,7 +531,12 @@ export function prepareControlEnvironment({
     sandbox_validation_profile:sandboxValidationProfile,
     runner_path:paths.runner,
     runner_label:paths.runnerLabel,
+    launch_agent_label:process.platform==="darwin"?`com.chatgpt.codex.${short.toLowerCase()}`:null,
+    runner_owner:installationId,
+    sandbox_only:true,
     instance_id:short,
+    instance_platform:process.platform,
+    instance_arch:process.arch,
     instance_root:instanceRoot,
     config_path:configPath,
     browser_port:browserPort,

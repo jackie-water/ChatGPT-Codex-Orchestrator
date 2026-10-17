@@ -36,6 +36,12 @@ Windows interactive bootstrap:
 
 `Install.cmd`
 
+macOS official bootstrap:
+
+`Install.command` (or `./install.sh`)
+
+The macOS entrypoint performs a read-only prerequisite and migration preflight first. It does not install services, create repositories, activate a runner, copy credentials, or change an existing runner. macOS setup remains approval-gated and uses the same CLI state/resume path.
+
 AI / structured bootstrap:
 
 `powershell -ExecutionPolicy Bypass -File .\install.ps1 -Json -Language <en|zh-CN>`

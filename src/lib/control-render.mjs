@@ -6,6 +6,14 @@ export function safeKey(value){
   return key;
 }
 
+export function canonicalInstallationId(value){
+  return String(value||"").replace(/[^A-Za-z0-9]/g,"").slice(0,8).toLowerCase()||"default";
+}
+
+function historicalInstallationId(value){
+  return String(value||"").replace(/[^A-Za-z0-9]/g,"").slice(0,8)||"default";
+}
+
 export function projectEntry({projectKey,repository,defaultBranch="main",validationProfile,enabled=true}){
   const allowed=[...new Set(["git",...(validationProfile?.allowed_executables||[])])];
   return {
@@ -77,13 +85,17 @@ export function renderConfigPs1({githubLogin,projectKey,projectClonePath,project
   ].join("\n");
 }
 
-export function renderWorkflow(template,{runnerLabel}){
+export function renderWorkflow(template,{runnerLabel,platform=process.platform,arch,trustedGithubUsername}={}){
   if(!/^[A-Za-z0-9._-]{1,64}$/.test(runnerLabel)) throw new Error("Invalid runner label");
-  return String(template).replaceAll("{{RUNNER_LABEL}}",runnerLabel);
+  const runnerArch=arch==="arm64"?"ARM64":arch==="x64"?"X64":null;
+  if(String(template).includes("{{RUNNER_ARCH}}")&&!runnerArch) throw new Error("Invalid runner architecture");
+  const rendered=String(template).replaceAll("{{RUNNER_LABEL}}",runnerLabel).replaceAll("{{RUNNER_OS}}",platform==="darwin"?"macOS":"Windows").replaceAll("{{RUNNER_ARCH}}",runnerArch||"");
+  if(rendered.includes("{{TRUSTED_GITHUB_USERNAME}}")&&!/^[A-Za-z0-9-]+$/.test(String(trustedGithubUsername||""))) throw new Error("Invalid trusted GitHub login");
+  return rendered.replaceAll("{{TRUSTED_GITHUB_USERNAME}}",String(trustedGithubUsername||""));
 }
 
 export function defaultLocalPaths({home,installationId,projectKey}){
-  const short=String(installationId).replace(/[^A-Za-z0-9]/g,"").slice(0,8)||"default";
+  const short=historicalInstallationId(installationId);
   return {
     control:path.join(home,"ChatGPTCodexOrchestrator","control-"+short),
     project:path.join(home,"ChatGPTCodexProjects",projectKey),

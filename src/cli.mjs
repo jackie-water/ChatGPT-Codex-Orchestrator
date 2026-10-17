@@ -9,10 +9,11 @@ import { t, normalizeLanguage } from "./lib/i18n.mjs";
 import { ERROR_CATALOG } from "./lib/errors.mjs";
 import { sanitizeObject } from "./lib/sanitize.mjs";
 import { submitDiagnosticReport } from "./lib/reporting.mjs";
-import { prepareControlEnvironment, activateTargetProject, upgradeControlEnvironment, refreshControlRuntime } from "./lib/control-env.mjs";
+import { prepareControlEnvironment, activateTargetProject, upgradeControlEnvironment, refreshControlRuntime, githubLogin as authenticatedGithubLogin } from "./lib/control-env.mjs";
 import { renderProjectInstructions } from "./lib/project-instructions.mjs";
-import { ensureInstallerChatRegistration } from "./lib/chat-registration.mjs";
+import { ensureInstallerChatRegistration, normalizeChatUrl } from "./lib/chat-registration.mjs";
 import { pendingCallbackCount, doctorHealth, repairHealth } from "./lib/runtime-health.mjs";
+import { macosPrerequisites, migrationPreflight, macosRuntimeAction, prepareMigrationIntent } from "./lib/macos-platform.mjs";
 import {
   sandboxSmokeStatus,
   startSandboxSmoke,
@@ -90,7 +91,7 @@ function action(state, actionId, messageKey, extra = {}) {
 
 
 function dryRun() {
-  const state=loadState();
+  const state=loadState({create:false});
   const lang=ensureStateLanguage(state);
   const git=commandExists("git");
   const node=commandExists("node");
@@ -98,6 +99,7 @@ function dryRun() {
   const codex=commandExists("codex");
   const ghAuth=gh.ok?commandExists("gh",["auth","status"]):{ok:false};
 
+  const mac=process.platform==="darwin"?macosPrerequisites():null;
   const plan=[
     {
       step:"prerequisites",
@@ -106,7 +108,8 @@ function dryRun() {
         git:git.ok,
         node:node.ok,
         github_cli:gh.ok,
-        codex:codex.ok
+        codex:codex.ok,
+        ...(mac?{node_22_or_newer:mac.node,session_auth:mac.session_auth}: {})
       },
       action:"Install any supported missing prerequisites automatically."
     },
@@ -164,6 +167,7 @@ function dryRun() {
     message:lang==="zh-CN"?"安装预演完成，没有修改任何 GitHub repository、runner 或项目。":"Installation dry-run complete. No GitHub repository, runner or project was modified.",
     dry_run:true,
     mutations_performed:false,
+    migration_preflight:process.platform==="darwin"?migrationPreflight({state}):null,
     plan
   });
 }
@@ -173,10 +177,18 @@ function answer() {
   const lang = ensureStateLanguage(state);
   const actionId = valueOf("--action");
   const value = valueOf("--value");
+  const controlRepository = valueOf("--control-repository");
+  const sandboxRepository = valueOf("--sandbox-repository");
+  const verificationRoute = valueOf("--verification-route");
+  const currentChatUrl = valueOf("--chat-url") || verificationRoute;
 
   const bool = v => /^(true|yes|y|1|done|completed)$/i.test(String(v || ""));
 
-  if (actionId === "github_plugin_authorization" || actionId === "github_authorization") {
+  if (actionId === "macos_setup_approval") {
+    if (!bool(value)) return emit({status:"ERROR",error_id:"MACOS-APPROVAL-001",recoverable:false,preferred_language:lang,message:"macOS setup approval was not confirmed."},1);
+    state.macos_setup_approved=true;
+    state.current_step="macos_native_activation";
+  } else if (actionId === "github_plugin_authorization" || actionId === "github_authorization") {
     if (!bool(value)) return emit({status:"ERROR",error_id:"AUTH-001",recoverable:true,preferred_language:lang,message:t(lang,"answer.github.invalid")},1);
     state.github_plugin_authorized = true;
   } else if (actionId === "target_repository") {
@@ -190,8 +202,28 @@ function answer() {
     }
     state.reviewer_chat_url = value;
   } else if (actionId === "generated_repo_authorization") {
-    if (!bool(value)) return emit({status:"ERROR",error_id:"AUTH-005",recoverable:true,preferred_language:lang,message:t(lang,"answer.generated_repo.invalid")},1);
-    state.generated_repo_authorized = true;
+    if (process.platform !== "darwin") {
+      if (!bool(value)) return emit({status:"ERROR",error_id:"AUTH-005",recoverable:true,preferred_language:lang,message:t(lang,"answer.generated_repo.invalid")},1);
+      state.generated_repo_authorized = true;
+    } else {
+      const exact = x => /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(String(x || ""));
+      const canonicalChat = /^https:\/\/chatgpt\.com\/(?:g\/[A-Za-z0-9_-]+\/)?c\/[A-Za-z0-9-]+\/?$/i;
+      if (value || !exact(controlRepository) || !exact(sandboxRepository) || !canonicalChat.test(String(currentChatUrl || ""))) {
+        return emit({status:"ERROR",error_id:"AUTH-005",recoverable:true,preferred_language:lang,message:"macOS generated-repository authorization requires exact Control and Sandbox repositories plus the canonical current Chat URL; a boolean or route name is not proof."},1);
+      }
+      if (!state.control_environment_ready || controlRepository !== state.control_repository || sandboxRepository !== state.sandbox_repository) {
+        return emit({status:"ERROR",error_id:"AUTH-006",recoverable:true,preferred_language:lang,message:"Exact generated repositories do not match the prepared private Control/Sandbox pair."},1);
+      }
+      if (currentChatUrl !== state.reviewer_chat_url) {
+        return emit({status:"ERROR",error_id:"AUTH-007",recoverable:true,preferred_language:lang,message:"Authorization provenance must match the saved originating Chat URL exactly."},1);
+      }
+      state.github_plugin_authorization_verified = true;
+      state.github_plugin_authorization_control_repository = controlRepository;
+      state.github_plugin_authorization_sandbox_repository = sandboxRepository;
+      state.github_plugin_authorization_chat_url = currentChatUrl;
+      state.github_plugin_authorization_installation_id = state.installation_id;
+      state.generated_repo_authorized = true;
+    }
   } else if (actionId === "codex_trust_sandbox") {
     if (!bool(value)) return emit({status:"ERROR",error_id:"AUTH-002",recoverable:true,preferred_language:lang,message:t(lang,"answer.codex.invalid")},1);
     state.codex_trust_sandbox = true;
@@ -224,6 +256,92 @@ function answer() {
 function runSetup() {
   const state = loadState();
   const lang = ensureStateLanguage(state);
+  if(process.platform==="darwin") {
+    const prerequisites=macosPrerequisites();
+    const migration=migrationPreflight({state});
+    const ready=prerequisites.node&&prerequisites.git&&prerequisites.gh&&prerequisites.codex&&prerequisites.session_auth&&migration.status==="READY";
+    if(!ready) return emit({status:"ERROR",error_id:"MACOS-PREREQUISITE-OR-MIGRATION",recoverable:true,preferred_language:lang,mutations_performed:false,message:"macOS preflight found a prerequisite or migration conflict; no installation mutation was performed.",prerequisites,migration},1);
+    if(!state.macos_setup_approved) return emit(action(state,"macos_setup_approval","setup.macos.approval",{mutations_performed:false,details:"Approval is required before native setup can write instance state or a LaunchAgent."}));
+    if(!prerequisites.github_auth) return emit(action(state,"github_cli_authorization","setup.github_cli.connect",{helper_command:"node src/cli.mjs github-login --json",mutations_performed:false}));
+    // The preliminary connector connection is necessarily collected before
+    // bootstrap.  The exact private repository names do not exist until the
+    // idempotent preparer creates/resumes them, so exact-repository proof is a
+    // post-bootstrap gate below (never inferred from local gh state).
+    if(!state.github_plugin_authorized) return emit(action(state,"github_plugin_authorization","setup.github_plugin.connect",{mutations_performed:false,verification_requirement:"Connect ChatGPT GitHub before bootstrap; exact generated Control and Sandbox repository confirmation is required after bootstrap."}));
+    if(!state.target_repository) return emit(action(state,"target_repository","setup.repository.ask",{mutations_performed:false}));
+    if(!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(state.target_repository)) return emit({status:"ERROR",error_id:"SETUP-005",recoverable:true,preferred_language:lang,message:"Target repository must be owner/repository; no installation mutation was performed.",mutations_performed:false},1);
+    if(!state.reviewer_chat_url) return emit(action(state,"reviewer_chat_url","setup.chat.ask",{mutations_performed:false}));
+    if(!/^https:\/\/chatgpt\.com\//i.test(state.reviewer_chat_url)) return emit({status:"ERROR",error_id:"SETUP-006",recoverable:true,preferred_language:lang,message:"Reviewer Chat URL is invalid; no installation mutation was performed.",mutations_performed:false},1);
+    state.installation_id ||= crypto.randomUUID();
+    try {
+      state.github_login=authenticatedGithubLogin();
+      const intent=prepareMigrationIntent({state,sourceRoot:process.cwd(),home:os.homedir()});
+      state.migration_intent_path=intent.path;
+      state.migration_intent_phase=intent.phase;
+      state.macos_native_setup="PREPARING";
+      saveState(state);
+    } catch(error) {
+      return emit({status:"ERROR",error_id:"MACOS-MIGRATION-INTENT",recoverable:true,preferred_language:lang,message:"Durable macOS migration intent could not be prepared; no Control/Sandbox mutation was performed.",details:String(error.message||error),mutations_performed:false},1);
+    }
+    if(!state.control_environment_ready){
+      try { const control=prepareControlEnvironment({installationId:state.installation_id,targetRepository:state.target_repository,reviewerChatUrl:state.reviewer_chat_url,trustedGithubLogin:state.github_login,sourceRoot:process.cwd(),home:os.homedir()}); Object.assign(state,control,{control_environment_ready:true,routing_architecture:"explicit-route-v1",target_environment_ready:false,macos_rollback:{available:true,automatic:false,created_at:new Date().toISOString()}}); saveState(state); }
+      catch(error){ state.last_error={error_id:"SETUP-011",message:String(error.message||error),at:new Date().toISOString()}; saveState(state); return emit({status:"ERROR",error_id:"SETUP-011",recoverable:true,preferred_language:lang,message:"Native macOS Control/Sandbox preparation failed; no runner or service was started.",details:String(error.message||error)},1); }
+    }
+    if(state.github_plugin_authorization_verified!==true || state.github_plugin_authorization_installation_id!==state.installation_id || state.github_plugin_authorization_control_repository!==state.control_repository || state.github_plugin_authorization_sandbox_repository!==state.sandbox_repository || state.github_plugin_authorization_chat_url!==state.reviewer_chat_url) return emit(action(state,"generated_repo_authorization","setup.generated_repo.connect",{repositories:[state.control_repository,state.sandbox_repository],chat_url:state.reviewer_chat_url,verification_requirement:"The controlling Chat must confirm access to these exact generated private repositories and record this exact current Chat URL; local gh status and boolean answers are not proof.",mutations_performed:true}));
+    const registration=ensureInstallerChatRegistration(state,{projectKey:state.sandbox_project_key});
+    if(registration.status!=="READY"){ state.sandbox_chat_registration_issue=registration.issue?.url||null; saveState(state); return emit({status:"NEEDS_USER_ACTION",action_id:"sandbox_chat_registration",preferred_language:lang,message:"Register the explicit Sandbox callback in the originating Chat before CODEX-RUN.",registration_issue:registration.issue?.url||null,mutations_performed:true}); }
+    const registered=registration.record;
+    const shortId=String(state.installation_id||"").replace(/[^A-Za-z0-9]/g,"").slice(0,8).toLowerCase()||"default";
+    const expectedSandboxProject="sandbox-"+shortId;
+    const optionalInstallationMatches=!Object.hasOwn(registered||{},"installation_id") || String(registered.installation_id)===String(state.installation_id);
+    let registeredChatUrl=null;
+    try { registeredChatUrl=normalizeChatUrl(registered?.chat_url); } catch {}
+    let stateChatUrl=null;
+    try { stateChatUrl=normalizeChatUrl(state.reviewer_chat_url); } catch {}
+    if(!registered || registered.status!=="active" || String(registered.project)!==expectedSandboxProject || String(registered.project)!==String(state.sandbox_project_key) || registeredChatUrl!==stateChatUrl || (state.sandbox_review_route && state.sandbox_review_route!==String(registration.route)) || !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(String(registered.route||"")) || String(registered.route)!==String(registration.route) || !optionalInstallationMatches){
+      state.last_error={error_id:"SANDBOX-IDENTITY-001",message:"Sandbox callback registration identity is incomplete or does not match this installation",at:new Date().toISOString()};
+      saveState(state);
+      return emit({status:"ERROR",error_id:"SANDBOX-IDENTITY-001",recoverable:false,preferred_language:lang,message:"Sandbox verification failed closed because the registered route is not bound to this exact installation, project, and originating Chat.",mutations_performed:true},1);
+    }
+    state.sandbox_review_route=registration.route;
+    let smoke;
+    try { smoke=sandboxSmokeStatus(state,{strict:process.platform==="darwin"}); }
+    catch(error){
+      state.last_error={error_id:"SANDBOX-VERIFICATION-001",message:String(error.message||error),at:new Date().toISOString()};
+      saveState(state);
+      return emit({status:"ERROR",error_id:"SANDBOX-VERIFICATION-001",recoverable:true,preferred_language:lang,message:"Sandbox verification evidence could not be read; target remains disabled.",details:String(error.message||error),mutations_performed:true},1);
+    }
+    const sameInstanceComplete=smoke?.status==="PASS" && smoke?.stage==="COMPLETE" && smoke?.branch===`test/install-smoke-${shortId}`;
+    if(sameInstanceComplete){
+      state.sandbox_verified=true;
+      state.macos_native_setup="SANDBOX_VERIFIED";
+      if(!state.completed.includes("sandbox_verified")) state.completed.push("sandbox_verified");
+      saveState(state);
+      if(state.codex_trust_project===true){
+        state.macos_native_setup="POST_SANDBOX_HANDOFF";
+        state.current_step="native_post_sandbox_gate";
+        if(state.last_error?.error_id!=="MACOS-POST-SANDBOX-UNSUPPORTED") state.last_error={error_id:"MACOS-POST-SANDBOX-UNSUPPORTED",message:"Native macOS post-Sandbox Code Review/merge and target activation are not supported by this setup path",at:new Date().toISOString()};
+        saveState(state);
+        return emit({status:"ERROR",error_id:"MACOS-POST-SANDBOX-UNSUPPORTED",recoverable:false,preferred_language:lang,message:"Sandbox is verified and project trust is recorded, but the native macOS post-Sandbox Code Review/merge and target-activation gate is unsupported. Target remains disabled; no action was emitted.",current_step:state.current_step,mutations_performed:true},1);
+      }
+      return emit(action(state,"codex_trust_project","setup.codex.trust_project",{folder:state.project_clone_path||null,smoke,mutations_performed:true,details:"Sandbox completion was independently verified for this installation. Confirm project-folder trust as the next human gate; target remains disabled and no LaunchAgent or runner was started."}));
+    }
+    if(smoke?.stage==="NOT_STARTED"){
+      try {
+        const started=startSandboxSmoke(state);
+        state.sandbox_smoke_started=true;
+        state.sandbox_smoke_issue=started.issue?.url||null;
+        saveState(state);
+        smoke=sandboxSmokeStatus(state,{strict:true});
+      } catch(error) {
+        state.last_error={error_id:"SANDBOX-SMOKE-START-001",message:String(error.message||error),at:new Date().toISOString()};
+        saveState(state);
+        return emit({status:"ERROR",error_id:"SANDBOX-SMOKE-START-001",recoverable:true,preferred_language:lang,message:"Sandbox smoke creation was refused because its exact authorized issue state could not be established; target remains disabled.",details:String(error.message||error),smoke,mutations_performed:true},1);
+      }
+    }
+    state.macos_native_setup="SANDBOX_READY"; state.current_step="sandbox_verification"; saveState(state);
+    return emit({status:"WAITING",action_id:"sandbox_verification",recoverable:true,preferred_language:lang,mutations_performed:true,message:"Native macOS Sandbox and Control are prepared; independently verified Sandbox completion is still required. The target remains disabled. No LaunchAgent or runner was started.",smoke,control_repository:state.control_repository,sandbox_repository:state.sandbox_repository,runner_label:state.runner_label});
+  }
   state.installation_id ||= crypto.randomUUID();
   state.completed ||= [];
 
@@ -286,6 +404,8 @@ function runSetup() {
         runner_path:control.runner_path,
         runner_label:control.runner_label,
         instance_id:control.instance_id,
+        instance_platform:control.instance_platform,
+        instance_arch:control.instance_arch,
         instance_root:control.instance_root,
         config_path:control.config_path,
         browser_port:control.browser_port,
@@ -454,13 +574,13 @@ function runSetup() {
       if(!state.completed.includes("sandbox_chat_registered")) state.completed.push("sandbox_chat_registered");
       saveState(state);
 
-      let smoke=sandboxSmokeStatus(state);
+      let smoke=sandboxSmokeStatus(state,{strict:process.platform==="darwin"});
       if(smoke.stage==="NOT_STARTED"){
         const started=startSandboxSmoke(state);
         state.sandbox_smoke_started=true;
         state.sandbox_smoke_issue=started.issue?.url||null;
         saveState(state);
-        smoke=sandboxSmokeStatus(state);
+        smoke=sandboxSmokeStatus(state,{strict:process.platform==="darwin"});
       }
 
       if(smoke.stage==="COMPLETE"){
@@ -602,7 +722,7 @@ function smokeStatusCommand() {
   const state=loadState();
   const lang=ensureStateLanguage(state);
   try{
-    const smoke=sandboxSmokeStatus(state);
+    const smoke=sandboxSmokeStatus(state,{strict:process.platform==="darwin"});
     emit({status:smoke.status,preferred_language:lang,message:t(lang,"sandbox.status"),smoke});
   }catch(error){
     emit({status:"ERROR",error_id:"SANDBOX-001",recoverable:true,preferred_language:lang,message:t(lang,"setup.sandbox.start_failed"),details:String(error.message||error)},1);
@@ -630,7 +750,7 @@ function smokeApproveCommand() {
     return emit({status:"ERROR",error_id:"SANDBOX-004",recoverable:false,preferred_language:lang,message:t(lang,"sandbox.approval.required")},1);
   }
   try{
-    const status=sandboxSmokeStatus(state);
+    const status=sandboxSmokeStatus(state,{strict:process.platform==="darwin"});
     if(status.stage!=="MERGE_APPROVAL_REQUIRED"||status.commit!==commit){
       throw new Error("The requested commit is not the current independently reviewed sandbox commit");
     }
@@ -663,6 +783,13 @@ function githubLogin() {
 }
 
 function runtimeChecks(state) {
+  if(process.platform==="darwin") {
+    const result=macosRuntimeAction("status",{state});
+    return {control_repository:Boolean(state.control_repository),control_clone:Boolean(state.control_clone_path&&fs.existsSync(state.control_clone_path)),
+      project_clone:Boolean(state.project_clone_path&&fs.existsSync(state.project_clone_path)),runner_configured:Boolean(state.runner_path),
+      runner_running:Boolean(result.launchctl_state==="loaded"&&result.launchctl_checked===true&&result.preflight?.inventory?.runner?.ownership==="OTHER_OR_CURRENT"),reviewer_browser:false,
+      codex_authenticated:macosPrerequisites().session_auth,pending_callbacks:pendingCallbackCount(state),migration:result.status};
+  }
   const pendingCallbacks=pendingCallbackCount(state);
 
   let runnerRunning=false;
@@ -712,6 +839,7 @@ function doctor() {
     reviewer_chat_configured:Boolean(state.reviewer_chat_url),
     ...runtimeChecks(state)
   };
+  if(process.platform==="darwin") checks.migration_preflight=migrationPreflight({state});
 
   let preflight=true;
   let preflightDetails=null;
@@ -744,6 +872,7 @@ function status() {
 function repair() {
   const state=loadState();
   const lang=ensureStateLanguage(state);
+  if(process.platform==="darwin") return emit({status:"NEEDS_USER_ACTION",preferred_language:lang,message:"macOS repair is approval-gated; no service or runner was changed.",migration:migrationPreflight({state}),mutations_performed:false});
   if(process.platform!=="win32"||!state.control_environment_ready||!state.control_clone_path||!state.project_key){
     return emit({status:"ERROR",error_id:"REPAIR-001",recoverable:true,preferred_language:lang,message:t(lang,"repair.not_ready"),runtime:runtimeChecks(state)},1);
   }
@@ -825,6 +954,10 @@ else if (command==="status") status();
 else if (command==="repair") repair();
 else if (command==="refresh-runtime") refreshRuntime();
 else if (command==="report-problem") reportProblem();
+else if (command==="migration-preflight") {
+  const state=loadState({create:false}); const lang=ensureStateLanguage(state);
+  emit({status:"PASS",preferred_language:lang,mutations_performed:false,migration:migrationPreflight({state})});
+}
 else if (command==="submit-report") submitReport();
 else if (command==="answer") answer();
 else if (command==="errors") emit({status:"PASS",errors:ERROR_CATALOG});
