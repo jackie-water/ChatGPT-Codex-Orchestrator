@@ -404,6 +404,8 @@ function runSetup() {
         runner_path:control.runner_path,
         runner_label:control.runner_label,
         instance_id:control.instance_id,
+        instance_platform:control.instance_platform,
+        instance_arch:control.instance_arch,
         instance_root:control.instance_root,
         config_path:control.config_path,
         browser_port:control.browser_port,

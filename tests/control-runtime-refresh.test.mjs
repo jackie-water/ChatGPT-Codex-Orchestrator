@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import crypto from "node:crypto";
+import vm from "node:vm";
 import os from "node:os";
 import path from "node:path";
 import {fileURLToPath} from "node:url";
@@ -9,6 +10,7 @@ import {normalizedGithubRepository,refreshControlRuntime} from "../src/lib/contr
 import {renderWorkflow} from "../src/lib/control-render.mjs";
 
 const repositoryRoot=path.resolve(path.dirname(fileURLToPath(import.meta.url)),"..");
+const cliSource=fs.readFileSync(path.join(repositoryRoot,"src/cli.mjs"),"utf8");
 const nativeModules=[
   "control-event-normalizer.mjs",
   "run-failure-state.mjs",
@@ -233,6 +235,38 @@ test("Windows runtime refresh uses the unchanged Windows rendering on any host",
   assert.match(workflow,/\.\/scripts\/run-codex\.ps1/);
   for(const [name,value] of Object.entries(f.preserved)) assert.equal(fs.readFileSync(path.join(f.control,name),"utf8"),value,name);
   assert.equal(f.run().changed,false);
+});
+
+test("Windows setup executes its trusted platform mapping before runtime refresh",t=>{
+  const windowsStart=cliSource.indexOf("  state.installation_id ||= crypto.randomUUID();\n  state.completed ||= [];\n");
+  assert.ok(windowsStart>=0,"non-darwin Windows setup branch should remain anchored");
+  const assignStart=cliSource.indexOf("      Object.assign(state,{",windowsStart);
+  const setupSandboxStart=cliSource.indexOf('      const setupSandbox=spawnSafeSync("powershell.exe"',assignStart);
+  assert.ok(assignStart>windowsStart,"Windows setup assignment should follow Windows-only installation initialization");
+  assert.ok(setupSandboxStart>assignStart,"Windows setup assignment should precede PowerShell setup");
+  const actualAssignment=cliSource.slice(assignStart,setupSandboxStart);
+  const assignmentEnd=actualAssignment.lastIndexOf("      });");
+  assert.ok(assignmentEnd>=0,"bounded Windows setup assignment should be present");
+  const assignment=actualAssignment.slice(0,assignmentEnd+"      });".length);
+  assert.match(assignment,/instance_platform:control\.instance_platform/);
+  assert.match(assignment,/instance_arch:control\.instance_arch/);
+
+  const f=fixture(t,{platform:"win32",arch:"x64"});
+  delete f.state.instance_platform;
+  delete f.state.instance_arch;
+  vm.runInNewContext(assignment,{state:f.state,control:{...f.state,instance_platform:"win32",instance_arch:"x64"}},{timeout:1000});
+  assert.equal(f.state.instance_platform,"win32");
+  assert.equal(f.state.instance_arch,"x64");
+  assert.equal(f.run().changed,true,"actual refresh should consume the restored trusted Windows identity");
+
+  for(const mutate of [
+    state=>{ delete state.instance_platform; },
+    state=>{ state.instance_arch="arm64"; }
+  ]){
+    const rejected=fixture(t,{platform:"win32",arch:"x64"});
+    mutate(rejected.state);
+    assertRejected(rejected);
+  }
 });
 
 test("runtime refresh rolls back only the fake commit on a failed push and can retry",t=>{
