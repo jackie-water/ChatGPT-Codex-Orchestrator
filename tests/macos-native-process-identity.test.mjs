@@ -79,8 +79,11 @@ test("helper trust covers private ancestors, symlink targets, and target replace
     fs.chmodSync(safe, 0o700);
     fs.unlinkSync(helper); fs.writeFileSync(replacement, "replacement", { mode: 0o777 }); fs.chmodSync(replacement, 0o777); fs.unlinkSync(link); fs.symlinkSync(replacement, link);
     assert.equal(readMacosNativeProcessIdentity(42, { platform: "darwin", helperPath: link, spawnSync: spawn }).status, "HELPER_UNAVAILABLE");
+    fs.writeFileSync(helper, "#!/bin/sh\n", { mode: 0o700 }); fs.chmodSync(helper, 0o700);
     fs.chmodSync(unsafe, 0o777);
-    assert.equal(readMacosNativeProcessIdentity(42, { platform: "darwin", helperPath: path.join(unsafe, "missing"), spawnSync: spawn }).status, "HELPER_UNAVAILABLE");
-    assert.equal(readMacosNativeProcessIdentity(42, { platform: "darwin", helperPath: path.join(unsafe, "..", "safe", "helper"), spawnSync: spawn }).status, "HELPER_UNAVAILABLE");
+    assert.equal(readMacosNativeProcessIdentity(42, { platform: "darwin", helperPath: path.join(safe, "helper"), spawnSync: spawn }).status, "OK");
+    assert.equal(readMacosNativeProcessIdentity(42, { platform: "darwin", helperPath: `${unsafe}/../safe/helper`, spawnSync: spawn }).status, "HELPER_UNAVAILABLE");
+    fs.chmodSync(unsafe, 0o700);
+    assert.equal(readMacosNativeProcessIdentity(42, { platform: "darwin", helperPath: `${unsafe}/../safe/helper`, spawnSync: spawn }).status, "OK");
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

@@ -78,17 +78,27 @@ function processStartIdentity(pid) {
   return null;
 }
 
+function trustedProcessIdentity(value, platform = process.platform, nativeIdentityEnabled = macosNativeProcessIdentityEnabled()) {
+  if (typeof value !== "string" || !value) return false;
+  if (platform === "darwin") return nativeIdentityEnabled && /^\d+:\d{6}$/.test(value);
+  if (platform === "linux") return /^\d+$/.test(value);
+  return true;
+}
+
 function fallbackReceiptLockIdentity() {
   return `uncertain-${process.pid}-${crypto.randomBytes(12).toString("hex")}`;
 }
 
-function ownerLiveness({ pid, process_start_identity, kill = process.kill, identity = processStartIdentity }) {
+function ownerLiveness({ pid, process_start_identity, kill = process.kill, identity = processStartIdentity,
+  platform = process.platform, nativeIdentityEnabled = macosNativeProcessIdentityEnabled() }) {
   if (!Number.isInteger(pid) || pid <= 0 || typeof process_start_identity !== "string" || !process_start_identity) return "unknown";
   try { kill(pid, 0); }
   catch (error) { return error?.code === "ESRCH" ? "orphan" : "unknown"; }
+  if (!trustedProcessIdentity(process_start_identity, platform, nativeIdentityEnabled)) return "unknown";
   try {
     const current = identity(pid);
-    return current === null ? "unknown" : current === process_start_identity ? "live" : "replaced";
+    if (!trustedProcessIdentity(current, platform, nativeIdentityEnabled)) return "unknown";
+    return current === process_start_identity ? "live" : "replaced";
   } catch { return "unknown"; }
 }
 
