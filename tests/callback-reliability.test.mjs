@@ -8,6 +8,8 @@ import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 
+const callbackTempRoot = fs.realpathSync(os.tmpdir());
+
 const extract = root => vm.runInNewContext(`(${receiptDomSource()})`, {}).call(null, root);
 class Element {
   constructor(attrs={}, text="", children=[]) { this.attrs=attrs; this.innerText=text; this.textContent=text; this.children=children; this.parentElement=null; for (const child of children) child.parentElement=this; }
@@ -112,7 +114,7 @@ test("shipped sender helpers keep mutation and send gates fail closed", () => {
 });
 
 test("production callback state store persists legal transitions and rejects identity/state drift", () => {
-  const dir=fs.mkdtempSync(path.join(os.tmpdir(),"callback-store-"));
+  const dir=fs.mkdtempSync(path.join(callbackTempRoot,"callback-store-"));
   const file=path.join(dir,"state.json");
   const expected={callbackId:"x",chatUrl:"https://chatgpt.com/c/chat-27",message:"payload"};
   fs.writeFileSync(file,JSON.stringify({routing_version:"explicit-route-v1",delivery_state:"PENDING",callback_id:"x",chat_url:expected.chatUrl,message:"payload"}));
@@ -122,10 +124,24 @@ test("production callback state store persists legal transitions and rejects ide
 });
 
 test("production callback state store fails closed on disappearance, conflicts, writes, renames, and returns bound fingerprints", () => {
-  const dir=fs.mkdtempSync(path.join(os.tmpdir(),"callback-store-")); const file=path.join(dir,"state.json"); const record={routing_version:"explicit-route-v1",delivery_state:"PENDING",callback_id:"x",chat_url:"https://chatgpt.com/c/chat-27",message:"payload"}; const expected={callbackId:"x",chatUrl:record.chat_url,message:record.message}; const write=()=>fs.writeFileSync(file,JSON.stringify(record)); write();
+  const dir=fs.mkdtempSync(path.join(callbackTempRoot,"callback-store-")); const file=path.join(dir,"state.json"); const record={routing_version:"explicit-route-v1",delivery_state:"PENDING",callback_id:"x",chat_url:"https://chatgpt.com/c/chat-27",message:"payload"}; const expected={callbackId:"x",chatUrl:record.chat_url,message:record.message}; const write=()=>fs.writeFileSync(file,JSON.stringify(record)); write();
   const make=(overrides={}, expectedFingerprint="")=>createCallbackStateStore({file,expected:record.chat_url,callbackId:"x",message:"payload",expectedFingerprint,fsModule:Object.assign(Object.create(fs),overrides),pathModule:path}); let store=make({},crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex")); const before=fs.readFileSync(file,"utf8"); fs.writeFileSync(file,before+" "); assert.throws(()=>store.read(),/fingerprint changed/); assert.throws(()=>store.update("DRAFT_INSERTED"),/fingerprint changed/); assert.equal(fs.readFileSync(file,"utf8"),before+" "); write();
-  for (const method of ["writeFileSync","renameSync"]) { store=make({[method](){throw new Error(method);}}); assert.throws(()=>store.update("DRAFT_INSERTED"),new RegExp(method)); assert.deepEqual(JSON.parse(fs.readFileSync(file)),record); }
+  for (const method of ["writeFileSync","fsyncSync","renameSync"]) { store=make({[method](){throw new Error(method);}}); assert.throws(()=>store.update("DRAFT_INSERTED"),new RegExp(method)); assert.deepEqual(JSON.parse(fs.readFileSync(file)),record); }
   fs.unlinkSync(file); assert.throws(()=>store.read(),/Callback state disappeared/); assert.throws(()=>store.update("DRAFT_INSERTED"),/Callback state disappeared/); assert.equal(fs.existsSync(file),false); write(); const fp=make().update("DRAFT_INSERTED"); assert.equal(fp,crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex"));
+});
+
+test("Windows-style callback persistence keeps file fsync and atomic rename without opening the directory", () => {
+  const dir=fs.mkdtempSync(path.join(callbackTempRoot,"callback-win32-")); const file=path.join(dir,"state.json");
+  const record={routing_version:"explicit-route-v1",delivery_state:"PENDING",callback_id:"x",chat_url:"https://chatgpt.com/c/chat-27",message:"payload"}; fs.writeFileSync(file,JSON.stringify(record));
+  let fsyncs=0, renames=0, directoryOpens=0;
+  const fake=Object.assign(Object.create(fs),{
+    fsyncSync(fd){fsyncs++; return fs.fsyncSync(fd);},
+    renameSync(from,to){renames++; return fs.renameSync(from,to);},
+    openSync(target,...args){if(target===dir) directoryOpens++; return fs.openSync(target,...args);}
+  });
+  const store=createCallbackStateStore({file,expected:record.chat_url,callbackId:"x",message:record.message,fsModule:fake,pathModule:path,platform:"win32"});
+  store.update("DRAFT_INSERTED");
+  assert.equal(directoryOpens,0); assert.equal(renames,1); assert.ok(fsyncs>=1); assert.equal(store.read().delivery_state,"DRAFT_INSERTED");
 });
 
 test("production delivery helper retries without blind resend and counts only irreversible submission", async () => {
@@ -135,8 +151,130 @@ test("production delivery helper retries without blind resend and counts only ir
   for (const prior of ["DRAFT_INSERTED","SUBMISSION_ATTEMPTED","DELIVERED"]) { state=prior; let called=0; assert.equal((await deliverCallback({read,hasReceipt:async()=>false,update,send:async()=>called++})).action,"reconcile"); assert.equal(called,0); state=prior; assert.equal((await deliverCallback({read,hasReceipt:async()=>true,update,send:async()=>called++})).state,"DELIVERED"); assert.equal(called,0); }
 });
 
+test("callback mutex serializes independent owners and rejects foreign or symlink locks", async () => {
+  const dir=fs.mkdtempSync(path.join(callbackTempRoot,"callback-lock-")); const file=path.join(dir,"state.json");
+  const record={routing_version:"explicit-route-v1",delivery_state:"PENDING",callback_id:"x",chat_url:"https://chatgpt.com/c/chat-27",message:"payload"}; fs.writeFileSync(file,JSON.stringify(record));
+  const make=()=>createCallbackStateStore({file,expected:record.chat_url,callbackId:"x",message:record.message,fsModule:fs,pathModule:path}); const one=make(), two=make();
+  let release; const held=new Promise(resolve=>{release=resolve;}); let entered=false;
+  let firstError; const first=one.withLock(async()=>{entered=true; await held;}).catch(error=>{firstError=error; throw error;}); first.catch(()=>{}); const deadline=Date.now()+2000; while(!entered){ if(firstError){ release(); throw firstError; } if(Date.now()>=deadline){ release(); throw new Error("mutex precondition timed out"); } await new Promise(resolve=>setTimeout(resolve,10)); }
+  await assert.rejects(()=>two.withLock(async()=>{}),/lock is occupied/); release(); await first;
+  const lock=file+".delivery.lock"; fs.symlinkSync(file,lock); await assert.rejects(()=>one.withLock(async()=>{}),/lock is occupied|symlink/); fs.unlinkSync(lock);
+});
+
+test("callback mutex refuses to unlink a lock whose inode changed", async () => {
+  const dir=fs.mkdtempSync(path.join(callbackTempRoot,"callback-lock-replacement-")); const file=path.join(dir,"state.json");
+  const record={routing_version:"explicit-route-v1",delivery_state:"PENDING",callback_id:"x",chat_url:"https://chatgpt.com/c/chat-27",message:"payload"}; fs.writeFileSync(file,JSON.stringify(record));
+  let altered=false;
+  const fake=Object.assign(Object.create(fs),{fstatSync(fd){const stat=fs.fstatSync(fd); return altered ? {...stat,ino:stat.ino+1} : stat;}});
+  const store=createCallbackStateStore({file,expected:record.chat_url,callbackId:"x",message:"payload",fsModule:fake,pathModule:path});
+  const lock=file+".delivery.lock"; await assert.rejects(()=>store.withLock(async()=>{altered=true;}),/lock was replaced/); assert.equal(fs.existsSync(lock),true);
+});
+
+test("callback mutex cleans only its own failed initial acquisition", async () => {
+  const dir=fs.mkdtempSync(path.join(callbackTempRoot,"callback-lock-faults-")); const file=path.join(dir,"state.json");
+  const record={routing_version:"explicit-route-v1",delivery_state:"PENDING",callback_id:"x",chat_url:"https://chatgpt.com/c/chat-27",message:"payload"}; fs.writeFileSync(file,JSON.stringify(record));
+  const lock=file+".delivery.lock"; let sends=0;
+  for (const failedMethod of ["writeFileSync","fsyncSync"]) {
+    let failed=true;
+    const fake=Object.assign(Object.create(fs),{[failedMethod](...args){if(failed && (failedMethod!=="writeFileSync" || typeof args[0]==="number")){failed=false; const error=new Error("EIO"); error.code="EIO"; throw error;} return fs[failedMethod](...args);}});
+    const store=createCallbackStateStore({file,expected:record.chat_url,callbackId:"x",message:"payload",fsModule:fake,pathModule:path});
+    await assert.rejects(()=>store.withLock(async()=>{sends++;}),/EIO/); assert.equal(fs.existsSync(lock),false);
+    await store.withLock(async()=>{sends++;}); assert.equal(fs.existsSync(lock),false);
+  }
+  assert.equal(sends,2);
+  let directoryOpens=0;
+  const win32=Object.assign(Object.create(fs),{openSync(target,...args){if(target===dir) directoryOpens++; return fs.openSync(target,...args);}});
+  const windowsStore=createCallbackStateStore({file,expected:record.chat_url,callbackId:"x",message:"payload",fsModule:win32,pathModule:path,platform:"win32"});
+  await windowsStore.withLock(async()=>{}); assert.equal(directoryOpens,0);
+});
+
+test("callback mutex cleans an own partial owner write but retains foreign partial bytes", async () => {
+  const dir=fs.mkdtempSync(path.join(callbackTempRoot,"callback-lock-partial-")); const file=path.join(dir,"state.json");
+  const record={routing_version:"explicit-route-v1",delivery_state:"PENDING",callback_id:"x",chat_url:"https://chatgpt.com/c/chat-27",message:"payload"}; fs.writeFileSync(file,JSON.stringify(record));
+  const lock=file+".delivery.lock";
+  let ownPartialFailed=false;
+  const ownPartial=Object.assign(Object.create(fs),{writeFileSync(fd,owner,...args){if(!ownPartialFailed){ownPartialFailed=true; fs.writeSync(fd,owner.slice(0,Math.min(20,owner.length))); const error=new Error("EIO"); error.code="EIO"; throw error;} return fs.writeFileSync(fd,owner,...args);}});
+  const store=createCallbackStateStore({file,expected:record.chat_url,callbackId:"x",message:"payload",fsModule:ownPartial,pathModule:path});
+  await assert.rejects(()=>store.withLock(async()=>{}),/EIO/); assert.equal(fs.existsSync(lock),false);
+  await store.withLock(async()=>{}); assert.equal(fs.existsSync(lock),false);
+
+  const foreign=Object.assign(Object.create(fs),{writeFileSync(fd){fs.writeSync(fd,"FOREIGN-PARTIAL"); const error=new Error("EIO"); error.code="EIO"; throw error;}});
+  const foreignStore=createCallbackStateStore({file,expected:record.chat_url,callbackId:"x",message:"payload",fsModule:foreign,pathModule:path});
+  await assert.rejects(()=>foreignStore.withLock(async()=>{}),/EIO/); assert.equal(fs.readFileSync(lock,"utf8"),"FOREIGN-PARTIAL"); fs.unlinkSync(lock);
+});
+
+test("callback mutex retains uncertain or foreign failed-acquisition paths", async () => {
+  const dir=fs.mkdtempSync(path.join(callbackTempRoot,"callback-lock-foreign-")); const file=path.join(dir,"state.json");
+  const record={routing_version:"explicit-route-v1",delivery_state:"PENDING",callback_id:"x",chat_url:"https://chatgpt.com/c/chat-27",message:"payload"}; fs.writeFileSync(file,JSON.stringify(record));
+  const lock=file+".delivery.lock";
+  for (const replacement of ["inode", "symlink", "preexisting"]) {
+    let fake;
+    if (replacement === "preexisting") {
+      fs.writeFileSync(lock,JSON.stringify({version:1,callback_id:"foreign",token:"foreign"}));
+      fake=Object.assign(Object.create(fs),{fsyncSync(fd){const error=new Error("EIO"); error.code="EIO"; throw error;}});
+    } else if (replacement === "symlink") {
+      fake=Object.assign(Object.create(fs),{writeFileSync(fd,...args){fs.unlinkSync(lock); fs.symlinkSync(file,lock); const error=new Error("EIO"); error.code="EIO"; throw error;}});
+    } else {
+      fake=Object.assign(Object.create(fs),{writeFileSync(fd,...args){fs.unlinkSync(lock); fs.writeFileSync(lock,"foreign"); const error=new Error("EIO"); error.code="EIO"; throw error;}});
+    }
+    const store=createCallbackStateStore({file,expected:record.chat_url,callbackId:"x",message:"payload",fsModule:fake,pathModule:path});
+    await assert.rejects(()=>store.withLock(async()=>{}),/EIO|occupied/); assert.equal(fs.existsSync(lock),true);
+    if (replacement === "symlink") fs.unlinkSync(lock); else fs.unlinkSync(lock);
+  }
+});
+
+test("callback mutex preserves a same-path foreign replacement after content verification", async () => {
+  const dir=fs.mkdtempSync(path.join(callbackTempRoot,"callback-lock-toctou-")); const file=path.join(dir,"state.json");
+  const record={routing_version:"explicit-route-v1",delivery_state:"PENDING",callback_id:"x",chat_url:"https://chatgpt.com/c/chat-27",message:"payload"}; fs.writeFileSync(file,JSON.stringify(record));
+  const lock=file+".delivery.lock"; const backup=lock+".own"; let sends=0;
+  const foreignBytes="{\"version\":1,\"callback_id\":\"foreign\",\"token\":\"foreign\"}\n";
+  const fake=Object.assign(Object.create(fs),{
+    fsyncSync(fd){const error=new Error("EIO"); error.code="EIO"; throw error;},
+    readFileSync(target,...args){
+      if (target===lock) {
+        const own=fs.readFileSync(lock,"utf8");
+        fs.renameSync(lock,backup); fs.writeFileSync(lock,foreignBytes,{mode:0o600}); fs.chmodSync(lock,0o600);
+        return own;
+      }
+      return fs.readFileSync(target,...args);
+    }
+  });
+  const store=createCallbackStateStore({file,expected:record.chat_url,callbackId:"x",message:"payload",fsModule:fake,pathModule:path});
+  await assert.rejects(()=>store.withLock(async()=>{sends++;}),/EIO/);
+  assert.equal(sends,0); assert.equal(fs.readFileSync(lock,"utf8"),foreignBytes); assert.equal(fs.existsSync(backup),true);
+  fs.unlinkSync(lock); fs.unlinkSync(backup);
+});
+
+test("callback mutex closes before simulated Win32 unlink and retains post-close replacement", async () => {
+  const dir=fs.mkdtempSync(path.join(callbackTempRoot,"callback-lock-win32-cleanup-")); const file=path.join(dir,"state.json");
+  const record={routing_version:"explicit-route-v1",delivery_state:"PENDING",callback_id:"x",chat_url:"https://chatgpt.com/c/chat-27",message:"payload"}; fs.writeFileSync(file,JSON.stringify(record));
+  const lock=file+".delivery.lock"; const backup=lock+".own"; let openFd; let closeCount=0; let sends=0; let directoryOpens=0;
+  const fake=Object.assign(Object.create(fs),{
+    openSync(target,...args){if(target===dir) directoryOpens++; const fd=fs.openSync(target,...args); if(target===lock) openFd=fd; return fd;},
+    closeSync(fd){closeCount++; if(fd===openFd) openFd=undefined; return fs.closeSync(fd);},
+    fsyncSync(fd){const error=new Error("EIO"); error.code="EIO"; throw error;},
+    unlinkSync(target){if(target===lock && openFd!==undefined) { const error=new Error("EPERM"); error.code="EPERM"; throw error; } return fs.unlinkSync(target);}
+  });
+  const store=createCallbackStateStore({file,expected:record.chat_url,callbackId:"x",message:"payload",fsModule:fake,pathModule:path,platform:"win32"});
+  await assert.rejects(()=>store.withLock(async()=>{sends++;}),/EIO/); assert.equal(sends,0); assert.equal(closeCount,1); assert.equal(fs.existsSync(lock),false); assert.equal(directoryOpens,0);
+  const replacement=Object.assign(Object.create(fake),{closeSync(fd){closeCount++; if(fd===openFd){openFd=undefined; fs.closeSync(fd); fs.renameSync(lock,backup); fs.writeFileSync(lock,"foreign-replacement"); fs.chmodSync(lock,0o600); return;} return fs.closeSync(fd);}});
+  const second=createCallbackStateStore({file,expected:record.chat_url,callbackId:"x",message:"payload",fsModule:replacement,pathModule:path,platform:"win32"});
+  await assert.rejects(()=>second.withLock(async()=>{}),/EIO/); assert.equal(fs.existsSync(lock),true); assert.equal(fs.readFileSync(lock,"utf8"),"foreign-replacement"); assert.equal(fs.existsSync(backup),true);
+  fs.unlinkSync(lock); fs.unlinkSync(backup);
+});
+
+test("two-phase sender journals immediately before click and preserves ambiguity", async () => {
+  let state="PENDING", order=[];
+  const update=next=>{state=next; order.push(next);};
+  const result=await deliverCallback({read:()=>({delivery_state:state}),hasReceipt:async()=>false,update,beforeSend:async()=>order.push("draft"),send:async({beforeClick})=>{order.push("ready"); await beforeClick(); order.push("click"); return "sent";}});
+  assert.equal(result.action,"sent"); assert.deepEqual(order,["draft","DRAFT_INSERTED","ready","SUBMISSION_ATTEMPTED","click"]);
+  state="PENDING"; order=[];
+  await assert.rejects(()=>deliverCallback({read:()=>({delivery_state:state}),hasReceipt:async()=>false,update,beforeSend:async()=>{},send:async({beforeClick})=>{await beforeClick(); const error=new Error("browser transport lost"); error.code="BROWSER_TRANSPORT_LOST"; throw error;}}),/browser transport lost/);
+  assert.equal(state,"SUBMISSION_ATTEMPTED");
+});
+
 test("deliverCallback blocks send on production state-store faults", async () => {
-  const dir=fs.mkdtempSync(path.join(os.tmpdir(),"callback-delivery-store-")); const file=path.join(dir,"state.json");
+  const dir=fs.mkdtempSync(path.join(callbackTempRoot,"callback-delivery-store-")); const file=path.join(dir,"state.json");
   const record={routing_version:"explicit-route-v1",delivery_state:"PENDING",callback_id:"x",chat_url:"https://chatgpt.com/c/chat-27",message:"payload"};
   const write=()=>fs.writeFileSync(file,JSON.stringify(record)); const make=(overrides={}, expectedFingerprint="")=>createCallbackStateStore({file,expected:record.chat_url,callbackId:"x",message:record.message,expectedFingerprint,fsModule:Object.assign(Object.create(fs),overrides),pathModule:path});
   const attempt=async (store, receipt=async()=>false) => { let sends=0, receipts=0; await assert.rejects(()=>deliverCallback({read:store.read,hasReceipt:async()=>{receipts++; return receipt();},update:store.update,send:async()=>{sends++;}})); assert.equal(sends,0); return receipts; };

@@ -49,7 +49,7 @@ test("runtime payload contains only the explicit scripts and native dependency c
     fs.writeFileSync(target, "must not be packaged\n");
   }
   const files = prepareControlRuntimeFiles({ sourceRoot: fixtureSource, controlRoot });
-  assert.equal(files.length, 34);
+  assert.equal(files.length, 35);
   assert.equal(files.filter(file => file.path.startsWith("src/lib/")).length, 5);
   assert.ok(files.every(file => Buffer.isBuffer(file.content) && !file.content.includes("must not be packaged")));
   assert.deepEqual(fs.readdirSync(controlRoot), []);
@@ -59,6 +59,12 @@ test("runtime payload contains only the explicit scripts and native dependency c
   assert.match(dispatch, /from "\.\.\/src\/lib\/macos-codex-run-contract\.mjs"/);
   assert.doesNotMatch(dispatch, /\.\.\/\.\.\/src\/lib\//);
   assert.match(fs.readFileSync(path.join(controlRoot, "src", "lib", "macos-postexecution-wrapper.mjs"), "utf8"), /from "\.\.\/\.\.\/scripts\/callback-delivery\.mjs"/);
+  const nativeRegisterSource = fs.readFileSync(path.join(sourceRoot, "runtime", "scripts", "register-chat-mac.mjs"));
+  const nativeRegisterBundled = fs.readFileSync(path.join(controlRoot, "scripts", "register-chat-mac.mjs"));
+  assert.deepEqual(nativeRegisterBundled, nativeRegisterSource);
+  assert.match(nativeRegisterBundled.toString("utf8"), /from "node:(?:fs|os|path|child_process|url)"/);
+  assert.doesNotMatch(nativeRegisterBundled.toString("utf8"), /(?:from\s*["'](?!node:)|import\s*\(|\brequire\s*\()/);
+  assert.equal(fs.readdirSync(path.join(controlRoot, "scripts")).filter(name => name === "register-chat-mac.mjs").length, 1);
   assert.equal(fs.existsSync(path.join(root, "src")), false);
 });
 
@@ -136,7 +142,8 @@ test("generated native entrypoints reach argument rejection and review/merge rem
     ["macos-finalize-codex.mjs", /MACOS_FINALIZE_FAILED: FINALIZATION_REJECTED/],
     ["normalize-control-event.mjs", /Required arguments are missing/],
     ["report-run-failure.mjs", /Required arguments are missing/],
-    ["register-chat.mjs", /event-path/]
+    ["register-chat.mjs", /event-path/],
+    ["register-chat-mac.mjs", /Usage: register-chat-mac\.mjs/]
   ]) {
     const result = spawnSync(process.execPath, [path.join(controlRoot, "scripts", name)], {
       cwd: home, env: childEnvironment(home), encoding: "utf8", timeout: 10000

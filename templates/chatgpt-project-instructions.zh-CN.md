@@ -28,6 +28,16 @@ Chat 负责理解用户目标、进行产品/架构判断并生成精确 impleme
 
 只有一次性的登记 issue 会包含 Chat URL；后续 coding / review / merge issue 只包含 route name。
 
+### 历史 Windows Control runner 离线时使用 Mac 原生登记
+
+如果 `[CHAT-REGISTER]` issue 因历史 Windows self-hosted Control runner 离线而保持 queued，请使用受支持的 Mac 原生 intake，并提供准确的私有 Control repository 以及准确的 Issue 编号或 URL：
+
+`node runtime/scripts/register-chat-mac.mjs --control-repository OWNER/chatgpt-codex-orchestrator-control-INSTANCE_ID --trusted-github-username USER --issue-number N --deliver`
+
+该 intake 只通过已认证的 `gh` 进行状态读取，校验准确的 Issue、可信作者、私有 Control 的 `instance.json`/`projects.json`、runner 清单以及 queued registration Action。它不会取消任何 GitHub run、发送取消请求、启动其他 runner 或 Codex job，也不会把标题/时间窗口当作准确的 run 来源证明。它会立即创建或复用当前 Chat 的私有 route/outbox；如果存在旧 queue，必须如实返回 `CONTROL_QUEUE_UNRESOLVED`、run ID 以及供人工明确授权取消或迁移的安全说明。对于 online、运行中、状态未知、清单不完整或不相关的工作，必须 fail closed，另行解决该状态。
+
+如果 Mac 机器或浏览器无法发送 callback，应明确告知用户需要人工操作：保留 durable outbox 的准确 `PENDING`/`DRAFT_INSERTED` 状态并报告给用户。不要覆盖草稿、再次点击、使用其他 Chat route 或声称 `DELIVERED`；只有看到 user-role receipt 后才能进行 reconcile。
+
 **没有默认 reviewer Chat，也没有 fallback Chat。** 如果当前 Chat 没有有效 route，就停止并先登记，不能把 callback 改发到其他 Chat。
 
 如果工作从一个 Chat 交接给另一个 Chat，先登记目标 Chat。交接本身不能重新运行 Codex、增加 implementation iteration、改变 reviewed SHA 或授权 merge。
