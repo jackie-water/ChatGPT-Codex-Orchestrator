@@ -15,11 +15,11 @@ assert.ok(windowsStart>darwinStart);
 const mac=cli.slice(functionStart,windowsStart);
 
 test("Darwin resume requires same-installation independent Sandbox completion",()=>{
-  assert.match(mac,/sandboxSmokeStatus\(state\)/);
+  assert.match(mac,/sandboxSmokeStatus\(state,\{strict:process\.platform===\"darwin\"\}\)/);
   assert.match(mac,/smoke\?\.status==="PASS" && smoke\?\.stage==="COMPLETE"/);
   assert.match(mac,/smoke\?\.branch===`test\/install-smoke-\$\{shortId\}`/);
-  assert.ok(mac.indexOf("sandboxSmokeStatus(state)")>mac.indexOf("ensureInstallerChatRegistration"));
-  assert.ok(mac.indexOf("const sameInstanceComplete=")>mac.indexOf("sandboxSmokeStatus(state)"));
+  assert.ok(mac.indexOf("sandboxSmokeStatus(state,{strict:process.platform===\"darwin\"})")>mac.indexOf("ensureInstallerChatRegistration"));
+  assert.ok(mac.indexOf("const sameInstanceComplete=")>mac.indexOf("sandboxSmokeStatus(state,{strict:process.platform===\"darwin\"})"));
   assert.match(mac,/macos_native_setup="SANDBOX_VERIFIED"/);
   assert.match(mac,/action\(state,"codex_trust_project"/);
   assert.match(mac,/!Object\.hasOwn\(registered\|\|\{\},"installation_id"\)/);
@@ -57,9 +57,8 @@ test("Darwin resume uses isolated child-process evidence and remains idempotent"
   try {
     save(base); let result=run(), state=read(); assert.equal(JSON.parse(result.stdout).action_id,"sandbox_verification"); assert.equal(state.target_environment_ready,false);
     save({...base,sandbox_verified:true}); result=run(); state=read(); assert.equal(JSON.parse(result.stdout).action_id,"sandbox_verification"); assert.equal(state.target_environment_ready,false);
-    fs.writeFileSync(mode,"complete\n"); save({...base,sandbox_verified:false}); result=run(); state=read(); assert.equal(JSON.parse(result.stdout).action_id,"codex_trust_project"); assert.equal(state.macos_native_setup,"SANDBOX_VERIFIED"); assert.equal(state.target_environment_ready,false);
-    save({...state,codex_trust_project:true}); result=run(); state=read(); assert.equal(JSON.parse(result.stdout).error_id,"MACOS-POST-SANDBOX-UNSUPPORTED"); assert.equal(state.macos_native_setup,"POST_SANDBOX_HANDOFF"); const errorAt=state.last_error.at;
-    result=run(); state=read(); assert.equal(JSON.parse(result.stdout).error_id,"MACOS-POST-SANDBOX-UNSUPPORTED"); assert.equal(state.last_error.at,errorAt); assert.equal(state.target_environment_ready,false);
+    fs.writeFileSync(mode,"complete\n"); save({...base,sandbox_verified:false}); result=run(); state=read(); assert.equal(JSON.parse(result.stdout).action_id,"sandbox_verification"); assert.equal(state.macos_native_setup,"SANDBOX_READY"); assert.equal(state.target_environment_ready,false);
+    const waitingAt=state.last_error?.at; result=run(); state=read(); assert.equal(JSON.parse(result.stdout).action_id,"sandbox_verification"); assert.equal(state.macos_native_setup,"SANDBOX_READY"); assert.equal(state.last_error?.at,waitingAt); assert.equal(state.target_environment_ready,false);
     const log=fs.readFileSync(audit,"utf8"); const commands=log.split(/\r?\n/).filter(Boolean); assert.ok(log.includes("git show origin/main:src/status.mjs")); assert.ok(log.includes("ready-evidence")); assert.equal(commands.some(line=>/(?:^|\/)gh(?:\s|$).*\bissue\s+create\b/.test(line)),false); assert.equal(commands.some(line=>/(?:^|\/)git\s+(?:commit|push)(?:\s|$)/.test(line)),false); assert.equal(commands.some(line=>/(?:^|\/)launchctl(?:\s|$).*(?:\bbootstrap\b|\bbootout\b)/.test(line)),false); assert.equal(commands.some(line=>/(?:^|\/)powershell(?:\.exe)?(?:\s|$)/i.test(line)),false);
   } finally { fs.rmSync(root,{recursive:true,force:true}); }
 });

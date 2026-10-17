@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import crypto from "node:crypto";
 import { spawnSafeSync } from "./spawn-safe.mjs";
 import { canonicalInstallationId } from "./control-render.mjs";
 
@@ -22,6 +23,22 @@ const privatePath = value => {
   }
   return true;
 };
+function safeLaunchAgentPath(plist) {
+  prepareLaunchAgentDirectory();
+  const home=path.resolve(HOME()), dir=path.dirname(plist), uid=owner();
+  if(path.resolve(dir)!==path.join(home,"Library","LaunchAgents")) throw new Error("LaunchAgent path is not private");
+  for(const p of [home,path.join(home,"Library"),dir]) { const st=fs.lstatSync(p); if(!st.isDirectory()||st.isSymbolicLink()||(uid!==null&&st.uid!==uid)||(st.mode&0o022)) throw new Error("LaunchAgent ancestor is unsafe"); }
+  try { const st=fs.lstatSync(plist); if(!st.isFile()||st.isSymbolicLink()||(uid!==null&&st.uid!==uid)||st.nlink!==1||(st.mode&0o077))throw new Error("LaunchAgent leaf is unsafe"); } catch(error) { if(error.code!=="ENOENT") throw error; }
+}
+function prepareLaunchAgentDirectory() {
+  const home=path.resolve(HOME()), uid=owner();
+  const homeStat=fs.lstatSync(home);
+  if(!homeStat.isDirectory()||homeStat.isSymbolicLink()||(uid!==null&&homeStat.uid!==uid)||(homeStat.mode&0o022))throw new Error("HOME is unsafe");
+  for(const dir of [path.join(home,"Library"),path.join(home,"Library","LaunchAgents")]) {
+    try { const st=fs.lstatSync(dir); if(!st.isDirectory()||st.isSymbolicLink()||(uid!==null&&st.uid!==uid)||(st.mode&0o022))throw new Error("LaunchAgent ancestor is unsafe"); }
+    catch(error) { if(error.code!=="ENOENT") throw error; fs.mkdirSync(dir,{mode:0o700}); const st=fs.lstatSync(dir); if(st.isSymbolicLink()||(uid!==null&&st.uid!==uid)||(st.mode&0o022))throw new Error("LaunchAgent ancestor is unsafe"); }
+  }
+}
 
 export function parseNodeMajor(version) { return Number((String(version||"").match(/v(\d+)/)||[])[1]||0); }
 export function macosPrerequisites() {
@@ -50,8 +67,8 @@ function atomicPrivateJson(file,value){
   for(const entry of missing.reverse()) fs.mkdirSync(entry,{mode:0o700});
   const ds=fs.lstatSync(dir); if(ds.isSymbolicLink()||(owner()!==null&&ds.uid!==owner())||(ds.mode&0o077)) throw new Error("Migration journal directory is unsafe");
   if(fs.existsSync(file)){const st=fs.lstatSync(file);if(st.isSymbolicLink()||(owner()!==null&&st.uid!==owner())||(st.mode&0o077))throw new Error("Migration journal collision or unsafe ownership");}
-  const temp=`${file}.${process.pid}.tmp`; const fd=fs.openSync(temp,"wx",0o600);
-  try{fs.writeFileSync(fd,JSON.stringify(value,null,2));fs.fsyncSync(fd);}finally{fs.closeSync(fd);} fs.renameSync(temp,file);fs.chmodSync(file,0o600);
+  const temp=`${file}.${process.pid}.${crypto.randomUUID()}.tmp`; const fd=fs.openSync(temp,"wx",0o600);
+  try{fs.writeFileSync(fd,JSON.stringify(value,null,2));fs.fsyncSync(fd);}finally{fs.closeSync(fd);} fs.renameSync(temp,file); const dfd=fs.openSync(dir,"r"); try{fs.fsyncSync(dfd);}finally{fs.closeSync(dfd);} const st=fs.lstatSync(file); if(st.isSymbolicLink()||(owner()!==null&&st.uid!==owner())||(st.mode&0o077))throw new Error("Migration journal replacement is unsafe"); fs.chmodSync(file,0o600);
 }
 export function migrationIntentPath({home=HOME(),installationId}={}){
   if(!installationId) throw new Error("installation_id is required for an instance-scoped migration intent");
@@ -119,8 +136,9 @@ export function renderLaunchAgent({label,runnerPath,instanceRoot,programArgument
 
 export function macosRuntimeAction(action,{state={},commandRunner=cmd}={}) {
   if(!["status","doctor","install","start","stop","repair"].includes(action)) return {status:"ERROR",mutations_performed:false,action};
+  const readonly=action==="status"||action==="doctor";
   const preflight=migrationPreflight({state,commandRunner});
-  if(preflight.status!=="READY") {
+  if(preflight.status!=="READY"&&!readonly) {
     const unknown=preflight.conflicts.some(x=>x.kind==="runner_ownership_unknown");
     if(unknown) return {status:"NEEDS_USER_ACTION",action_id:"resolve_runner_ownership",error_id:"MACOS-RUNNER-OWNERSHIP",launchctl_state:"unknown",mutations_performed:false,preflight,action:"Resolve runner ownership manually; no existing runner was stopped."};
     return {status:"ERROR",error_id:"MACOS-RUNNER-OWNERSHIP",mutations_performed:false,preflight,action:"Resolve runner ownership manually; no existing runner was stopped."};
@@ -129,13 +147,13 @@ export function macosRuntimeAction(action,{state={},commandRunner=cmd}={}) {
   if(!state.sandbox_only || state.target_environment_ready===true || !state.instance_id || state.runner_owner!==state.installation_id || !/^com\.chatgpt\.codex\.[A-Za-z0-9-]+$/.test(String(label||"")) || !/^[A-Za-z0-9._-]+$/.test(String(state.runner_label||""))) return {status:"ERROR",error_id:"MACOS-SANDBOX-SCOPE",mutations_performed:false,action,details:"Runner and LaunchAgent identities are incomplete or target ownership is present."};
   if(state.browser_port_conflict===true || state.browser_profile_conflict===true || state.conflicting_runner===true) return {status:"ERROR",error_id:"MACOS-INSTANCE-CONFLICT",mutations_performed:false,action};
   if(!listed.ok) return {status:"ERROR",error_id:"MACOS-LAUNCHCTL-001",mutations_performed:false,launchctl_state:"unknown",details:listed.output,preflight};
-  const listedActive=listed.output.split("\n").some(line=>line.includes(label));
+  const listedActive=listed.output.split("\n").some(line=>line.trim().split(/\s+/).includes(label));
   const proof=listedActive?commandRunner("launchctl",["print",`gui/${process.getuid?.()||0}/${label}`]):{ok:false,output:"not-listed"};
   if(listedActive&&!proof.ok) return {status:"ERROR",error_id:"MACOS-LAUNCHCTL-002",mutations_performed:false,launchctl_state:"unknown",details:proof.output,preflight};
   const active=listedActive&&proof.ok;
-  if(action==="status"||action==="doctor") return {status:"PASS",mutations_performed:false,launchctl_checked:listed.ok,launchctl_state:active?"loaded":"not-loaded",plist_exists:fs.existsSync(plist),preflight};
+  if(readonly) return {status:preflight.status!=="READY"&&!active?"NEEDS_USER_ACTION":"PASS",mutations_performed:false,launchctl_checked:listed.ok,launchctl_state:active?"loaded":(preflight.status!=="READY"?"unknown":"not-loaded"),plist_exists:fs.existsSync(plist),preflight};
   if(state.macos_setup_approved!==true || state.macos_action_approval!==action) return {status:"NEEDS_USER_ACTION",error_id:"MACOS-ACTION-APPROVAL",mutations_performed:false,action:"Approve this exact macOS action: "+action};
-  if(action==="install"||action==="repair") { if(fs.existsSync(plist)){ const st=fs.lstatSync(plist); if(st.isSymbolicLink()||st.uid!==process.getuid?.()||st.mode&0o022) return {status:"ERROR",error_id:"MACOS-PLIST-COLLISION",mutations_performed:false,action}; if(action==="install"&&!state.plist_owned) return {status:"ERROR",error_id:"MACOS-PLIST-COLLISION",mutations_performed:false,action}; } fs.mkdirSync(path.dirname(plist),{recursive:true,mode:0o700}); const temp=plist+`.${process.pid}.tmp`; const fd=fs.openSync(temp,"wx",0o600); try { fs.writeFileSync(fd,renderLaunchAgent({label,runnerPath:state.runner_path,instanceRoot:state.instance_root})); fs.fsyncSync(fd); } finally { fs.closeSync(fd); } fs.renameSync(temp,plist); fs.chmodSync(plist,0o600); return {status:"PASS",mutations_performed:true,action,plist}; }
+  if(action==="install"||action==="repair") { try{safeLaunchAgentPath(plist);}catch(error){return {status:"ERROR",error_id:"MACOS-PLIST-UNSAFE",mutations_performed:false,action,details:String(error.message||error)};} if(fs.existsSync(plist)&&action==="install"&&!state.plist_owned)return {status:"ERROR",error_id:"MACOS-PLIST-COLLISION",mutations_performed:false,action}; const temp=path.join(path.dirname(plist),`.${label}.${process.pid}.${crypto.randomUUID()}.tmp`); let fd; try{fd=fs.openSync(temp,"wx",0o600);fs.writeFileSync(fd,renderLaunchAgent({label,runnerPath:state.runner_path,instanceRoot:state.instance_root}));fs.fsyncSync(fd);}catch(error){try{if(fd!==undefined)fs.closeSync(fd);}catch{}try{fs.unlinkSync(temp);}catch{}return {status:"ERROR",error_id:"MACOS-PLIST-WRITE",mutations_performed:false,action,details:String(error.message||error)};}finally{if(fd!==undefined)try{fs.closeSync(fd);}catch{}} try{safeLaunchAgentPath(plist);if(fs.existsSync(plist)&&action==="install"&&!state.plist_owned)throw new Error("Unexpected existing LaunchAgent");fs.renameSync(temp,plist);const dfd=fs.openSync(path.dirname(plist),"r");try{fs.fsyncSync(dfd);}finally{fs.closeSync(dfd);}safeLaunchAgentPath(plist);fs.chmodSync(plist,0o600);}catch(error){try{fs.unlinkSync(temp);}catch{}return {status:"ERROR",error_id:"MACOS-PLIST-COMMIT",mutations_performed:false,action,details:String(error.message||error)};} return {status:"PASS",mutations_performed:true,action,plist}; }
   const result=commandRunner("launchctl",[action==="start"?"bootstrap":"bootout",`gui/${process.getuid?.()||0}`,plist]);
   if(!result.ok) return {status:"ERROR",mutations_performed:false,action,launchctl_state:"unknown",details:result.output};
   const after=commandRunner("launchctl",["print",`gui/${process.getuid?.()||0}/${label}`]);

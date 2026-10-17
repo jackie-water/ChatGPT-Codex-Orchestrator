@@ -27,6 +27,12 @@ function safePath(value, missing = false) {
   return absolute;
 }
 function exists(file) { try { fs.lstatSync(file); return true; } catch (e) { if (e.code === "ENOENT") return false; throw e; } }
+function attemptMacosChatDelivery(snapshot, callback) {
+  if(!callback?.callback_id || callback.callback_state === "DELIVERED") return callback;
+  const file=path.join(snapshot.instance_root,"pending-wakes",`${callback.callback_id}.json`);
+  const wake=path.join(snapshot.controlRoot,"scripts","wake-chat.mjs");
+  try { const stored=JSON.parse(fs.readFileSync(file,"utf8")); if(stored.callback_id!==callback.callback_id||stored.chat_url!==snapshot.authorization.chat_url)throw problem("CALLBACK_IDENTITY_CONFLICT"); const reconcileOnly=stored.delivery_state!=="PENDING"; const r=childProcess.spawnSync(process.execPath,[wake,stored.message],{encoding:"utf8",timeout:95000,env:{...process.env,ORCHESTRATOR_CHAT_URL:snapshot.authorization.chat_url,CODEX_CALLBACK_ID:callback.callback_id,CODEX_CALLBACK_STATE_FILE:file,CODEX_CALLBACK_EXPECTED_FINGERPRINT:digest(fs.readFileSync(file)),...(reconcileOnly?{CODEX_RECONCILE_ONLY:"1"}:{})}}); const final=JSON.parse(fs.readFileSync(file,"utf8")); const delivered=final.callback_id===callback.callback_id&&final.chat_url===snapshot.authorization.chat_url&&final.delivery_state==="DELIVERED"&&hasTrustedDeliveryProof(final); return {callback_id:callback.callback_id,callback_state:delivered?"DELIVERED":final.delivery_state,delivery_status:delivered?"DELIVERED":"PENDING"}; } catch { return {...callback,delivery_status:"PENDING"}; }
+}
 function directory(dir) {
   safePath(dir, true);
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -307,7 +313,7 @@ export async function finalizeMacosCodexRun({ planned, repoPath, controlRoot, tr
         exactReport(git, data.checkpoint_commit, data.checkpoint_path, data.report);
         const allowCreate = data.phase !== "COMPLETE" && !data.callback_id;
         save({ phase: "PUBLISHED" });
-        const callback = queueCallback(snapshot, data, allowCreate);
+        const callback = attemptMacosChatDelivery(snapshot, queueCallback(snapshot, data, allowCreate));
         save({ phase: "COMPLETE", execution_state: "READY_FOR_REVIEW", state: "READY_FOR_REVIEW", ...callback });
         return data;
       }
@@ -377,7 +383,7 @@ export async function finalizeMacosCodexRun({ planned, repoPath, controlRoot, tr
     publicationGuard();
     if (remoteHead(git, plan.checkpoint_branch) !== coordinates.checkpoint_commit) throw problem("CHECKPOINT_PUBLICATION_DRIFT");
     save({ ...coordinates, phase: "PUBLISHED" });
-    const callback = queueCallback(snapshot, data);
+    const callback = attemptMacosChatDelivery(snapshot, queueCallback(snapshot, data));
     save({ ...callback, phase: "COMPLETE", execution_state: "READY_FOR_REVIEW", state: "READY_FOR_REVIEW" });
     return data;
   } catch (error) {

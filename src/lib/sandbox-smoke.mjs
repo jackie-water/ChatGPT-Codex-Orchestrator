@@ -34,7 +34,7 @@ function listSmokeIssues(controlRepository,installationId){
     "issue","list","--repo",controlRepository,
     "--state","all","--limit","100",
     "--search",marker+" in:title",
-    "--json","number,title,state,url,body"
+    "--json","number,title,state,url,body,author"
   ],{allowFailure:true});
   if(!r.ok||!r.stdout) return [];
   try{return JSON.parse(r.stdout);}catch{return [];}
@@ -44,18 +44,30 @@ function showGit(repoPath,object){
   return run("git",["show",object],{cwd:repoPath,allowFailure:true});
 }
 
+function jsonBody(issue){ try { return JSON.parse(String(issue?.body||"")); } catch { return null; } }
+function exactEvidence({state,branch,head,implementationStatus,runEvidence,reviewEvidence,issues}) {
+  if (implementationStatus !== "READY_FOR_REVIEW") return false;
+  const matchingImplementation=runEvidence.stdout.includes("- source_commit: "+head) && runEvidence.stdout.includes("- source_branch: "+branch) &&
+    runEvidence.stdout.includes("- repository: "+state.sandbox_repository) && runEvidence.stdout.includes("- project: "+state.sandbox_project_key) && runEvidence.stdout.includes("Status: READY_FOR_REVIEW");
+  const matchingReview=reviewEvidence.ok && reviewEvidence.stdout.includes("Status: CODE_REVIEW_COMPLETE") &&
+    reviewEvidence.stdout.includes("reviewed_commit: "+head) && reviewEvidence.stdout.includes("source_branch: "+branch) &&
+    reviewEvidence.stdout.includes("repository: "+state.sandbox_repository) && reviewEvidence.stdout.includes("project: "+state.sandbox_project_key);
+  const request=issues.map(x=>({issue:x,body:jsonBody(x)})).find(({issue,body})=>String(issue.title||"").startsWith("[CODE-REVIEW]")&&body?.project===state.sandbox_project_key&&body?.repository===state.sandbox_repository&&body?.source_branch===branch&&body?.reviewed_commit===head&&body?.review_route===state.sandbox_review_route&&body?.installation_smoke?.installation_id===state.installation_id);
+  return Boolean(matchingImplementation && matchingReview && request);
+}
+
 function fetch(repoPath){
   run("git",["fetch","origin","--prune"],{cwd:repoPath});
 }
 
-export function sandboxSmokeStatus(state){
+export function sandboxSmokeStatus(state,{strict=false}={}){
   if(!state?.sandbox_clone_path||!state?.sandbox_repository||!state?.sandbox_project_key){
     return {status:"NOT_READY",stage:"SANDBOX_NOT_CONFIGURED"};
   }
 
   fetch(state.sandbox_clone_path);
   const mainStatus=showGit(state.sandbox_clone_path,"origin/main:src/status.mjs");
-  if(mainStatus.ok&&/status\s*=\s*["']ready["']/.test(mainStatus.stdout)){
+  if(!strict&&mainStatus.ok&&/status\s*=\s*["']ready["']/.test(mainStatus.stdout)){
     return {
       status:"PASS",
       stage:"COMPLETE",
@@ -66,7 +78,10 @@ export function sandboxSmokeStatus(state){
 
   const branch=smokeBranch(state.installation_id);
   const branchProbe=run("git",["rev-parse","--verify","origin/"+branch],{cwd:state.sandbox_clone_path,allowFailure:true});
+  const mainHead=run("git",["rev-parse","--verify","origin/main^{commit}"],{cwd:state.sandbox_clone_path,allowFailure:true});
   const issues=state.control_repository?listSmokeIssues(state.control_repository,state.installation_id):[];
+  const mainMerge=mainHead.ok&&branchProbe.ok&&run("git",["merge-base","--is-ancestor",branchProbe.stdout.trim().toLowerCase(),"origin/main"],{cwd:state.sandbox_clone_path,allowFailure:true}).ok;
+  const mainMergeEvidence=mainHead.ok&&issues.some(x=>{const b=jsonBody(x);return String(x.title||"").startsWith("[MERGE-APPROVE]")&&b?.project===state.sandbox_project_key&&b?.repository===state.sandbox_repository&&b?.approved_commit===branchProbe.stdout.trim().toLowerCase()&&b?.source_branch===branch&&b?.review_route===state.sandbox_review_route&&b?.installation_smoke?.installation_id===state.installation_id&&x.author?.is_bot===false&&state.sandbox_merge_approved_commit===branchProbe.stdout.trim().toLowerCase();});
 
   if(!branchProbe.ok){
     return {
@@ -94,7 +109,13 @@ export function sandboxSmokeStatus(state){
     reviewStatus=m?.[1]||"UNKNOWN";
   }
 
-  if(reviewStatus==="CODE_REVIEW_COMPLETE"){
+  if(strict&&mainStatus.ok&&/status\s*=\s*["']ready["']/.test(mainStatus.stdout)&&reviewStatus==="CODE_REVIEW_COMPLETE" && exactEvidence({state,branch,head,implementationStatus,runEvidence,reviewEvidence,issues}) && mainMerge && mainMergeEvidence){
+    return {status:"PASS",stage:"COMPLETE",branch,commit:head,implementation_status:implementationStatus,review_status:reviewStatus,message:"Sandbox main contains the exact reviewed and explicitly approved commit."};
+  }
+  if(strict&&reviewStatus==="CODE_REVIEW_COMPLETE" && exactEvidence({state,branch,head,implementationStatus,runEvidence,reviewEvidence,issues}) && mainMerge && !mainMergeEvidence){
+    return {status:"NEEDS_HUMAN",stage:"MERGE_EVIDENCE_UNVERIFIED",branch,commit:head,implementation_status:implementationStatus,review_status:reviewStatus,reason:"Main contains the reviewed commit, but trusted explicit human approval/merge evidence is unavailable."};
+  }
+  if(strict&&reviewStatus==="CODE_REVIEW_COMPLETE" && exactEvidence({state,branch,head,implementationStatus,runEvidence,reviewEvidence,issues})){
     return {
       status:"NEEDS_USER_ACTION",
       stage:"MERGE_APPROVAL_REQUIRED",
@@ -131,11 +152,12 @@ export function sandboxSmokeStatus(state){
 
   return {
     status:"WAITING",
-    stage:"CODEX_RUNNING",
+    stage:strict?"VERIFICATION_EVIDENCE_INCOMPLETE":"CODEX_RUNNING",
     branch,
     commit:head,
     implementation_status:implementationStatus,
-    issues
+    issues,
+    reason:strict?"Exact same-installation implementation, independent same-SHA review, explicit approval, and verified main ancestry/merge evidence are incomplete or unverifiable.":undefined
   };
 }
 
@@ -169,6 +191,7 @@ export function startSandboxSmoke(state){
 
   const body=JSON.stringify({
     project:state.sandbox_project_key,
+    repository:state.sandbox_repository,
     target_repo:state.sandbox_repository,
     target_branch:branch,
     iteration:1,
@@ -197,6 +220,7 @@ export function createSandboxCodeReview(state,{commit}){
   const title="[CODE-REVIEW] "+issueMarker(state.installation_id)+" "+commit.slice(0,12);
   const body=JSON.stringify({
     project:state.sandbox_project_key,
+    repository:state.sandbox_repository,
     source_branch:smokeBranch(state.installation_id),
     reviewed_commit:commit,
     review_route:reviewRoute,
@@ -217,6 +241,7 @@ export function createSandboxMergeApproval(state,{commit}){
   const title="[MERGE-APPROVE] "+issueMarker(state.installation_id)+" "+commit.slice(0,12);
   const body=JSON.stringify({
     project:state.sandbox_project_key,
+    repository:state.sandbox_repository,
     source_branch:smokeBranch(state.installation_id),
     approved_commit:commit,
     review_route:reviewRoute,

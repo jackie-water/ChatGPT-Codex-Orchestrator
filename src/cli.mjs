@@ -304,7 +304,7 @@ function runSetup() {
     }
     state.sandbox_review_route=registration.route;
     let smoke;
-    try { smoke=sandboxSmokeStatus(state); }
+    try { smoke=sandboxSmokeStatus(state,{strict:process.platform==="darwin"}); }
     catch(error){
       state.last_error={error_id:"SANDBOX-VERIFICATION-001",message:String(error.message||error),at:new Date().toISOString()};
       saveState(state);
@@ -558,13 +558,13 @@ function runSetup() {
       if(!state.completed.includes("sandbox_chat_registered")) state.completed.push("sandbox_chat_registered");
       saveState(state);
 
-      let smoke=sandboxSmokeStatus(state);
+      let smoke=sandboxSmokeStatus(state,{strict:process.platform==="darwin"});
       if(smoke.stage==="NOT_STARTED"){
         const started=startSandboxSmoke(state);
         state.sandbox_smoke_started=true;
         state.sandbox_smoke_issue=started.issue?.url||null;
         saveState(state);
-        smoke=sandboxSmokeStatus(state);
+        smoke=sandboxSmokeStatus(state,{strict:process.platform==="darwin"});
       }
 
       if(smoke.stage==="COMPLETE"){
@@ -706,7 +706,7 @@ function smokeStatusCommand() {
   const state=loadState();
   const lang=ensureStateLanguage(state);
   try{
-    const smoke=sandboxSmokeStatus(state);
+    const smoke=sandboxSmokeStatus(state,{strict:process.platform==="darwin"});
     emit({status:smoke.status,preferred_language:lang,message:t(lang,"sandbox.status"),smoke});
   }catch(error){
     emit({status:"ERROR",error_id:"SANDBOX-001",recoverable:true,preferred_language:lang,message:t(lang,"setup.sandbox.start_failed"),details:String(error.message||error)},1);
@@ -734,7 +734,7 @@ function smokeApproveCommand() {
     return emit({status:"ERROR",error_id:"SANDBOX-004",recoverable:false,preferred_language:lang,message:t(lang,"sandbox.approval.required")},1);
   }
   try{
-    const status=sandboxSmokeStatus(state);
+    const status=sandboxSmokeStatus(state,{strict:process.platform==="darwin"});
     if(status.stage!=="MERGE_APPROVAL_REQUIRED"||status.commit!==commit){
       throw new Error("The requested commit is not the current independently reviewed sandbox commit");
     }
@@ -771,7 +771,7 @@ function runtimeChecks(state) {
     const result=macosRuntimeAction("status",{state});
     return {control_repository:Boolean(state.control_repository),control_clone:Boolean(state.control_clone_path&&fs.existsSync(state.control_clone_path)),
       project_clone:Boolean(state.project_clone_path&&fs.existsSync(state.project_clone_path)),runner_configured:Boolean(state.runner_path),
-      runner_running:Boolean(result.preflight?.inventory?.runner?.exists&&result.preflight?.status==="READY"),reviewer_browser:false,
+      runner_running:Boolean(result.launchctl_state==="loaded"&&result.launchctl_checked===true&&result.preflight?.inventory?.runner?.ownership==="OTHER_OR_CURRENT"),reviewer_browser:false,
       codex_authenticated:macosPrerequisites().session_auth,pending_callbacks:pendingCallbackCount(state),migration:result.status};
   }
   const pendingCallbacks=pendingCallbackCount(state);
