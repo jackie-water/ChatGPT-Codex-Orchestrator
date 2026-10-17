@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { submitMacosDurableIntent, durablePaths, readMacosDurableStatus, claimMacosDurableWorker, reconcileMacosDurableWorker, updateMacosDurableStatus, redactLog } from "../src/lib/macos-durable-intake.mjs";
+import { execFileSync } from "node:child_process";
+import { submitMacosDurableIntent, durablePaths, readMacosDurableStatus, claimMacosDurableWorker, reconcileMacosDurableWorker, updateMacosDurableStatus, processOwnerLiveness, redactLog } from "../src/lib/macos-durable-intake.mjs";
 import { parseArgs, parseTrustedUsernames } from "../runtime/scripts/macos-dispatch.mjs";
 
 const write = (file, value, mode = 0o600) => { fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 }); fs.writeFileSync(file, JSON.stringify(value, null, 2) + "\n", { mode }); };
@@ -19,6 +20,13 @@ function fixture() {
 }
 function withHome(home, fn) { const old = process.env.HOME; process.env.HOME = home; try { return fn(); } finally { if (old === undefined) delete process.env.HOME; else process.env.HOME = old; } }
 const fakeSpawn = calls => (file, argv, options) => { calls.push({ file, argv, options }); return { pid: 4242, unref() {} }; };
+function currentStartIdentity(pid = process.pid) {
+  if (process.platform === "darwin") return execFileSync("ps", ["-p", String(pid), "-o", "lstart="], { encoding: "utf8" }).trim();
+  if (process.platform === "linux") {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8"); return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19];
+  }
+  return "test-owner";
+}
 
 test("acknowledges before worker terminal and replays exactly once", () => {
   const f = fixture(), calls = [];
@@ -100,7 +108,7 @@ test("dead worker claim reconciles once while a live claim remains active", () =
   try { withHome(f.home, () => {
     const first = submitMacosDurableIntent({ ...f.args, event: f.event, spawnWorker: fakeSpawn([]) });
     const claimPath = first.receipt_path.replace(".receipt.json", ".worker-claim");
-    write(claimPath, { version: 1, key: first.task_id, pid: 2147483647, claimed_at_utc: new Date().toISOString() });
+    write(claimPath, { version: 1, key: first.task_id, pid: 2147483647, process_start_identity: "dead-owner", claimed_at_utc: new Date().toISOString() });
     assert.equal(reconcileMacosDurableWorker({ receiptPath: first.receipt_path, key: first.task_id }).status, "UNKNOWN");
     assert.equal(updateMacosDurableStatus({ receiptPath: first.receipt_path, patch: { status: "RUNNING" } }).status, "UNKNOWN");
   }); } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
@@ -111,11 +119,52 @@ test("receipt lock distinguishes live contention from an orphaned lock", () => {
   try { withHome(f.home, () => {
     const first = submitMacosDurableIntent({ ...f.args, event: f.event, spawnWorker: fakeSpawn([]) });
     const lockPath = `${first.receipt_path}.lock`;
-    write(lockPath, { version: 1, pid: process.pid, locked_at_utc: new Date().toISOString() });
+    write(lockPath, { version: 1, pid: process.pid, process_start_identity: currentStartIdentity(), locked_at_utc: new Date().toISOString() });
     assert.throws(() => updateMacosDurableStatus({ receiptPath: first.receipt_path, patch: { status: "RUNNING" } }), /live writer|contention/);
     fs.rmSync(lockPath);
-    write(lockPath, { version: 1, pid: 2147483647, locked_at_utc: new Date().toISOString() });
+    write(lockPath, { version: 1, pid: 2147483647, process_start_identity: "dead-owner", locked_at_utc: new Date().toISOString() });
     assert.equal(updateMacosDurableStatus({ receiptPath: first.receipt_path, patch: { status: "RUNNING" } }).status, "UNKNOWN");
+  }); } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("duplicate tampered intent validates before reconciliation and does not mutate receipt", () => {
+  const f = fixture();
+  try { withHome(f.home, () => {
+    const first = submitMacosDurableIntent({ ...f.args, event: f.event, spawnWorker: fakeSpawn([]) });
+    const intentPath = first.receipt_path.replace(".receipt.json", ".intent.json");
+    const receiptBefore = fs.readFileSync(first.receipt_path, "utf8");
+    const intent = JSON.parse(fs.readFileSync(intentPath, "utf8")); intent.identity.review_route = "chat-268";
+    fs.writeFileSync(intentPath, JSON.stringify(intent) + "\n");
+    assert.throws(() => submitMacosDurableIntent({ ...f.args, event: f.event, spawnWorker: fakeSpawn([]) }), /AUTHORIZATION_CONFLICT|authorization conflict/i);
+    assert.equal(fs.readFileSync(first.receipt_path, "utf8"), receiptBefore);
+  }); } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("worker owner provenance distinguishes PID reuse, kernel-dead, and ambiguous owners", () => {
+  assert.equal(processOwnerLiveness({ pid: 123, process_start_identity: "old", kill: () => {}, identity: () => "new" }), "unknown");
+  assert.equal(processOwnerLiveness({ pid: 123, process_start_identity: "old", kill: () => { throw Object.assign(new Error(), { code: "ESRCH" }); }, identity: () => "old" }), "dead");
+  assert.equal(processOwnerLiveness({ pid: 123, process_start_identity: "old", kill: () => { throw Object.assign(new Error(), { code: "EPERM" }); }, identity: () => "old" }), "unknown");
+  assert.equal(processOwnerLiveness({ pid: 123, kill: () => {} }), "unknown");
+});
+
+test("RUNNING without a claim becomes UNKNOWN while ACCEPTED remains waiting", () => {
+  const f = fixture();
+  try { withHome(f.home, () => {
+    const first = submitMacosDurableIntent({ ...f.args, event: f.event, spawnWorker: fakeSpawn([]) });
+    updateMacosDurableStatus({ receiptPath: first.receipt_path, patch: { status: "RUNNING" } });
+    assert.equal(reconcileMacosDurableWorker({ receiptPath: first.receipt_path, key: first.task_id }).failure_code, "WORKER_CLAIM_MISSING");
+    const second = submitMacosDurableIntent({ ...f.args, event: { ...f.event, issue: { ...f.event.issue, number: 267 } }, spawnWorker: fakeSpawn([]) });
+    assert.equal(reconcileMacosDurableWorker({ receiptPath: second.receipt_path, key: second.task_id }).status, "ACCEPTED");
+  }); } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("active claim with matching owner identity remains active", () => {
+  const f = fixture();
+  try { withHome(f.home, () => {
+    const first = submitMacosDurableIntent({ ...f.args, event: f.event, spawnWorker: fakeSpawn([]) });
+    const claimPath = first.receipt_path.replace(".receipt.json", ".worker-claim");
+    write(claimPath, { version: 1, key: first.task_id, pid: process.pid, process_start_identity: currentStartIdentity() });
+    assert.equal(reconcileMacosDurableWorker({ receiptPath: first.receipt_path, key: first.task_id }).status, "ACCEPTED");
   }); } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 

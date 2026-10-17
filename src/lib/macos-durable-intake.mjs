@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
-import { spawn as nativeSpawn } from "node:child_process";
+import { spawn as nativeSpawn, execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { planMacosCodexRun, getValidatedMacosCodexPlan } from "./macos-codex-run-contract.mjs";
 
@@ -53,11 +53,40 @@ function replaceJson(file, value) {
   const fd = fs.openSync(temp, "wx", 0o600); try { fs.writeFileSync(fd, JSON.stringify(value, null, 2) + "\n"); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
   fs.renameSync(temp, file); fs.chmodSync(file, 0o600); syncDir(dir);
 }
-function processIsLive(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try { process.kill(pid, 0); return true; }
-  catch (error) { return error.code === "EPERM"; }
+function processStartIdentity(pid) {
+  if (process.platform === "darwin") {
+    try {
+      const value = execFileSync("ps", ["-p", String(pid), "-o", "lstart="], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+      return value || null;
+    } catch (error) {
+      if (error?.code === "ESRCH") return null;
+      throw error;
+    }
+  }
+  if (process.platform === "linux") {
+    try {
+      const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+      const end = stat.lastIndexOf(")"); const fields = stat.slice(end + 2).split(" ");
+      return fields[19] || null;
+    } catch (error) {
+      if (error?.code === "ENOENT" || error?.code === "ESRCH") return null;
+      throw error;
+    }
+  }
+  return null;
 }
+
+function ownerLiveness({ pid, process_start_identity, kill = process.kill, identity = processStartIdentity }) {
+  if (!Number.isInteger(pid) || pid <= 0 || typeof process_start_identity !== "string" || !process_start_identity) return "unknown";
+  try { kill(pid, 0); }
+  catch (error) { return error?.code === "ESRCH" ? "dead" : "unknown"; }
+  try {
+    const current = identity(pid);
+    return current === null ? "unknown" : current === process_start_identity ? "live" : "unknown";
+  } catch { return "unknown"; }
+}
+
+export const processOwnerLiveness = ownerLiveness;
 function stateFilePaths(snapshot) {
   const dir = secureDir(path.join(snapshot.instance_root, "macos-durable-intake"));
   const key = digest({ instance_id: snapshot.instance_id, project: snapshot.identity.project, issue: snapshot.identity.issue,
@@ -95,13 +124,18 @@ export function updateMacosDurableStatus({ receiptPath, expected = ["ACCEPTED", 
     let lock;
     try { lock = JSON.parse(fs.readFileSync(privateFile(lockPath), "utf8")); }
     catch { throw Object.assign(new Error("Receipt lock is active or uncertain"), { code: "RECEIPT_LOCK_CONTENTION" }); }
-    if (lock?.version !== 1 || !processIsLive(lock.pid)) {
+    const lockState = lock?.version === 1 ? ownerLiveness(lock) : "unknown";
+    if (lockState === "dead") {
       try { fs.rmSync(lockPath); } catch (removeError) { if (removeError.code !== "ENOENT") throw removeError; }
       return updateMacosDurableStatus({ receiptPath, expected, patch: { status: "UNKNOWN", failure_code: "RECEIPT_LOCK_ORPHANED" } });
     }
     throw Object.assign(new Error("Receipt lock is held by a live writer"), { code: "RECEIPT_LOCK_CONTENTION" });
   }
-  try { fs.writeFileSync(fd, JSON.stringify({ version: 1, pid: process.pid, locked_at_utc: new Date().toISOString() }) + "\n"); fs.fsyncSync(fd); }
+  try {
+    const process_start_identity = processStartIdentity(process.pid);
+    if (!process_start_identity) throw Object.assign(new Error("Unable to establish receipt lock owner identity"), { code: "OWNER_IDENTITY_UNAVAILABLE" });
+    fs.writeFileSync(fd, JSON.stringify({ version: 1, pid: process.pid, process_start_identity, locked_at_utc: new Date().toISOString() }) + "\n"); fs.fsyncSync(fd);
+  }
   catch (error) { try { fs.closeSync(fd); } catch {} try { fs.rmSync(lockPath, { force: true }); } catch {} throw error; }
   try {
     const current = read(privateFile(receiptPath)); if (!STATES.has(current.status) || !expected.includes(current.status)) return current;
@@ -121,16 +155,25 @@ export function reconcileMacosDurableWorker({ receiptPath, key }) {
   if (["SUCCEEDED", "FAILED", "UNKNOWN"].includes(receipt.status)) return receipt;
   let claim;
   try { claim = read(privateFile(claimPath)); }
-  catch (error) { if (error.code === "ENOENT") return receipt; throw error; }
-  if (claim?.version !== 1 || claim.key !== key || !Number.isInteger(claim.pid) || claim.pid <= 0) fail("Malformed durable worker claim", "UNCERTAIN_STATE");
-  if (processIsLive(claim.pid)) return receipt;
+  catch (error) {
+    if (error.code !== "ENOENT") throw error;
+    if (receipt.status === "RUNNING") return updateMacosDurableStatus({ receiptPath, expected: ["RUNNING"], patch: { status: "UNKNOWN", failure_code: "WORKER_CLAIM_MISSING" } });
+    return receipt;
+  }
+  if (claim?.version !== 1 || claim.key !== key || !Number.isInteger(claim.pid) || claim.pid <= 0 || typeof claim.process_start_identity !== "string" || !claim.process_start_identity) fail("Malformed durable worker claim", "UNCERTAIN_STATE");
+  const claimState = ownerLiveness(claim);
+  if (claimState === "live" || claimState === "unknown") return receipt;
   return updateMacosDurableStatus({ receiptPath, expected: ["ACCEPTED", "RUNNING"], patch: { status: "UNKNOWN", failure_code: "WORKER_ORPHANED" } });
 }
 
 export function claimMacosDurableWorker({ receiptPath, key }) {
   const claimPath = `${receiptPath.replace(/\.receipt\.json$/, "")}.worker-claim`;
   privateFile(claimPath, true);
-  try { exclusiveJson(claimPath, { version: 1, key, pid: process.pid, claimed_at_utc: new Date().toISOString() }); return true; }
+  try {
+    const process_start_identity = processStartIdentity(process.pid);
+    if (!process_start_identity) fail("Unable to establish worker owner identity", "OWNER_IDENTITY_UNAVAILABLE");
+    exclusiveJson(claimPath, { version: 1, key, pid: process.pid, process_start_identity, claimed_at_utc: new Date().toISOString() }); return true;
+  }
   catch (error) { if (error.code === "EEXIST") { reconcileMacosDurableWorker({ receiptPath, key }); return false; } throw error; }
 }
 
@@ -157,7 +200,6 @@ export function submitMacosDurableIntent({ event, controlRoot, controlRepository
       updated_at_utc: new Date().toISOString(), pid: null });
   } catch (e) {
     if (e.code !== "EEXIST") throw Object.assign(e, { code: "DURABILITY_FAILED" });
-    reconcileMacosDurableWorker({ receiptPath: paths.receiptPath, key: paths.key });
     return readMacosDurableStatus({ snapshot, paths });
   }
   let child;
