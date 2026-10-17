@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { callbackRecord, ensurePendingCallback, parseReviewEvidence, pendingWakesPath, publicationIntentPath, validateReviewEvent } from "../src/lib/macos-code-review-runtime.mjs";
+import { callbackRecord, ensurePendingCallback, parseReviewEvidence, pendingWakesPath, publicationIntentPath, validateReviewEvent, writeCheckpointEvidence } from "../src/lib/macos-code-review-runtime.mjs";
 
 const sha = "9203170f74b57dade7702fb0530e994ecf531c17";
 function fixture() {
@@ -54,6 +54,60 @@ test("accepts the generated checkpoint ref and rejects malformed or protected re
     const next = structuredClone(original); next.projects["sandbox-fixture01"].checkpoint_branch = checkpoint_branch; fs.writeFileSync(projectFile, JSON.stringify(next));
     assert.throws(() => validateReviewEvent({ event: f.event({}), controlRoot: f.control, controlRepository: "trusted/control", trustedGithubUsername: "trusted", home: f.home }), /TARGET_ROUTING_FORBIDDEN/);
   }
+});
+
+test("rejects malformed source refs while accepting ordinary feature refs", t => {
+  const f = fixture(); t.after(() => fs.rmSync(f.root, { recursive: true, force: true }));
+  for (const source_branch of ["feat//x", "feat/..", "feat/x/", "feat/x.lock", "feat/x@{y}", "feat/x..y"]) {
+    assert.throws(() => validateReviewEvent({ event: f.event({ source_branch }), controlRoot: f.control, controlRepository: "trusted/control", trustedGithubUsername: "trusted", home: f.home }), /INVALID_REVIEW_TARGET/);
+  }
+  assert.equal(validateReviewEvent({ event: f.event({ source_branch: "feat/ordinary-change" }), controlRoot: f.control, controlRepository: "trusted/control", trustedGithubUsername: "trusted", home: f.home }).req.source_branch, "feat/ordinary-change");
+});
+
+test("checkpoint evidence writer refuses symlinked paths and never overwrites", t => {
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "macos-review-checkpoint-")); t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const outside = path.join(root, "outside"); fs.mkdirSync(outside, { mode: 0o700 });
+  const checkpoint = path.join(root, "worktree", ".codex", "reviews", "by-commit"); fs.mkdirSync(path.dirname(checkpoint), { recursive: true, mode: 0o700 }); fs.symlinkSync(outside, checkpoint);
+  assert.throws(() => writeCheckpointEvidence(path.join(checkpoint, "report.md"), "blocked"), /SYMLINKED_PRIVATE_PATH/);
+  assert.deepEqual(fs.readdirSync(outside), []);
+  const trusted = path.join(root, "trusted", "by-commit", "report.md"); writeCheckpointEvidence(trusted, "first");
+  assert.equal(fs.readFileSync(trusted, "utf8"), "first");
+  assert.throws(() => writeCheckpointEvidence(trusted, "second"), /EEXIST/);
+  assert.equal(fs.readFileSync(trusted, "utf8"), "first");
+});
+
+test("native worktree constructors use the canonical temporary root", () => {
+  const publisher = fs.readFileSync(path.join(process.cwd(), "runtime/scripts/macos-code-review.mjs"), "utf8");
+  const runtime = fs.readFileSync(path.join(process.cwd(), "src/lib/macos-code-review-runtime.mjs"), "utf8");
+  assert.match(publisher, /mkdtempSync\(path\.join\(fs\.realpathSync\(os\.tmpdir\(\)\),\s*"codex-review-publish-"\)\)/);
+  assert.match(runtime, /mkdtempSync\(path\.join\(fs\.realpathSync\(os\.tmpdir\(\)\),\s*"codex-review-"\)\)/);
+});
+
+test("actual publisher push argv disables pre-push hooks for a local bare repository", t => {
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "macos-review-push-")); t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const bare = path.join(root, "bare.git"), source = path.join(root, "source");
+  assert.equal(spawnSync("git", ["init", "--bare", "-q", bare]).status, 0);
+  assert.equal(spawnSync("git", ["init", "-q", source]).status, 0);
+  const git = args => spawnSync("git", ["-C", source, ...args], { encoding: "utf8" });
+  assert.equal(git(["config", "user.name", "fixture"]).status, 0);
+  assert.equal(git(["config", "user.email", "fixture@example.invalid"]).status, 0);
+  fs.writeFileSync(path.join(source, "file"), "fixture\n");
+  assert.equal(git(["add", "file"]).status, 0); assert.equal(git(["commit", "-q", "-m", "fixture"]).status, 0);
+  assert.equal(git(["remote", "add", "origin", bare]).status, 0);
+  const canary = path.join(root, "hook-ran"); fs.writeFileSync(path.join(source, ".git/hooks/pre-push"), `#!/bin/sh\nprintf ran > ${canary}\n`, { mode: 0o700 });
+  const push = git(["-c", "core.hooksPath=/dev/null", "push", "origin", "HEAD:refs/heads/codex/checkpoints"]);
+  assert.equal(push.status, 0); assert.equal(fs.existsSync(canary), false);
+  const publisher = fs.readFileSync(path.join(process.cwd(), "runtime/scripts/macos-code-review.mjs"), "utf8");
+  assert.match(publisher, /\["-C", workspace, "-c", "core\.hooksPath=\/dev\/null", "push", "origin"/);
+});
+
+test("checkpoint evidence permits only the root-owned sticky system temp ancestor", t => {
+  const root = fs.mkdtempSync(path.join(fs.realpathSync("/tmp"), "macos-review-temp-")); t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const safe = path.join(root, "safe", "report.md");
+  writeCheckpointEvidence(safe, "safe");
+  assert.equal(fs.readFileSync(safe, "utf8"), "safe");
+  const writable = path.join(root, "writable"); fs.mkdirSync(writable, { mode: 0o777 }); fs.chmodSync(writable, 0o777);
+  assert.throws(() => writeCheckpointEvidence(path.join(writable, "report.md"), "blocked"), /UNTRUSTED_PRIVATE_DIRECTORY/);
 });
 
 test("evidence parser requires exact immutable fields and one Status", () => {

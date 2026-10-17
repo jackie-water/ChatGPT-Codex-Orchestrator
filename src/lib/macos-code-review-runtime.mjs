@@ -6,10 +6,10 @@ import { spawnSync } from "node:child_process";
 
 const SHA = /^[0-9a-f]{40}$/i;
 const ROUTE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
-const BRANCH = /^(?:codex|chore|fix|feat|refactor|test|docs|spike)\/[A-Za-z0-9._/-]+$/;
+const BRANCH = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
 const CALLBACK = /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/;
 const CHAT = /^https:\/\/chatgpt\.com\/(?:c\/[A-Za-z0-9_-]+|g\/[A-Za-z0-9_-]+\/c\/[A-Za-z0-9_-]+)\/?$/;
-const safeGitRef = value => typeof value === "string" && value.length <= 127 && value.split("/").every(part => /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(part) && part !== "." && part !== ".." && !part.endsWith(".lock") && !part.includes("@{"));
+const safeGitRef = value => typeof value === "string" && value.length <= 127 && value.length > 0 && !value.includes("..") && !value.includes("@{") && value.split("/").every(part => /^(?:[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9_-])?)$/.test(part) && !part.endsWith(".lock"));
 const fail = code => { throw Object.assign(new Error(code), { code }); };
 const readJson = file => JSON.parse(controlFile(file).toString("utf8").replace(/^\uFEFF/, ""));
 const uid = () => typeof process.getuid === "function" ? process.getuid() : null;
@@ -63,6 +63,27 @@ function writePrivate(file, value, exclusive = false) {
     if (exclusive) { fs.linkSync(temp, file); fs.unlinkSync(temp); }
     else { if (fs.existsSync(file)) privateFile(file); fs.renameSync(temp, file); }
   } finally { if (fs.existsSync(temp)) fs.unlinkSync(temp); }
+}
+function writeCheckpointEvidence(file, content) {
+  const absolute = path.resolve(file), root = path.parse(absolute).root;
+  let current = root;
+  for (const part of absolute.slice(root.length).split(path.sep).filter(Boolean).slice(0, -1)) {
+    current = path.join(current, part);
+    try {
+      const st = fs.lstatSync(current);
+      if (st.isSymbolicLink()) fail("SYMLINKED_PRIVATE_PATH");
+      const trustedSystemTemp = ["/tmp", "/private/tmp"].includes(current) && st.isDirectory() && st.uid === 0 && (st.mode & 0o7777) === 0o1777;
+      if (!st.isDirectory() || (!trustedSystemTemp && ((st.mode & 0o022) || (uid() !== null && ![0, uid()].includes(st.uid))))) fail("UNTRUSTED_PRIVATE_DIRECTORY");
+    } catch (e) {
+      if (e.code !== "ENOENT") throw e;
+      fs.mkdirSync(current, { mode: 0o700 });
+      const st = fs.lstatSync(current);
+      if (!st.isDirectory() || st.isSymbolicLink() || (st.mode & 0o077) || (uid() !== null && st.uid !== uid())) fail("UNTRUSTED_PRIVATE_DIRECTORY");
+    }
+  }
+  const fd = fs.openSync(absolute, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW || 0), 0o600);
+  try { fs.writeFileSync(fd, content); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+  try { const dirfd = fs.openSync(path.dirname(absolute), fs.constants.O_RDONLY); try { fs.fsyncSync(dirfd); } finally { fs.closeSync(dirfd); } } catch {}
 }
 
 function git(repo, args, options = {}) {
@@ -119,7 +140,7 @@ export function validateReviewEvent({ event, controlRoot, controlRepository, tru
   if (event.issue.user?.login !== trustedGithubUsername) fail("UNTRUSTED_REVIEW_AUTHOR");
   let request; try { request = JSON.parse(event.issue.body); } catch { fail("INVALID_REVIEW_BODY"); }
   for (const key of ["project", "source_branch", "reviewed_commit", "review_route"]) if (typeof request[key] !== "string" || !request[key]) fail(`MISSING_${key.toUpperCase()}`);
-  if (!SHA.test(request.reviewed_commit) || !ROUTE.test(request.review_route) || !BRANCH.test(request.source_branch) || ["main", "master"].includes(request.source_branch)) fail("INVALID_REVIEW_TARGET");
+  if (!SHA.test(request.reviewed_commit) || !ROUTE.test(request.review_route) || !BRANCH.test(request.source_branch) || !safeGitRef(request.source_branch) || ["main", "master"].includes(request.source_branch)) fail("INVALID_REVIEW_TARGET");
   const root = privateTree(controlRoot, { leaf: true });
   const instance = readJson(path.join(root, "instance.json"));
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(instance.instance_id || "") || instance.trusted_github_username !== trustedGithubUsername || instance.control_repository !== controlRepository || instance.platform !== "darwin" || !["arm64", "x64"].includes(instance.arch) || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(instance.runner_label || "")) fail("INVALID_INSTANCE");
@@ -128,7 +149,7 @@ export function validateReviewEvent({ event, controlRoot, controlRepository, tru
   const project = projects.projects?.[request.project];
   if (request.project !== sandboxKey || !project || project.enabled !== true || project.code_review?.enabled !== true) fail("SANDBOX_PROJECT_REQUIRED");
   const expectedRepository = `${trustedGithubUsername}/chatgpt-codex-orchestrator-sandbox-${instance.instance_id}`;
-  if (project.repository !== expectedRepository || project.local_path_key !== sandboxKey || project.target_enabled === true || project.target_repository || !safeGitRef(project.checkpoint_branch) || ["main", "master", project.default_branch].includes(project.checkpoint_branch) || !safeGitRef(project.default_branch)) fail("TARGET_ROUTING_FORBIDDEN");
+  if (project.repository !== expectedRepository || project.local_path_key !== sandboxKey || project.target_enabled === true || project.target_repository || !safeGitRef(project.checkpoint_branch) || ["main", "master", project.default_branch].includes(project.checkpoint_branch) || !safeGitRef(project.default_branch) || ["main", "master", project.default_branch].includes(request.source_branch)) fail("TARGET_ROUTING_FORBIDDEN");
   for (const [key, configured] of Object.entries(projects.projects || {})) if (key !== sandboxKey && configured?.enabled === true) fail("NON_SANDBOX_PROJECT_ENABLED");
   const instanceRoot = privateTree(path.join(home, ".chatgpt-codex-orchestrator", "instances", instance.instance_id), { leaf: true });
   const routeFile = path.join(instanceRoot, "chat-routes.json");
@@ -171,7 +192,7 @@ export async function executeMacosCodeReview(v, { codex = "codex", spawn = spawn
     fail("CONFLICTING_REVIEW_EVIDENCE");
   } catch (e) { if (! ["NOT_FOUND"].includes(e.code)) throw e; }
   if (resumeOnly) fail("PUBLICATION_INTENT_WITHOUT_VALID_EVIDENCE");
-  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "codex-review-"));
+  const workspace = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "codex-review-"));
   git(automation, ["worktree", "add", "--detach", workspace, req.reviewed_commit]);
   let result;
   try {
@@ -189,4 +210,4 @@ export async function executeMacosCodeReview(v, { codex = "codex", spawn = spawn
 
 export function pendingWakesPath(v) { return path.join(v.home, ".chatgpt-codex-orchestrator", "instances", v.instance.instance_id, "pending-wakes"); }
 export function publicationIntentPath(v, reviewedCommit) { if (!SHA.test(reviewedCommit)) fail("INVALID_PUBLICATION_INTENT_SHA"); return path.join(v.home, ".chatgpt-codex-orchestrator", "instances", v.instance.instance_id, "review-publication-intents", `${reviewedCommit.toLowerCase()}.json`); }
-export { privateFile, privateTree, readJson, writePrivate, git, remoteHead, controlFile, objectExists };
+export { privateFile, privateTree, readJson, writePrivate, writeCheckpointEvidence, git, remoteHead, controlFile, objectExists };
