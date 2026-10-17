@@ -22,6 +22,7 @@ const SCRIPT_NAMES = Object.freeze([
   "publish-checkpoint.ps1",
   "publish-code-review.ps1",
   "register-chat.mjs",
+  "register-chat-mac.mjs",
   "register-chat.ps1",
   "report-run-failure.mjs",
   "retry-pending-callbacks.ps1",
