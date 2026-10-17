@@ -4,9 +4,38 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { callbackRecord, ensurePendingCallback, parseReviewEvidence, pendingWakesPath, publicationIntentPath, validateReviewEvent, writeCheckpointEvidence } from "../src/lib/macos-code-review-runtime.mjs";
+import { callbackRecord, codexReviewArgv, ensurePendingCallback, parseReviewEvidence, pendingWakesPath, publicationIntentPath, redactReviewOutput, validateReviewEvent, writeCheckpointEvidence } from "../src/lib/macos-code-review-runtime.mjs";
 
 const sha = "9203170f74b57dade7702fb0530e994ecf531c17";
+test("native Codex child argv keeps read-only isolation and disables repository instructions", () => {
+  const calls = [];
+  const fakeSpawn = (file, argv, options) => { calls.push({ file, argv, options }); return { status: 0, stdout: "review", stderr: "" }; };
+  fakeSpawn("codex", codexReviewArgv("gpt-5.6-luna", "medium", "main"), { cwd: "/tmp/review", input: "review" });
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].argv, ["exec", "--ignore-user-config", "-m", "gpt-5.6-luna", "-c", "model_reasoning_effort=medium", "-c", "project_doc_max_bytes=0", "-c", "approval_policy=never", "-c", "sandbox_mode=read-only", "-c", "features.plugins=false", "-c", "features.apps=false", "-c", "features.hooks=false", "review", "--base", "origin/main"]);
+});
+
+test("native review output redacts bounded credential key-value values while preserving diagnostics", () => {
+  const fakeSpawn = () => ({ status: 0, stdout: "authorization: Bearer REALISH_TOKEN api_key=FAKE_VALUE access_token: FAKE_TOKEN {\"api_key\":\"FAKE_JSON\", \"password\": \"FAKE_PASSWORD_JSON\", \"clientSecret\": \"FAKE_CLIENT_SECRET\"} OPENAI_API_KEY=FAKE_ENV TOKEN: FAKE_TOKEN_VALUE MY_PASSWORD=\"FAKE_ENV_PASSWORD\" AWS_SECRET_ACCESS_KEY=FAKE_AWS SESSION_COOKIE: FAKE_SESSION secretariat=SAFE tokenizer=SAFE apiVersion=SAFE attempt=SAFE message=SAFE ordinary diagnostic text", stderr: "password=FAKE_PASSWORD secret: FAKE_SECRET reviewed SHA 9203170f74b57dade7702fb0530e994ecf531c17; FAKE_TOKEN ordinary text" });
+  const result = fakeSpawn();
+  const output = redactReviewOutput(`${result.stdout}\n${result.stderr}`);
+  assert.doesNotMatch(output, /FAKE_(?:VALUE|PASSWORD|SECRET|JSON|PASSWORD_JSON|ENV|ENV_PASSWORD|TOKEN_VALUE|SESSION)/);
+  assert.match(output, /authorization: Bearer \[REDACTED\]/);
+  assert.match(output, /api_key=\[REDACTED\]/);
+  assert.match(output, /access_token: \[REDACTED\]/);
+  assert.match(output, /\{\"api_key\":\[REDACTED\], \"password\": \[REDACTED\], \"clientSecret\": \[REDACTED\]\}/);
+  assert.match(output, /\"clientSecret\": \[REDACTED\]/);
+  assert.match(output, /OPENAI_API_KEY=\[REDACTED\]/);
+  assert.match(output, /TOKEN: \[REDACTED\]/);
+  assert.match(output, /MY_PASSWORD=\[REDACTED\]/);
+  assert.match(output, /AWS_SECRET_ACCESS_KEY=\[REDACTED\]/);
+  assert.match(output, /SESSION_COOKIE: \[REDACTED\]/);
+  assert.match(output, /secretariat=SAFE tokenizer=SAFE apiVersion=SAFE attempt=SAFE message=SAFE/);
+  assert.match(output, /ordinary diagnostic text/);
+  assert.match(output, /FAKE_TOKEN ordinary text/);
+  assert.match(output, /9203170f74b57dade7702fb0530e994ecf531c17/);
+});
+
 function fixture() {
   const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "macos-review-runtime-"));
   const home = path.join(root, "home"), control = path.join(root, "control"), instance = "fixture01";
