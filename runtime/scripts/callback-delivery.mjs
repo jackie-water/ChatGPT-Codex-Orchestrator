@@ -66,7 +66,52 @@ function sameFileIdentity(left, right) {
   return typeof left?.dev === "number" && typeof left?.ino === "number" && left.dev === right.dev && left.ino === right.ino;
 }
 
-function acquireLock(fs, path, file, callbackId) {
+function cleanupFailedLockAcquisition(fs, path, lock, fd, owner, platform) {
+  // Keep fd open while proving that the pathname still names our private file.
+  let fdClosed = false;
+  let pathStat;
+  let openedStat;
+  try {
+    pathStat = fs.lstatSync(lock);
+    openedStat = fs.fstatSync(fd);
+    if (pathStat.isSymbolicLink() || !pathStat.isFile() || pathStat.nlink !== 1 ||
+        (pathStat.mode & 0o7777) !== 0o600 || !sameFileIdentity(openedStat, pathStat)) return;
+    if (typeof process.getuid === "function" && typeof pathStat.uid === "number" && pathStat.uid !== process.getuid()) return;
+    try {
+      const contents = fs.readFileSync(lock, "utf8");
+      if (contents && !owner.startsWith(contents) && contents !== owner) return;
+    } catch { return; }
+    // Recheck immediately before unlink; pathname compare-and-delete is not an
+    // atomic defense against an arbitrary same-user race in the final syscall.
+    const finalPathStat = fs.lstatSync(lock);
+    const finalOpenedStat = fs.fstatSync(fd);
+    if (finalPathStat.isSymbolicLink() || !finalPathStat.isFile() || finalPathStat.nlink !== 1 ||
+        (finalPathStat.mode & 0o7777) !== 0o600 || !sameFileIdentity(finalOpenedStat, finalPathStat)) return;
+    if (typeof process.getuid === "function" && typeof finalPathStat.uid === "number" && finalPathStat.uid !== process.getuid()) return;
+    if (platform === "win32") {
+      // Windows commonly rejects unlinking an open file. Mark the descriptor
+      // closed before calling closeSync so the caller never double-closes it.
+      fdClosed = true;
+      try { fs.closeSync(fd); } catch { return fdClosed; }
+      const afterClose = fs.lstatSync(lock);
+      if (afterClose.isSymbolicLink() || !afterClose.isFile() || afterClose.nlink !== 1 ||
+          (afterClose.mode & 0o7777) !== (pathStat.mode & 0o7777) ||
+          (typeof afterClose.uid === "number" && typeof pathStat.uid === "number" && afterClose.uid !== pathStat.uid) ||
+          !sameFileIdentity(openedStat, afterClose)) return fdClosed;
+      fs.unlinkSync(lock);
+      return fdClosed;
+    }
+    fs.unlinkSync(lock);
+    const parentFd = fs.openSync(path.dirname(lock), fs.constants.O_RDONLY);
+    try { fs.fsyncSync(parentFd); } finally { fs.closeSync(parentFd); }
+    return false;
+  } catch {
+    // Uncertainty about identity, replacement, or durability fails closed.
+    return fdClosed;
+  }
+}
+
+function acquireLock(fs, path, file, callbackId, platform = process.platform) {
   const lock = secureAncestors(fs, path, `${file}.delivery.lock`);
   let fd;
   const token = crypto.randomBytes(16).toString("hex");
@@ -77,7 +122,10 @@ function acquireLock(fs, path, file, callbackId) {
     fs.writeFileSync(fd, owner, "utf8");
     fs.fsyncSync(fd);
   } catch (error) {
-    if (fd !== undefined) { try { fs.closeSync(fd); } catch {} }
+    if (fd !== undefined) {
+      const closed = cleanupFailedLockAcquisition(fs, path, lock, fd, owner, platform);
+      if (!closed) { try { fs.closeSync(fd); } catch {} }
+    }
     if (error.code === "EEXIST") {
       let detail = "foreign or active owner";
       try {
@@ -136,7 +184,7 @@ export function createCallbackStateStore({file, expected, callbackId, message, f
   };
   const withLock = async fn => {
     if (!file) return fn();
-    const release = acquireLock(fs, path, file, callbackId);
+    const release = acquireLock(fs, path, file, callbackId, platform);
     try { return await fn(); } finally { release(); }
   };
   return {read, update, withLock};
