@@ -142,8 +142,12 @@ export function updateMacosDurableStatus({ receiptPath, expected = ["ACCEPTED", 
     catch { throw Object.assign(new Error("Receipt lock is active or uncertain"), { code: "RECEIPT_LOCK_CONTENTION" }); }
     const lockState = lock?.version === 1 ? ownerLiveness(lock) : "unknown";
     if (lockState === "orphan") {
-      try { fs.rmSync(lockPath); } catch (removeError) { if (removeError.code !== "ENOENT") throw removeError; }
-      return updateMacosDurableStatus({ receiptPath, expected, patch: { status: "UNKNOWN", failure_code: "RECEIPT_LOCK_ORPHANED" } });
+      // There is no standard Node primitive for unlinking only the pathname
+      // entry that was observed above. The entry may have been replaced after
+      // liveness was checked, so reclaiming it would be an unsafe TOCTOU.
+      throw Object.assign(new Error("Receipt lock owner is gone, but safe automatic reclaim is not established; preserve the lock and retry after operator recovery"), {
+        code: "RECEIPT_LOCK_RECLAIM_UNCERTAIN"
+      });
     }
     throw Object.assign(new Error("Receipt lock is held by a live writer"), { code: "RECEIPT_LOCK_CONTENTION" });
   }

@@ -123,7 +123,49 @@ test("receipt lock distinguishes live contention from an orphaned lock", () => {
     assert.throws(() => updateMacosDurableStatus({ receiptPath: first.receipt_path, patch: { status: "RUNNING" } }), /live writer|contention/);
     fs.rmSync(lockPath);
     write(lockPath, { version: 1, pid: 2147483647, process_start_identity: "dead-owner", locked_at_utc: new Date().toISOString() });
-    assert.equal(updateMacosDurableStatus({ receiptPath: first.receipt_path, patch: { status: "RUNNING" } }).status, "UNKNOWN");
+    assert.throws(() => updateMacosDurableStatus({ receiptPath: first.receipt_path, patch: { status: "RUNNING" } }), /RECEIPT_LOCK_RECLAIM_UNCERTAIN|safe automatic reclaim/i);
+    assert.equal(JSON.parse(fs.readFileSync(first.receipt_path, "utf8")).status, "ACCEPTED");
+    assert.equal(fs.existsSync(lockPath), true);
+  }); } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("stale-lock observation cannot remove a replacement live lock", () => {
+  const f = fixture();
+  try { withHome(f.home, () => {
+    const first = submitMacosDurableIntent({ ...f.args, event: f.event, spawnWorker: fakeSpawn([]) });
+    const lockPath = `${first.receipt_path}.lock`;
+    write(lockPath, { version: 1, pid: 2147483647, process_start_identity: "dead-owner", locked_at_utc: new Date().toISOString() });
+    const originalKill = process.kill;
+    process.kill = (pid, signal) => {
+      assert.equal(pid, 2147483647); assert.equal(signal, 0);
+      fs.rmSync(lockPath);
+      write(lockPath, { version: 1, pid: process.pid, process_start_identity: currentStartIdentity(), locked_at_utc: new Date().toISOString() });
+      throw Object.assign(new Error("gone"), { code: "ESRCH" });
+    };
+    try {
+      assert.throws(() => updateMacosDurableStatus({ receiptPath: first.receipt_path, patch: { status: "RUNNING" } }), /RECEIPT_LOCK_RECLAIM_UNCERTAIN|safe automatic reclaim/i);
+    } finally { process.kill = originalKill; }
+    assert.equal(JSON.parse(fs.readFileSync(first.receipt_path, "utf8")).status, "ACCEPTED");
+    assert.equal(JSON.parse(fs.readFileSync(lockPath, "utf8")).pid, process.pid);
+  }); } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("permission and identity ambiguity preserve the lock and receipt", () => {
+  const f = fixture();
+  try { withHome(f.home, () => {
+    const first = submitMacosDurableIntent({ ...f.args, event: f.event, spawnWorker: fakeSpawn([]) });
+    const lockPath = `${first.receipt_path}.lock`;
+    const originalKill = process.kill;
+    write(lockPath, { version: 1, pid: process.pid, process_start_identity: currentStartIdentity(), locked_at_utc: new Date().toISOString() });
+    process.kill = () => { throw Object.assign(new Error("permission denied"), { code: "EPERM" }); };
+    try { assert.throws(() => updateMacosDurableStatus({ receiptPath: first.receipt_path, patch: { status: "RUNNING" } }), error => error?.code === "RECEIPT_LOCK_CONTENTION"); }
+    finally { process.kill = originalKill; }
+    assert.equal(fs.existsSync(lockPath), true);
+    assert.equal(JSON.parse(fs.readFileSync(first.receipt_path, "utf8")).status, "ACCEPTED");
+    write(lockPath, { version: 1, pid: process.pid, process_start_identity: "ambiguous-owner", locked_at_utc: new Date().toISOString() });
+    assert.throws(() => updateMacosDurableStatus({ receiptPath: first.receipt_path, patch: { status: "RUNNING" } }), error => error?.code === "RECEIPT_LOCK_CONTENTION");
+    assert.equal(fs.existsSync(lockPath), true);
+    assert.equal(JSON.parse(fs.readFileSync(first.receipt_path, "utf8")).status, "ACCEPTED");
   }); } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 

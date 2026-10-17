@@ -47,6 +47,8 @@ The Darwin intake integration is opt-in through `ORCHESTRATOR_MACOS_NATIVE_PROCE
 
 The existing durable rules remain authoritative: exact start-identity equality is required, PID reuse is ambiguous/not live, missing owner is dead only when the kernel reports `ESRCH`, permission denial is unknown, terminal receipt states are monotonic, claims and receipt locks remain exclusive, and an uncertain lock is never deleted as though it belonged to another owner.
 
+Receipt-lock recovery is fail-closed. Even after an observed owner PID returns `ESRCH`, standard Node filesystem APIs cannot atomically unlink only the lock entry that was observed; another writer may have replaced that pathname. The intake therefore preserves the lock and receipt and returns `RECEIPT_LOCK_RECLAIM_UNCERTAIN` with actionable recovery guidance. An operator must establish that no writer remains, preserve/inspect the receipt, and remove the lock through the deployment's reviewed recovery procedure before retrying. This path never converts ambiguity into `UNKNOWN`, dispatches a duplicate worker, or deletes a replacement lock.
+
 ## Official packaging proposal (not applied)
 
 The official macOS installer should add a prerequisite step before enabling any native-identity opt-in:
