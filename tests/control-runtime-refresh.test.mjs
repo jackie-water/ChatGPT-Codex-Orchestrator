@@ -16,7 +16,8 @@ const nativeModules=[
   "run-failure-state.mjs",
   "macos-codex-run-contract.mjs",
   "macos-codex-execution.mjs",
-  "macos-postexecution-wrapper.mjs"
+  "macos-postexecution-wrapper.mjs",
+  "macos-code-review-runtime.mjs"
 ];
 const workflowRelative=".github/workflows/orchestrator.yml";
 const initialHead="a".repeat(40);
