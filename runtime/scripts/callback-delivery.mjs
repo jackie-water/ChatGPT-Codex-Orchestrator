@@ -5,6 +5,98 @@ export function isValidCallbackId(value) {
   return typeof value === "string" && /^[A-Za-z0-9._-]{1,160}$/.test(value);
 }
 
+function secureAncestors(fs, path, target) {
+  const absolute = path.resolve(target);
+  const ancestors = [];
+  let current = path.dirname(absolute);
+  while (true) {
+    ancestors.push(current);
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  for (const ancestor of ancestors.reverse()) {
+    const stat = fs.lstatSync(ancestor);
+    if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error(`Unsafe callback state ancestor: ${ancestor}`);
+    const mode = stat.mode & 0o7777;
+    if ((mode & 0o002) && !(mode & 0o1000)) throw new Error(`Insecure callback state ancestor permissions: ${ancestor}`);
+    if (typeof process.getuid === "function" && typeof stat.uid === "number" && stat.uid !== process.getuid() && (mode & 0o002) && !(mode & 0o1000)) throw new Error(`Foreign callback state ancestor: ${ancestor}`);
+  }
+  return absolute;
+}
+
+function assertSecureTarget(fs, path, file) {
+  const absolute = path.resolve(file);
+  let stat;
+  try { stat = fs.lstatSync(absolute); } catch (error) { if (error.code === "ENOENT") return false; throw error; }
+  if (stat.isSymbolicLink() || !stat.isFile()) throw new Error(`Unsafe callback state file: ${absolute}`);
+  if (typeof process.getuid === "function" && typeof stat.uid === "number" && stat.uid !== process.getuid()) throw new Error(`Foreign callback state file: ${absolute}`);
+  return true;
+}
+
+function atomicWrite(fs, path, file, value) {
+  const absolute = secureAncestors(fs, path, file);
+  const dir = path.dirname(absolute);
+  const temp = `${absolute}.${process.pid}.${crypto.randomBytes(8).toString("hex")}.tmp`;
+  let fd;
+  try {
+    const noFollow = fs.constants?.O_NOFOLLOW || 0;
+    fd = fs.openSync(temp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | noFollow, 0o600);
+    fs.writeFileSync(fd, JSON.stringify(value, null, 2) + "\n", "utf8");
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = undefined;
+    fs.renameSync(temp, absolute);
+    const parentFd = fs.openSync(dir, fs.constants.O_RDONLY);
+    try { fs.fsyncSync(parentFd); } finally { fs.closeSync(parentFd); }
+  } catch (error) {
+    if (fd !== undefined) { try { fs.closeSync(fd); } catch {} }
+    try { if (fs.existsSync(temp)) fs.unlinkSync(temp); } catch {}
+    throw error;
+  }
+}
+
+function acquireLock(fs, path, file, callbackId) {
+  const lock = secureAncestors(fs, path, `${file}.delivery.lock`);
+  let fd;
+  const token = crypto.randomBytes(16).toString("hex");
+  const owner = JSON.stringify({version:1, callback_id:callbackId, pid:process.pid, token}) + "\n";
+  try {
+    const noFollow = fs.constants?.O_NOFOLLOW || 0;
+    fd = fs.openSync(lock, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | noFollow, 0o600);
+    fs.writeFileSync(fd, owner, "utf8");
+    fs.fsyncSync(fd);
+  } catch (error) {
+    if (fd !== undefined) { try { fs.closeSync(fd); } catch {} }
+    if (error.code === "EEXIST") {
+      let detail = "foreign or active owner";
+      try {
+        const stat = fs.lstatSync(lock);
+        if (stat.isSymbolicLink() || !stat.isFile()) detail = "symlink or non-file owner";
+        else detail = JSON.parse(fs.readFileSync(lock, "utf8")).callback_id === callbackId ? "active callback owner" : "foreign callback owner";
+      } catch {}
+      throw new Error(`Callback delivery lock is occupied (${detail}); inspect and remove it only after deterministic crash recovery`);
+    }
+    throw error;
+  }
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    try {
+      const stat = fs.lstatSync(lock);
+      if (stat.isSymbolicLink() || !stat.isFile()) throw new Error("Callback delivery lock was replaced");
+      const current = JSON.parse(fs.readFileSync(lock, "utf8"));
+      if (current.token !== token || current.pid !== process.pid) throw new Error("Callback delivery lock owner changed");
+      fs.closeSync(fd);
+      fs.unlinkSync(lock);
+    } catch (error) {
+      try { fs.closeSync(fd); } catch {}
+      throw error;
+    }
+  };
+}
+
 export function createCallbackStateStore({file, expected, callbackId, message, fsModule, pathModule, expectedFingerprint = "", now = () => new Date().toISOString()}) {
   const fs = fsModule;
   const path = pathModule;
@@ -12,7 +104,8 @@ export function createCallbackStateStore({file, expected, callbackId, message, f
   const fingerprint = () => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
   const read = () => {
     if (!file) return null;
-    if (!fs.existsSync(file)) throw new Error("Callback state disappeared");
+    secureAncestors(fs, path, file);
+    if (!assertSecureTarget(fs, path, file)) throw new Error("Callback state disappeared");
     if (currentFingerprint && fingerprint() !== currentFingerprint) throw new Error("Callback state fingerprint changed");
     const current = JSON.parse(fs.readFileSync(file, "utf8").replace(/^\uFEFF/, ""));
     validateCallbackState(current, {callbackId, chatUrl:expected, message});
@@ -20,18 +113,21 @@ export function createCallbackStateStore({file, expected, callbackId, message, f
   };
   const update = (state, extra = {}) => {
     if (!file) return;
-    if (!fs.existsSync(file)) throw new Error("Callback state disappeared");
+    secureAncestors(fs, path, file);
+    if (!assertSecureTarget(fs, path, file)) throw new Error("Callback state disappeared");
     if (currentFingerprint && fingerprint() !== currentFingerprint) throw new Error("Callback state fingerprint changed");
     const current = read();
     const next = {...current, ...extra, routing_version:"explicit-route-v1", callback_id:callbackId || current.callback_id, chat_url:expected || current.chat_url, delivery_state:state, delivery_updated_at_utc:now()};
-    const temp = file + "." + process.pid + ".tmp";
-    fs.mkdirSync(path.dirname(file), {recursive:true});
-    fs.writeFileSync(temp, JSON.stringify(next, null, 2) + "\n", "utf8");
-    fs.renameSync(temp, file);
+    atomicWrite(fs, path, file, next);
     currentFingerprint = fingerprint();
     return currentFingerprint;
   };
-  return {read, update};
+  const withLock = async fn => {
+    if (!file) return fn();
+    const release = acquireLock(fs, path, file, callbackId);
+    try { return await fn(); } finally { release(); }
+  };
+  return {read, update, withLock};
 }
 
 export function validateCallbackState(current, expected) {
@@ -100,10 +196,10 @@ export async function deliverCallback({read, hasReceipt, send, update, beforeSen
     if (!attemptJournaled) beforeClick();
     return {action:"sent", result};
   } catch (error) {
-    // This error is emitted only while no Send control was exposed and the
-    // gate was never opened. The unchanged draft can safely be retried.
+    // PRE_SEND_NOT_READY proves no Send control was exposed and beforeClick
+    // never ran, so this one case is a durable safe retry. Any other error,
+    // or any journaled attempt, remains reconcile-only.
     if (error.code === "PRE_SEND_NOT_READY" && !attemptJournaled) update("PENDING");
-    // Once the gate opened, any click/error is unknown and must reconcile only.
     throw error;
   }
 }

@@ -34,7 +34,7 @@ If the `[CHAT-REGISTER]` issue remains queued because the historic Windows self-
 
 `node runtime/scripts/register-chat-mac.mjs --control-repository OWNER/chatgpt-codex-orchestrator-control-INSTANCE_ID --trusted-github-username USER --issue-number N --deliver`
 
-The intake uses authenticated `gh` only to verify that exact Issue, its trusted author, the private Control `instance.json`/`projects.json`, and any queued registration Action. It cancels and verifies cancellation of only that queued registration run before creating the local route/outbox. It never starts another runner or Codex job. Do not use it for an online, running, ambiguous, or unrelated Action; resolve that state first.
+The intake uses authenticated `gh` only for status reads that verify that exact Issue, its trusted author, the private Control `instance.json`/`projects.json`, runner inventory, and any queued registration Action. It never cancels a GitHub run, posts a cancellation, starts another runner or Codex job, or treats title/time as exact run provenance. It creates/reuses this Chat's private route/outbox immediately. If an old queue exists, it truthfully reports `CONTROL_QUEUE_UNRESOLVED` with the run ID and a human-safe instruction for an explicitly authorized cancellation or migration decision. For online, running, unknown, incomplete, or unrelated work, it fails closed; resolve that state separately.
 
 If the Mac machine or browser cannot deliver the callback, tell the user that human action is required: leave the durable outbox pending and report the exact `PENDING`/`DRAFT_INSERTED` status. Do not overwrite the draft, click again, use another Chat route, or claim `DELIVERED`; reconcile only after a user-role receipt is visible.
 

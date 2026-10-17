@@ -13,7 +13,6 @@ const ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const ACTION_PAGE_SIZE = 100;
 const ACTION_MAX_PAGES = 25;
-const RUN_ISSUE_WINDOW_MS = 15 * 60 * 1000;
 const usage = "Usage: register-chat-mac.mjs --control-repository OWNER/REPO --trusted-github-username USER (--issue-number N | --issue-url URL) [--deliver]";
 const fail = message => { throw new Error(message); };
 
@@ -38,12 +37,6 @@ function gh(args) {
   if (result.error || result.status !== 0) fail(`Authenticated gh evidence unavailable: ${(result.stderr || result.error?.message || "gh failed").trim()}`);
   try { return JSON.parse(result.stdout.replace(/^\uFEFF/, "")); }
   catch { fail(`Authenticated gh returned non-JSON evidence for ${args.join(" ")}`); }
-}
-
-function ghMutation(args) {
-  const executable = process.env.CODEX_GH_EXECUTABLE || "gh";
-  const result = spawnSync(executable, args, {encoding:"utf8", maxBuffer:8 * 1024 * 1024});
-  if (result.error || result.status !== 0) fail(`Authenticated gh mutation failed: ${(result.stderr || result.error?.message || "gh failed").trim()}`);
 }
 
 function issueNumberAndRepo(args) {
@@ -88,6 +81,7 @@ function allIssueRuns(repo) {
     const checked = assertCompletePage(gh(["api", `repos/${repo}/actions/runs?event=issues&per_page=${ACTION_PAGE_SIZE}&page=${page}`]), "Actions run");
     if (expectedTotal === null) expectedTotal = checked.total;
     if (checked.total !== expectedTotal) fail("Actions run evidence changed while paging; native intake refuses the race");
+    if (checked.items.length > checked.total) fail("Actions run page exceeds total_count; native intake refuses the race");
     for (const run of checked.items) {
       if (!run || !Number.isInteger(Number(run.id)) || Number(run.id) < 1 || seen.has(Number(run.id))) fail("Actions run page has missing or duplicate identity; native intake refuses the race");
       seen.add(Number(run.id));
@@ -99,48 +93,45 @@ function allIssueRuns(repo) {
   fail("Actions run pagination exceeded the bounded evidence window; native intake refuses the race");
 }
 
-function registrationJob(repo, run) {
-  const payload = gh(["api", `repos/${repo}/actions/runs/${run.id}/jobs?per_page=100`]);
-  if (!payload || !Array.isArray(payload.jobs) || !Number.isInteger(Number(payload.total_count)) || Number(payload.total_count) < 0 || Number(payload.total_count) !== payload.jobs.length) fail("Actions job evidence is paginated or incomplete; native intake refuses to cancel");
-  const jobs = payload.jobs;
-  const matches = jobs.filter(job => job.name === "register-chat");
-  if (matches.length !== 1 || jobs.some(job => job.name !== "register-chat" && !["skipped", "completed"].includes(String(job.status || "").toLowerCase()))) fail("Exact registration job binding is unavailable; native intake refuses to cancel");
-  return matches[0];
+function allRunners(repo) {
+  const all = [];
+  const seen = new Set();
+  let expectedTotal = null;
+  for (let page = 1; page <= ACTION_MAX_PAGES; page++) {
+    const payload = gh(["api", `repos/${repo}/actions/runners?per_page=${ACTION_PAGE_SIZE}&page=${page}`]);
+    if (!payload || !Array.isArray(payload.runners) || !Number.isInteger(Number(payload.total_count)) || Number(payload.total_count) < 0 || payload.runners.length > ACTION_PAGE_SIZE) fail("Actions runner evidence is unreadable; native intake refuses the race");
+    const total = Number(payload.total_count);
+    if (expectedTotal === null) expectedTotal = total;
+    if (total !== expectedTotal) fail("Actions runner evidence changed while paging; native intake refuses the race");
+    if (payload.runners.length > total) fail("Actions runner page exceeds total_count; native intake refuses the race");
+    for (const runner of payload.runners) {
+      if (!runner || !Number.isInteger(Number(runner.id)) || Number(runner.id) < 1 || seen.has(Number(runner.id))) fail("Actions runner page has missing or duplicate identity; native intake refuses the race");
+      seen.add(Number(runner.id));
+      all.push(runner);
+    }
+    if (all.length >= expectedTotal) return all;
+    if (!payload.runners.length) fail("Actions runner pagination ended before total_count; native intake refuses the race");
+  }
+  fail("Actions runner pagination exceeded the bounded evidence window; native intake refuses the race");
 }
 
 function reconcileQueuedRegistration(repo, issue, instance) {
   const runs = allIssueRuns(repo);
   const relevant = runs.filter(run => active(run) && isIssueRun(run) && /orchestrator|register-chat/i.test(`${run.name || ""} ${run.workflow_name || run.workflowName || ""} ${run.path || ""}`));
   const sameTitle = relevant.filter(run => isRegistrationRun(run, issue));
-  if (sameTitle.length > 1) fail("Multiple active registration Actions runs share this Issue title; native intake refuses the race");
-  if (sameTitle.length === 1) {
-    const issueCreated = Date.parse(issue.created_at || "");
-    const runCreated = Date.parse(sameTitle[0].created_at || "");
-    if (!Number.isFinite(issueCreated) || !Number.isFinite(runCreated) || runCreated < issueCreated || runCreated - issueCreated > RUN_ISSUE_WINDOW_MS) fail("Registration Actions run lacks a unique bounded creation-time binding to this Issue");
-  }
-  const target = sameTitle;
   const unrelated = relevant.filter(run => !isRegistrationRun(run, issue));
   if (unrelated.length) fail("Unexpected queued or active Control Actions run exists; registration refused without cancelling unrelated work");
-  if (target.length > 1) fail("Multiple active registration Actions runs match this Issue; registration refused as an unknown race");
-  const runnersPayload = gh(["api", `repos/${repo}/actions/runners?per_page=100`]);
-  const online = (runnersPayload.runners || []).filter(r => r.status === "online" && (instance.runner_label ? (r.labels || []).some(label => label.name === instance.runner_label) : (r.labels || []).some(label => label.name === "self-hosted")));
+  const runners = allRunners(repo);
+  const online = runners.filter(r => r.status === "online" && (instance.runner_label ? (r.labels || []).some(label => label.name === instance.runner_label) : (r.labels || []).some(label => label.name === "self-hosted")));
   if (online.length) fail("The configured Control runner is online; native intake refuses the race");
-  if (!target.length) return "NO_MATCHING_ACTIVE_RUN";
-  const run = target[0];
-  const status = String(run.status || "").toLowerCase();
-  if (!["queued", "waiting", "requested", "pending"].includes(status)) fail(`Registration Actions run is ${run.status}; native intake refuses the race`);
-  const id = run.id || run.databaseId;
-  if (!id) fail("Matching queued Actions run has no stable run ID");
-  if (!run.id) fail("Matching queued Actions run lacks the canonical GitHub run ID");
-  registrationJob(repo, run);
-  ghMutation(["api", "--method", "POST", `repos/${repo}/actions/runs/${id}/cancel`]);
-  const deadline = Date.now() + 15000;
-  while (Date.now() < deadline) {
-    const after = gh(["api", `repos/${repo}/actions/runs/${id}`]);
-    if (String(after.status || "").toLowerCase() === "completed" && String(after.conclusion || "").toLowerCase() === "cancelled") return `CANCELLED_RUN_${id}`;
-    if (!["queued", "waiting", "requested", "pending", "in_progress"].includes(String(after.status || "").toLowerCase())) fail("Actions cancellation reached an unknown state");
+  if (!sameTitle.length) return "CONTROL_QUEUE_CLEAR";
+  const ids = sameTitle.map(run => run.id || run.databaseId).filter(id => Number.isInteger(Number(id)) && Number(id) > 0);
+  if (ids.length !== sameTitle.length) fail("Matching Actions run has no stable run ID; native intake refuses the race");
+  for (const run of sameTitle) {
+    const status = String(run.status || "").toLowerCase();
+    if (!["queued", "waiting", "requested", "pending"].includes(status)) fail(`Registration Actions run is ${run.status}; native intake refuses the race`);
   }
-  fail("Actions cancellation could not be verified within the bounded reconciliation window");
+  return `CONTROL_QUEUE_UNRESOLVED run_id=${ids.join(",")} instruction="An authorized human must inspect this old queued registration run and explicitly decide cancellation or migration; native intake performed no GitHub mutation."`;
 }
 
 function main() {
@@ -158,7 +149,6 @@ function main() {
   const projects = decodeContents(gh(["api", `repos/${repo}/contents/projects.json`]), "projects.json");
   const expectedRepoName = `chatgpt-codex-orchestrator-control-${instance.instance_id || ""}`;
   if (!ID.test(instance.instance_id || "") || repoEvidence.name !== expectedRepoName || (instance.control_repository && instance.control_repository.toLowerCase() !== repo.toLowerCase()) || (instance.trusted_github_username && instance.trusted_github_username !== args.trusted_github_username) || viewer.login !== issue.user.login || !projects.projects || typeof projects.projects !== "object") fail("Private Control metadata does not match the generated Control identity");
-  const action = reconcileQueuedRegistration(repo, issue, instance);
   const temp = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "codex-native-chat-register-"));
   try {
     fs.writeFileSync(path.join(temp, "instance.json"), JSON.stringify(instance));
@@ -166,7 +156,6 @@ function main() {
     const event = {issue:{number:identity.number, user:{login:issue.user.login}, body:String(issue.body || "")}};
     const eventPath = path.join(temp, "issue.json"); fs.writeFileSync(eventPath, JSON.stringify(event));
     const childArgs = [fileURLToPath(new URL("./register-chat.mjs", import.meta.url)), "--event-path", eventPath, "--control-root", temp, "--trusted-github-username", args.trusted_github_username];
-    if (args.deliver) childArgs.push("--deliver");
     const child = spawnSync(process.execPath, childArgs, {env:process.env, encoding:"utf8"});
     if (child.stdout) process.stdout.write(child.stdout);
     if (child.stderr) process.stderr.write(child.stderr);
@@ -174,15 +163,23 @@ function main() {
     const callbackFile = path.join(os.homedir(), ".chatgpt-codex-orchestrator", "instances", instance.instance_id, "pending-wakes", `chat-register-${String(body.project || "").toLowerCase()}-${identity.number}.json`);
     let delivery = null;
     try { delivery = JSON.parse(fs.readFileSync(callbackFile, "utf8")); } catch {}
-    const trustedProof = delivery?.verified_by === "committed-user-turn" || delivery?.verified_by === "existing-user-message";
-    if (child.status === 0 && delivery?.delivery_state === "DELIVERED" && trustedProof) {
-      console.log(`MAC_NATIVE_REGISTRATION_OK issue=${identity.number} action_reconciliation=${action} delivery_state=DELIVERED`);
-    } else if (delivery?.delivery_state && delivery.delivery_state !== "DELIVERED" && (child.status === 0 || args.deliver)) {
-      console.log(`MAC_NATIVE_REGISTRATION_PENDING issue=${identity.number} action_reconciliation=${action} delivery_state=${delivery.delivery_state}`);
-      if (args.deliver) process.exitCode = 3;
-    } else {
+    if (child.status !== 0 || !delivery?.delivery_state) {
       fail("Local persistent registration intake failed or returned an untrusted delivery record");
     }
+    const trustedProof = delivery?.verified_by === "committed-user-turn" || delivery?.verified_by === "existing-user-message";
+    if (delivery.delivery_state === "DELIVERED" && !trustedProof) fail("Local DELIVERED callback record lacks trusted user-role proof");
+    const action = reconcileQueuedRegistration(repo, issue, instance);
+    if (args.deliver && delivery.delivery_state !== "DELIVERED") {
+      const deliverChild = spawnSync(process.execPath, [...childArgs, "--deliver"], {env:process.env, encoding:"utf8"});
+      if (deliverChild.stdout) process.stdout.write(deliverChild.stdout);
+      if (deliverChild.stderr) process.stderr.write(deliverChild.stderr);
+      if (deliverChild.status !== 0) process.exitCode = 3;
+      try { delivery = JSON.parse(fs.readFileSync(callbackFile, "utf8")); } catch {}
+    }
+    const finalTrustedProof = delivery?.verified_by === "committed-user-turn" || delivery?.verified_by === "existing-user-message";
+    if (delivery?.delivery_state === "DELIVERED" && finalTrustedProof) console.log(`MAC_NATIVE_REGISTRATION_OK issue=${identity.number} action_reconciliation=${action} delivery_state=DELIVERED`);
+    else if (delivery?.delivery_state === "DELIVERED") fail("Local DELIVERED callback record lacks trusted user-role proof");
+    else console.log(`MAC_NATIVE_REGISTRATION_PENDING issue=${identity.number} action_reconciliation=${action} delivery_state=${delivery?.delivery_state}`);
   } finally { fs.rmSync(temp, {recursive:true, force:true}); }
 }
 try { main(); } catch (error) { console.error(`REGISTER_CHAT_MAC_FAILED: ${error.message}`); process.exitCode = 1; }

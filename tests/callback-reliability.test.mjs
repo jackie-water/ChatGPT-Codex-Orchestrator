@@ -8,6 +8,8 @@ import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 
+const callbackTempRoot = fs.realpathSync(os.tmpdir());
+
 const extract = root => vm.runInNewContext(`(${receiptDomSource()})`, {}).call(null, root);
 class Element {
   constructor(attrs={}, text="", children=[]) { this.attrs=attrs; this.innerText=text; this.textContent=text; this.children=children; this.parentElement=null; for (const child of children) child.parentElement=this; }
@@ -112,7 +114,7 @@ test("shipped sender helpers keep mutation and send gates fail closed", () => {
 });
 
 test("production callback state store persists legal transitions and rejects identity/state drift", () => {
-  const dir=fs.mkdtempSync(path.join(os.tmpdir(),"callback-store-"));
+  const dir=fs.mkdtempSync(path.join(callbackTempRoot,"callback-store-"));
   const file=path.join(dir,"state.json");
   const expected={callbackId:"x",chatUrl:"https://chatgpt.com/c/chat-27",message:"payload"};
   fs.writeFileSync(file,JSON.stringify({routing_version:"explicit-route-v1",delivery_state:"PENDING",callback_id:"x",chat_url:expected.chatUrl,message:"payload"}));
@@ -122,9 +124,9 @@ test("production callback state store persists legal transitions and rejects ide
 });
 
 test("production callback state store fails closed on disappearance, conflicts, writes, renames, and returns bound fingerprints", () => {
-  const dir=fs.mkdtempSync(path.join(os.tmpdir(),"callback-store-")); const file=path.join(dir,"state.json"); const record={routing_version:"explicit-route-v1",delivery_state:"PENDING",callback_id:"x",chat_url:"https://chatgpt.com/c/chat-27",message:"payload"}; const expected={callbackId:"x",chatUrl:record.chat_url,message:record.message}; const write=()=>fs.writeFileSync(file,JSON.stringify(record)); write();
+  const dir=fs.mkdtempSync(path.join(callbackTempRoot,"callback-store-")); const file=path.join(dir,"state.json"); const record={routing_version:"explicit-route-v1",delivery_state:"PENDING",callback_id:"x",chat_url:"https://chatgpt.com/c/chat-27",message:"payload"}; const expected={callbackId:"x",chatUrl:record.chat_url,message:record.message}; const write=()=>fs.writeFileSync(file,JSON.stringify(record)); write();
   const make=(overrides={}, expectedFingerprint="")=>createCallbackStateStore({file,expected:record.chat_url,callbackId:"x",message:"payload",expectedFingerprint,fsModule:Object.assign(Object.create(fs),overrides),pathModule:path}); let store=make({},crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex")); const before=fs.readFileSync(file,"utf8"); fs.writeFileSync(file,before+" "); assert.throws(()=>store.read(),/fingerprint changed/); assert.throws(()=>store.update("DRAFT_INSERTED"),/fingerprint changed/); assert.equal(fs.readFileSync(file,"utf8"),before+" "); write();
-  for (const method of ["writeFileSync","renameSync"]) { store=make({[method](){throw new Error(method);}}); assert.throws(()=>store.update("DRAFT_INSERTED"),new RegExp(method)); assert.deepEqual(JSON.parse(fs.readFileSync(file)),record); }
+  for (const method of ["writeFileSync","fsyncSync","renameSync"]) { store=make({[method](){throw new Error(method);}}); assert.throws(()=>store.update("DRAFT_INSERTED"),new RegExp(method)); assert.deepEqual(JSON.parse(fs.readFileSync(file)),record); }
   fs.unlinkSync(file); assert.throws(()=>store.read(),/Callback state disappeared/); assert.throws(()=>store.update("DRAFT_INSERTED"),/Callback state disappeared/); assert.equal(fs.existsSync(file),false); write(); const fp=make().update("DRAFT_INSERTED"); assert.equal(fp,crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex"));
 });
 
@@ -133,6 +135,16 @@ test("production delivery helper retries without blind resend and counts only ir
   await assert.rejects(()=>deliverCallback({read,hasReceipt:async()=>false,update,beforeSend:async()=>{},send:async()=>{const e=new Error("not ready"); e.code="PRE_SEND_NOT_READY"; throw e;}}),/not ready/); assert.equal(state,"PENDING"); assert.equal(submissions,0);
   const result=await deliverCallback({read,hasReceipt:async()=>false,update,beforeSend:async()=>{},send:async()=>{submissions++; return "sent";}}); assert.equal(result.action,"sent"); assert.equal(submissions,1); assert.deepEqual(updates.slice(-2),["DRAFT_INSERTED","SUBMISSION_ATTEMPTED"]);
   for (const prior of ["DRAFT_INSERTED","SUBMISSION_ATTEMPTED","DELIVERED"]) { state=prior; let called=0; assert.equal((await deliverCallback({read,hasReceipt:async()=>false,update,send:async()=>called++})).action,"reconcile"); assert.equal(called,0); state=prior; assert.equal((await deliverCallback({read,hasReceipt:async()=>true,update,send:async()=>called++})).state,"DELIVERED"); assert.equal(called,0); }
+});
+
+test("callback mutex serializes independent owners and rejects foreign or symlink locks", async () => {
+  const dir=fs.mkdtempSync(path.join(callbackTempRoot,"callback-lock-")); const file=path.join(dir,"state.json");
+  const record={routing_version:"explicit-route-v1",delivery_state:"PENDING",callback_id:"x",chat_url:"https://chatgpt.com/c/chat-27",message:"payload"}; fs.writeFileSync(file,JSON.stringify(record));
+  const make=()=>createCallbackStateStore({file,expected:record.chat_url,callbackId:"x",message:record.message,fsModule:fs,pathModule:path}); const one=make(), two=make();
+  let release; const held=new Promise(resolve=>{release=resolve;}); let entered=false;
+  let firstError; const first=one.withLock(async()=>{entered=true; await held;}).catch(error=>{firstError=error; throw error;}); first.catch(()=>{}); const deadline=Date.now()+2000; while(!entered){ if(firstError){ release(); throw firstError; } if(Date.now()>=deadline){ release(); throw new Error("mutex precondition timed out"); } await new Promise(resolve=>setTimeout(resolve,10)); }
+  await assert.rejects(()=>two.withLock(async()=>{}),/lock is occupied/); release(); await first;
+  const lock=file+".delivery.lock"; fs.symlinkSync(file,lock); await assert.rejects(()=>one.withLock(async()=>{}),/lock is occupied|symlink/); fs.unlinkSync(lock);
 });
 
 test("two-phase sender journals immediately before click and preserves ambiguity", async () => {
@@ -146,7 +158,7 @@ test("two-phase sender journals immediately before click and preserves ambiguity
 });
 
 test("deliverCallback blocks send on production state-store faults", async () => {
-  const dir=fs.mkdtempSync(path.join(os.tmpdir(),"callback-delivery-store-")); const file=path.join(dir,"state.json");
+  const dir=fs.mkdtempSync(path.join(callbackTempRoot,"callback-delivery-store-")); const file=path.join(dir,"state.json");
   const record={routing_version:"explicit-route-v1",delivery_state:"PENDING",callback_id:"x",chat_url:"https://chatgpt.com/c/chat-27",message:"payload"};
   const write=()=>fs.writeFileSync(file,JSON.stringify(record)); const make=(overrides={}, expectedFingerprint="")=>createCallbackStateStore({file,expected:record.chat_url,callbackId:"x",message:record.message,expectedFingerprint,fsModule:Object.assign(Object.create(fs),overrides),pathModule:path});
   const attempt=async (store, receipt=async()=>false) => { let sends=0, receipts=0; await assert.rejects(()=>deliverCallback({read:store.read,hasReceipt:async()=>{receipts++; return receipt();},update:store.update,send:async()=>{sends++;}})); assert.equal(sends,0); return receipts; };

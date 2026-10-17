@@ -34,7 +34,7 @@ Chat 负责理解用户目标、进行产品/架构判断并生成精确 impleme
 
 `node runtime/scripts/register-chat-mac.mjs --control-repository OWNER/chatgpt-codex-orchestrator-control-INSTANCE_ID --trusted-github-username USER --issue-number N --deliver`
 
-该 intake 只通过已认证的 `gh` 校验准确的 Issue、可信作者、私有 Control 的 `instance.json`/`projects.json` 以及相关的 queued registration Action；它只取消并验证该 Issue 的 queued registration run，然后创建本地 route/outbox。它不会启动其他 runner 或 Codex job。对于 online、运行中、状态不明或不相关的 Action，必须先解决状态，不要使用此入口。
+该 intake 只通过已认证的 `gh` 进行状态读取，校验准确的 Issue、可信作者、私有 Control 的 `instance.json`/`projects.json`、runner 清单以及 queued registration Action。它不会取消任何 GitHub run、发送取消请求、启动其他 runner 或 Codex job，也不会把标题/时间窗口当作准确的 run 来源证明。它会立即创建或复用当前 Chat 的私有 route/outbox；如果存在旧 queue，必须如实返回 `CONTROL_QUEUE_UNRESOLVED`、run ID 以及供人工明确授权取消或迁移的安全说明。对于 online、运行中、状态未知、清单不完整或不相关的工作，必须 fail closed，另行解决该状态。
 
 如果 Mac 机器或浏览器无法发送 callback，应明确告知用户需要人工操作：保留 durable outbox 的准确 `PENDING`/`DRAFT_INSERTED` 状态并报告给用户。不要覆盖草稿、再次点击、使用其他 Chat route 或声称 `DELIVERED`；只有看到 user-role receipt 后才能进行 reconcile。
 

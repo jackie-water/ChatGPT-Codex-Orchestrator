@@ -467,50 +467,53 @@ async function main() {
   const { ws, send } = await connect(page.webSocketDebuggerUrl);
 
   try {
-    await send("Page.bringToFront");
+    const critical = async () => {
+      await send("Page.bringToFront");
 
-    const currentUrl = await evaluate(send, "location.href");
-    if (expected &&
-        normalizeConversationUrl(currentUrl) !== normalizeConversationUrl(expected)) {
-      throw new Error("Resolved Chat tab URL does not match the requested callback destination");
-    }
+      const currentUrl = await evaluate(send, "location.href");
+      if (expected &&
+          normalizeConversationUrl(currentUrl) !== normalizeConversationUrl(expected)) {
+        throw new Error("Resolved Chat tab URL does not match the requested callback destination");
+      }
 
-    if (callbackId) {
-      readDeliveryState();
-      const alreadyDelivered = await hasReceipt(send, callbackId, message);
-      if (alreadyDelivered) {
-        updateDeliveryState("DELIVERED",{verified_by:"existing-user-message"});
-        console.log("CHAT_WAKE_ALREADY_DELIVERED:", callbackId);
+      if (callbackId) {
+        readDeliveryState();
+        const alreadyDelivered = await hasReceipt(send, callbackId, message);
+        if (alreadyDelivered) {
+          updateDeliveryState("DELIVERED",{verified_by:"existing-user-message"});
+          console.log("CHAT_WAKE_ALREADY_DELIVERED:", callbackId);
+          return;
+        }
+      }
+
+      const sendResult = await deliverCallback({
+        read: readDeliveryState,
+        hasReceipt: () => hasReceipt(send, callbackId, message),
+        update: updateDeliveryState,
+        beforeSend: async () => {
+          const composer = await waitForComposer(send);
+          console.log("CHAT_COMPOSER_FOUND:", JSON.stringify(composer));
+          const beforeInputUrl = await evaluate(send, "location.href");
+          assertSafeMutation({destination:normalizeConversationUrl(beforeInputUrl), expectedDestination:normalizeConversationUrl(expected), draft:"", message});
+          await insertText(send, message);
+          const verifyDestination = await evaluate(send, "location.href");
+          assertSafeMutation({destination:normalizeConversationUrl(verifyDestination), expectedDestination:normalizeConversationUrl(expected), draft:message, message});
+        },
+        send: ({beforeClick} = {}) => sendMessage(send, {beforeClick}),
+        allowSend: !reconcileOnly
+      });
+      if (sendResult.action !== "sent") {
+        console.log(sendResult.action === "reconciled" ? "CHAT_WAKE_ALREADY_DELIVERED:" : "CHAT_RECONCILE_PENDING:", callbackId);
+        process.exitCode = sendResult.action === "reconciled" ? 0 : 3;
         return;
       }
-    }
+      console.log("CHAT_WAKE_SENT:", JSON.stringify(sendResult.result));
 
-    const sendResult = await deliverCallback({
-      read: readDeliveryState,
-      hasReceipt: () => hasReceipt(send, callbackId, message),
-      update: updateDeliveryState,
-      beforeSend: async () => {
-        const composer = await waitForComposer(send);
-        console.log("CHAT_COMPOSER_FOUND:", JSON.stringify(composer));
-        const beforeInputUrl = await evaluate(send, "location.href");
-        assertSafeMutation({destination:normalizeConversationUrl(beforeInputUrl), expectedDestination:normalizeConversationUrl(expected), draft:"", message});
-        await insertText(send, message);
-        const verifyDestination = await evaluate(send, "location.href");
-        assertSafeMutation({destination:normalizeConversationUrl(verifyDestination), expectedDestination:normalizeConversationUrl(expected), draft:message, message});
-      },
-      send: ({beforeClick} = {}) => sendMessage(send, {beforeClick}),
-      allowSend: !reconcileOnly
-    });
-    if (sendResult.action !== "sent") {
-      console.log(sendResult.action === "reconciled" ? "CHAT_WAKE_ALREADY_DELIVERED:" : "CHAT_RECONCILE_PENDING:", callbackId);
-      process.exitCode = sendResult.action === "reconciled" ? 0 : 3;
-      return;
-    }
-    console.log("CHAT_WAKE_SENT:", JSON.stringify(sendResult.result));
-
-    const confirmed = await confirmSubmission(send, callbackId, message, 30000);
-    updateDeliveryState(reconcileReceipt({state:"SUBMISSION_ATTEMPTED", receiptMatches:true}),{verified_by:confirmed?.verifiedBy||"submission-confirmed"});
-    console.log("CHAT_WAKE_CONFIRMED:", JSON.stringify(confirmed));
+      const confirmed = await confirmSubmission(send, callbackId, message, 30000);
+      updateDeliveryState(reconcileReceipt({state:"SUBMISSION_ATTEMPTED", receiptMatches:true}),{verified_by:confirmed?.verifiedBy||"submission-confirmed"});
+      console.log("CHAT_WAKE_CONFIRMED:", JSON.stringify(confirmed));
+    };
+    await (callbackStateFile ? stateStore.withLock(critical) : critical());
   } finally {
     ws.close();
   }
