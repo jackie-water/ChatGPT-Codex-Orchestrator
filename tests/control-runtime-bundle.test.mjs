@@ -49,8 +49,8 @@ test("runtime payload contains only the explicit scripts and native dependency c
     fs.writeFileSync(target, "must not be packaged\n");
   }
   const files = prepareControlRuntimeFiles({ sourceRoot: fixtureSource, controlRoot });
-  assert.equal(files.length, 34);
-  assert.equal(files.filter(file => file.path.startsWith("src/lib/")).length, 5);
+  assert.equal(files.length, 35);
+  assert.equal(files.filter(file => file.path.startsWith("src/lib/")).length, 6);
   assert.ok(files.every(file => Buffer.isBuffer(file.content) && !file.content.includes("must not be packaged")));
   assert.deepEqual(fs.readdirSync(controlRoot), []);
   writeControlRuntimeFiles({ controlRoot, files });
@@ -145,7 +145,7 @@ test("generated native entrypoints reach argument rejection and review/merge rem
     assert.match(result.stderr, message, name);
     assert.doesNotMatch(result.stderr, /ERR_MODULE_NOT_FOUND|Cannot find module/, name);
   }
-  for (const [name, message] of [["macos-code-review.mjs", /refusing false PASS/], ["macos-merge-approved.mjs", /refusing merge/]]) {
+  for (const [name, message] of [["macos-code-review.mjs", /requires a validated event path/], ["macos-merge-approved.mjs", /refusing merge/]]) {
     const result = spawnSync(process.execPath, [path.join(controlRoot, "scripts", name)], {
       cwd: home, env: childEnvironment(home), encoding: "utf8", timeout: 10000
     });
