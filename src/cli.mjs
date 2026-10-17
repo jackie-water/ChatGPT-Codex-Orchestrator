@@ -326,6 +326,19 @@ function runSetup() {
       }
       return emit(action(state,"codex_trust_project","setup.codex.trust_project",{folder:state.project_clone_path||null,smoke,mutations_performed:true,details:"Sandbox completion was independently verified for this installation. Confirm project-folder trust as the next human gate; target remains disabled and no LaunchAgent or runner was started."}));
     }
+    if(smoke?.stage==="NOT_STARTED"){
+      try {
+        const started=startSandboxSmoke(state);
+        state.sandbox_smoke_started=true;
+        state.sandbox_smoke_issue=started.issue?.url||null;
+        saveState(state);
+        smoke=sandboxSmokeStatus(state,{strict:true});
+      } catch(error) {
+        state.last_error={error_id:"SANDBOX-SMOKE-START-001",message:String(error.message||error),at:new Date().toISOString()};
+        saveState(state);
+        return emit({status:"ERROR",error_id:"SANDBOX-SMOKE-START-001",recoverable:true,preferred_language:lang,message:"Sandbox smoke creation was refused because its exact authorized issue state could not be established; target remains disabled.",details:String(error.message||error),smoke,mutations_performed:true},1);
+      }
+    }
     state.macos_native_setup="SANDBOX_READY"; state.current_step="sandbox_verification"; saveState(state);
     return emit({status:"WAITING",action_id:"sandbox_verification",recoverable:true,preferred_language:lang,mutations_performed:true,message:"Native macOS Sandbox and Control are prepared; independently verified Sandbox completion is still required. The target remains disabled. No LaunchAgent or runner was started.",smoke,control_repository:state.control_repository,sandbox_repository:state.sandbox_repository,runner_label:state.runner_label});
   }

@@ -20,6 +20,10 @@ function issueMarker(installationId){
   return "INSTALL-SMOKE-"+shortId(installationId);
 }
 
+function smokeIssueTitle(installationId){
+  return "[CODEX-RUN] "+issueMarker(installationId)+" sandbox ready-state";
+}
+
 function requireSandboxRoute(state){
   const route=String(state?.sandbox_review_route||"");
   if(!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(route)){
@@ -38,6 +42,35 @@ function listSmokeIssues(controlRepository,installationId){
   ],{allowFailure:true});
   if(!r.ok||!r.stdout) return [];
   try{return JSON.parse(r.stdout);}catch{return [];}
+}
+
+function listSmokeIssuesForCreate(controlRepository,installationId){
+  const marker=issueMarker(installationId);
+  const r=run("gh",[
+    "issue","list","--repo",controlRepository,
+    "--state","all","--limit","100",
+    "--search",marker+" in:title",
+    "--json","number,title,state,url,body,author"
+  ],{allowFailure:true});
+  if(!r.ok||!r.stdout) throw new Error("Sandbox smoke issue listing is unavailable");
+  let issues;
+  try { issues=JSON.parse(r.stdout); } catch { throw new Error("Sandbox smoke issue listing is malformed"); }
+  if(!Array.isArray(issues)) throw new Error("Sandbox smoke issue listing is malformed");
+  if(issues.length>=100) throw new Error("Sandbox smoke issue listing may be truncated");
+  return issues;
+}
+
+function exactSmokeIssue(state,issue){
+  const body=jsonBody(issue);
+  const title=String(issue?.title||"");
+  return title===smokeIssueTitle(state.installation_id) &&
+    body?.project===state.sandbox_project_key && body?.repository===state.sandbox_repository &&
+    body?.target_repo===state.sandbox_repository && body?.target_branch===smokeBranch(state.installation_id) &&
+    body?.iteration===1 && body?.max_iterations===5 &&
+    body?.review_route===state.sandbox_review_route &&
+    body?.installation_smoke?.installation_id===state.installation_id &&
+    body?.installation_smoke?.marker===issueMarker(state.installation_id) &&
+    issue?.author?.is_bot===false && String(issue?.author?.login||"")===String(state.github_login||"");
 }
 
 function showGit(repoPath,object){
@@ -167,13 +200,15 @@ export function startSandboxSmoke(state){
   }
   const reviewRoute=requireSandboxRoute(state);
 
-  const existing=listSmokeIssues(state.control_repository,state.installation_id)
-    .find(x=>String(x.title||"").startsWith("[CODEX-RUN]")&&String(x.title||"").includes(issueMarker(state.installation_id)));
-  if(existing){
-    return {created:false,issue:existing,branch:smokeBranch(state.installation_id)};
+  const branch=smokeBranch(state.installation_id);
+  const candidates=listSmokeIssuesForCreate(state.control_repository,state.installation_id)
+    .filter(x=>String(x.title||"").startsWith("[CODEX-RUN]")&&String(x.title||"").includes(issueMarker(state.installation_id)));
+  if(candidates.length>1) throw new Error("Conflicting or multiple Sandbox smoke issues found");
+  if(candidates.length===1){
+    if(!exactSmokeIssue(state,candidates[0])) throw new Error("Existing Sandbox smoke issue identity is not authorized");
+    return {created:false,issue:candidates[0],branch};
   }
 
-  const branch=smokeBranch(state.installation_id);
   const prompt=[
     "Installation sandbox smoke test.",
     "",
@@ -204,7 +239,7 @@ export function startSandboxSmoke(state){
     }
   },null,2);
 
-  const title="[CODEX-RUN] "+issueMarker(state.installation_id)+" sandbox ready-state";
+  const title=smokeIssueTitle(state.installation_id);
   const r=run("gh",["issue","create","--repo",state.control_repository,"--title",title,"--body",body]);
   const url=r.stdout.split(/\s+/).find(x=>/^https:\/\/github\.com\//.test(x))||r.stdout;
   return {created:true,issue:{title,url},branch};
