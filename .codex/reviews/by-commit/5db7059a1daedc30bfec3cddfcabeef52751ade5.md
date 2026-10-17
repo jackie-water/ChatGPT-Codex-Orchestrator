@@ -1,0 +1,36 @@
+# Independent Code Review — macOS exact-SHA reviewer adapter 1/5
+
+**Final Chat adjudication: REVISE (three reproducible deterministic blocking corrections). NOT PASS or merge authorization.**
+
+## Immutable identity and evidence
+
+- Project: `orchestrator-dev`, original current Chat's explicit registered `review_route=chat-232`.
+- Private Control implementation task **#258** (native Mac CODE-REVIEW adapter initial 1/5), independent Code Review request **#261**.
+- Source: `jackie-water/ChatGPT-Codex-Orchestrator`; nonprotected task branch `feat/macos-native-code-review-adapter-20261017`.
+- **Exact reviewed source SHA: `5db7059a1daedc30bfec3cddfcabeef52751ade5`.**
+- **Exact immutable baseline: `9203170f74b57dade7702fb0530e994ecf531c17`**, the previously independently reviewed P3 Mac core SHA. This report covers the entire native adapter delta, not all unrelated unmerged Windows changes.
+- Implementation immutable checkpoint `2c82fc69febfc915c168e279dc75ef7b40da1418`, report path `.codex/runs/by-issue/258/iteration-1__5db7059a1dae.md`.
+- Independent reviewer native Mac Codex CLI 0.162.1, model `gpt-5.6-luna`, medium reasoning, read-only sandbox, session `01a14819-3da5-7640-8e4b-85f45f918f21`, exit 0.
+- Raw review log privately retained on the Mac `~/.chatgpt-codex-orchestrator/instances/1832f0bb/review-evidence/mac-native-review-261-5db7059a1daedc30bfec3cddfcabeef52751ade5.raw.log`, SHA256 `9153d0976958a7bceccf89b832d895240e73fe0e00d33e6dfae54c409f9998e8`. Do not disclose this raw record in public issue text.
+- Actual private Control workflow is deliberately disabled, registered self-hosted runners 0, so this was a manually orchestrated Mac **READ-ONLY** review, NOT a `[CODE-REVIEW-AUTO]` delivered by the disabled workflow.
+
+## Reviewer findings — independently adjudicated by Chat/controller
+
+1. **P1 ACCEPTED / deterministically reproduced — symlink escape during checkpoint report publication.** `runtime/scripts/macos-code-review.mjs` `publish()` computes `.codex/reviews/by-commit/<SHA>.md` in a detached checkpoint worktree, then `fs.mkdirSync(parent,{recursive:true})` and `fs.writeFileSync(target,...)` without checking symlink/hardlink ancestors or the leaf. If the checkpoint content includes a symlink at `.codex/reviews` or a descendant, the report can be written OUTSIDE the authorized detached worktree despite having a valid reviewed SHA. Chat reproduced with a wholly isolated temp directory: a `.codex/reviews` symlink pointing at another temporary directory caused report creation at that outside target; `CHECKPOINT_SYMLINK_ESCAPE_REPRODUCED=true`. Correct with no-follow path component/leaf checks, secure private exclusive write, and no unsafe source symlink traversal. No actual repos or target modified.
+2. **P2 ACCEPTED / deterministically reproduced — branch source reference validator accepts invalid Git syntax.** In `src/lib/macos-code-review-runtime.mjs` the source `BRANCH` pattern accepts `feat//x`, `feat/..`, trailing separators, `.lock` components, and `@{` sequences, although Git itself rejects them and they are interpolated into branch/ref queries. Chat ran local `git check-ref-format --branch` fixture: examples above exited 128 whereas `feat/task` exited 0. Reuse strict slash-component-safe Git ref verification for both source branch and checkpoint ref; exclude protected/default/main routes and unsafe names before any Git operation.
+3. **P1 additional controller finding / deterministically reproduced — external Git push may execute worktree hooks.** The native `git()` helper correctly uses `-c core.hooksPath=/dev/null`, but `publish()` uses a **separate unguarded** `spawnSync("git", ["-C",workspace,"push",...])` without that override. If a repository worktree/global Git configuration contains an active pre-push hook, the review publisher can execute its instructions OUTSIDE the Codex read-only sandbox. Chat proved in an entirely local temporary Git repo with a harmless pre-push hook writing a marker: unguarded `git push` caused `UNGUARDED_GIT_PUSH_RUNS_HOOK=true`, whereas `git -c core.hooksPath=/dev/null push` produced `HOOK_DISABLED_GIT_PUSH_SKIP_HOOK=true`. Preserve exact remote/branch/CAS checks, add explicit hook disabling to every publication Git subprocess, and include a no-execution canary fixture.
+
+These three findings are deterministic corrections requiring no product-policy judgment and are eligible for **ONE consolidated concise REVISE successor iteration 2/5**, same Chat route `chat-232`, exact reviewed parent `5db7059a1daedc30bfec3cddfcabeef52751ade5`. Never silently modify/overwrite this immutable source SHA or report.
+
+## Wrapper and CI evidence
+
+- Exact seven-file task scope, local/remote task branch SHA and clean worktree verified after controller nonforce push. Draft PR #12 remains OPEN/DRAFT/unmerged, base `feat/macos-official-installer-migration` at `9203170f74b57dade7702fb0530e994ecf531c17`, head exact SHA above.
+- Native Mac focused validation: **128/128 PASS, 0 FAIL**, including manifest/bundle, runtime refresh and exact official checkpoint branch tests.
+- Native Mac complete Node suite: **351 total / 342 PASS / 0 FAIL / 9 expected platform SKIP**; direct controller command exit 0, log on Mac `/private/tmp/mac-review-adapter-full-v2-20261017.log`. Wrapper CI PASS alone cannot override the three independently reproduced security/correctness findings.
+- Exact source [GitHub CI #39002198676](https://github.com/jackie-water/ChatGPT-Codex-Orchestrator/actions/runs/39002198676) **completed SUCCESS**, jobs `node-tests` and `windows-static` both SUCCESS. Windows-static is hosted/static only — no retired Windows computer was used.
+- Earlier PRELIMINARY reviewer claims that a previously recorded `CODE_REVIEW_FAILED` by-commit evidence should be blindly rerun for the same SHA were **not accepted**: project instruction forbids rerunning Code Review for an unchanged SHA with valid evidence; do not overwrite immutable failed-SHA report without separate policy/versioning decision. Other deterministic P2 deficiencies (publication intents wrongly in pending callback outbox, false Actions SUCCESS for review failure) were fixed in the original 1/5 implementation and covered by tests.
+
+## Preserved safety and next step
+
+**Overall: REVISE, not PASS.** No runner, LaunchAgent or production service was started; no real source/Sandbox independent review, live Chat callback or Sandbox E2E was performed. Native Mac Merge adapter intentionally remains exit 78. P3 source branch, Issue #10 branch, public source `main` and private Control `main` are unchanged; Control workflow disabled, runners 0. Priceup and Clean Energy production infrastructure remain isolated.
+- After saving this exact immutable review checkpoint, issue one `[CODEX-RUN]` for **iteration 2/5** on the SAME review route `chat-232` and same nonprotected adapter source branch, concise delta-only allowed paths for the three blocking security findings and focused isolated negative tests. No routine validation commands in the Codex prompt. Keep Codex implementation-only; controller separately validates, commits and reviews next exact SHA. PASS when eventually attained is review-only; explicit user approval is mandatory for an exact-SHA merge.
