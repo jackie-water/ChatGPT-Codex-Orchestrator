@@ -42,6 +42,10 @@ macOS official bootstrap:
 
 The macOS entrypoint performs a read-only prerequisite and migration preflight first. It does not install services, create repositories, activate a runner, copy credentials, or change an existing runner. macOS setup remains approval-gated and uses the same CLI state/resume path.
 
+On macOS, the preflight also reports the reviewed local libproc helper capability. The helper is built only after the existing macOS setup approval and exact installation/private-instance checks. Dry-run, doctor, status, and an unapproved setup do not compile or write it. A missing Apple Command Line Tools/SDK, source-digest mismatch, unsafe private path, failed PID proof, interrupted build, or receipt/binary tamper remains `NEEDS_USER_ACTION` or `ERROR`; it never enables native identity or silently claims the legacy mode is native.
+
+The locally built helper is unsigned and is distinct from any separately gated signing, distribution, or release process. This iteration does not enable Runner, launchctl, production environment variables, target activation, or live installation. Manual receipt/lock recovery must preserve the receipt, establish that no writer remains, and use the reviewed deployment recovery procedure; an uncertain lock must not be deleted as if it belonged to another writer. The full isolated live Sandbox E2E remains separately gated.
+
 AI / structured bootstrap:
 
 `powershell -ExecutionPolicy Bypass -File .\install.ps1 -Json -Language <en|zh-CN>`

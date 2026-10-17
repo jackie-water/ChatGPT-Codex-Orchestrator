@@ -4,6 +4,7 @@ import os from "node:os";
 import crypto from "node:crypto";
 import { spawnSafeSync } from "./spawn-safe.mjs";
 import { canonicalInstallationId } from "./control-render.mjs";
+import { macosNativeHelperPreflight } from "./macos-native-helper-install.mjs";
 
 const HOME = () => process.env.HOME || os.homedir();
 const cmd = (name,args=[],options={}) => { const r=spawnSafeSync(name,args,{encoding:"utf8",...options}); return {ok:r.status===0, output:(r.stdout||r.stderr||"").trim()}; };
@@ -45,7 +46,8 @@ export function macosPrerequisites() {
   const node=cmd("node",["--version"]), git=cmd("git",["--version"]), gh=cmd("gh",["--version"]), codex=cmd("codex",["--version"]);
   const major=parseNodeMajor(node.output);
   return {node:node.ok&&major>=22,node_version:node.output,git:git.ok,gh:gh.ok,codex:codex.ok,
-    session_auth:codex.ok&&cmd("codex",["login","status"]).ok,github_auth:gh.ok&&cmd("gh",["auth","status"]).ok};
+    session_auth:codex.ok&&cmd("codex",["login","status"]).ok,github_auth:gh.ok&&cmd("gh",["auth","status"]).ok,
+    native_helper:macosNativeHelperPreflight({platform:process.platform})};
 }
 
 function redactStatus(status) {
@@ -129,11 +131,12 @@ export function migrationPreflight({state={},home=HOME(),commandRunner=cmd}={}) 
   return {status:conflicts.length?"CONFLICT":"READY",inventory,conflicts,mutations_performed:false,rollback:{available:true,automatic:false}};
 }
 
-export function renderLaunchAgent({label,runnerPath,instanceRoot,programArguments=[]}={}) {
+export function renderLaunchAgent({label,runnerPath,instanceRoot,programArguments=[],nativeHelperPath=null,nativeProcessIdentity=false}={}) {
   if(!/^com\.[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/.test(label)) throw new Error("LaunchAgent label must be reverse-DNS");
   if(!runnerPath||!instanceRoot||![runnerPath,instanceRoot].every(privatePath)) throw new Error("LaunchAgent paths must be private HOME-scoped paths");
   const xml=x=>String(x).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;").replaceAll("'","&apos;");
-  return `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict><key>Label</key><string>${xml(label)}</string><key>ProgramArguments</key><array>${[runnerPath,...programArguments].map(x=>`<string>${xml(x)}</string>`).join("")}</array><key>WorkingDirectory</key><string>${xml(instanceRoot)}</string><key>RunAtLoad</key><false/></dict></plist>`;
+  const environment = nativeHelperPath && nativeProcessIdentity ? `<key>EnvironmentVariables</key><dict><key>ORCHESTRATOR_MACOS_NATIVE_HELPER</key><string>${xml(nativeHelperPath)}</string><key>ORCHESTRATOR_MACOS_NATIVE_PROCESS_IDENTITY</key><string>1</string></dict>` : "";
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict><key>Label</key><string>${xml(label)}</string><key>ProgramArguments</key><array>${[runnerPath,...programArguments].map(x=>`<string>${xml(x)}</string>`).join("")}</array><key>WorkingDirectory</key><string>${xml(instanceRoot)}</string>${environment}<key>RunAtLoad</key><false/></dict></plist>`;
 }
 
 export function macosRuntimeAction(action,{state={},commandRunner=cmd}={}) {

@@ -49,18 +49,20 @@ The existing durable rules remain authoritative: exact start-identity equality i
 
 Receipt-lock recovery is fail-closed. Even after an observed owner PID returns `ESRCH`, standard Node filesystem APIs cannot atomically unlink only the lock entry that was observed; another writer may have replaced that pathname. The intake therefore preserves the lock and receipt and returns `RECEIPT_LOCK_RECLAIM_UNCERTAIN` with actionable recovery guidance. An operator must establish that no writer remains, preserve/inspect the receipt, and remove the lock through the deployment's reviewed recovery procedure before retrying. This path never converts ambiguity into `UNKNOWN`, dispatches a duplicate worker, or deletes a replacement lock.
 
-## Official packaging proposal (not applied)
+## Official packaging integration (coding-only; not production-ready)
 
-The official macOS installer should add a prerequisite step before enabling any native-identity opt-in:
+The official macOS flow now adds a read-only capability preflight and an approval-gated, instance-scoped prepare step before any future native-identity opt-in:
 
 1. Verify Apple CLT and the MacOSX SDK with `xcrun`; report a distinct prerequisite action if absent.
-2. Install/build the reviewed helper into the installer-owned private runtime directory with mode `0700` (or a `0700` parent and `0700` executable), never into a global PATH.
+2. Build the reviewed helper into the installer-owned private runtime directory with mode `0700` (or a `0700` parent and `0700` executable), never into a global PATH.
 3. Verify owner, regular-file status, non-writable group/other bits, and a recorded package/source digest.
 4. Run the helper against the installer process and one independently selected live PID; require full-schema success and distinct microsecond-capable identities.
 5. Persist an explicit capability result. If any check fails, keep legacy stable operation available but do not enable native identity, and surface an actionable status for the operator.
-6. Only after those checks should the official runtime opt into `ORCHESTRATOR_MACOS_NATIVE_PROCESS_IDENTITY=1`.
+6. Only after those checks may a future per-instance LaunchAgent renderer receive `ORCHESTRATOR_MACOS_NATIVE_PROCESS_IDENTITY=1` and the trusted helper path. This iteration does not write a LaunchAgent, call launchctl, enable Runner, or activate a real target.
 
-This proposal is deliberately documented rather than applied: `Install.command`, `install.sh`, CI, and `AI_INSTALL.md` were not modified in this spike. The installer must preserve the existing explicit-route-v1, `PROJECT_DISABLED`, exact-SHA review, and user-approved merge gates.
+The implementation is unsigned and is not a signing, distribution, or release mechanism. It is coding and isolated fixture testing only; it must not be described as production-ready. Interrupted receipt/lock recovery remains fail-closed: preserve and inspect the receipt, establish that no writer remains, then remove the lock only through the reviewed manual recovery procedure. The full isolated live Sandbox E2E remains separately gated.
+
+`Install.command`, `install.sh`, CI, the reviewed C source, and the parser/intake sources remain unchanged. The installer must preserve the existing explicit-route-v1, `PROJECT_DISABLED`, exact-SHA review, and user-approved merge gates.
 
 ## Remaining architecture decision
 
