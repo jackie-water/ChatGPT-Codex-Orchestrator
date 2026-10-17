@@ -82,10 +82,24 @@ export function readMacosDurableStatus({ snapshot, paths = stateFilePaths(snapsh
 }
 
 export function updateMacosDurableStatus({ receiptPath, expected = ["ACCEPTED", "RUNNING"], patch }) {
-  const current = read(privateFile(receiptPath)); if (!STATES.has(current.status) || !expected.includes(current.status)) return current;
-  const next = { ...current, ...patch, updated_at_utc: new Date().toISOString() };
-  if (!STATES.has(next.status)) fail("Invalid durable status", "UNCERTAIN_STATE");
-  replaceJson(receiptPath, next); return next;
+  const lockPath = `${receiptPath}.lock`; privateFile(lockPath, true);
+  let fd;
+  try { fd = fs.openSync(lockPath, "wx", 0o600); }
+  catch (error) { if (error.code === "EEXIST") return read(privateFile(receiptPath)); throw error; }
+  try {
+    const current = read(privateFile(receiptPath)); if (!STATES.has(current.status) || !expected.includes(current.status)) return current;
+    const rank = { ACCEPTED: 0, RUNNING: 1, SUCCEEDED: 2, FAILED: 2, UNKNOWN: 2 };
+    const next = { ...current, ...patch, updated_at_utc: new Date().toISOString() };
+    if (!STATES.has(next.status) || rank[current.status] === 2 || rank[next.status] < rank[current.status]) return current;
+    replaceJson(receiptPath, next); return next;
+  } finally { fs.closeSync(fd); fs.rmSync(lockPath, { force: true }); }
+}
+
+export function claimMacosDurableWorker({ receiptPath, key }) {
+  const claimPath = `${receiptPath.replace(/\.receipt\.json$/, "")}.worker-claim`;
+  privateFile(claimPath, true);
+  try { exclusiveJson(claimPath, { version: 1, key, pid: process.pid, claimed_at_utc: new Date().toISOString() }); return true; }
+  catch (error) { if (error.code === "EEXIST") return false; throw error; }
 }
 
 export function submitMacosDurableIntent({ event, controlRoot, controlRepository, trustedGithubUsername, timeoutMs = 300000, workerPath = WORKER, spawnWorker = nativeSpawn }) {
@@ -117,9 +131,12 @@ export function submitMacosDurableIntent({ event, controlRoot, controlRepository
   try {
     child = spawnWorker(process.execPath, [workerPath, "--intent-path", paths.intentPath], { detached: true, stdio: "ignore", shell: false, windowsHide: true });
     if (!child || !Number.isInteger(child.pid) || child.pid <= 0) fail("Worker spawn was not accepted", "SPAWN_FAILED");
+    let settled = false;
+    const uncertain = error => { if (settled) return; settled = true; try { updateMacosDurableStatus({ receiptPath: paths.receiptPath, expected: ["ACCEPTED", "RUNNING"], patch: { status: "UNKNOWN", failure_code: error?.code === "ENOENT" ? "DISPATCH_UNAVAILABLE" : "DISPATCH_SPAWN_FAILED" } }); } catch {} };
+    child.once?.("error", uncertain); child.once?.("close", () => { settled = true; });
     child.unref?.();
   } catch (e) {
-    updateMacosDurableStatus({ receiptPath: paths.receiptPath, patch: { status: "FAILED", failure_code: "SPAWN_FAILED" } });
+    updateMacosDurableStatus({ receiptPath: paths.receiptPath, patch: { status: "UNKNOWN", failure_code: "SPAWN_FAILED" } });
     throw Object.assign(new Error("Durable worker spawn failed"), { code: "SPAWN_FAILED", cause: e });
   }
   return { status: "ACCEPTED", task_id: paths.key, receipt_path: paths.receiptPath, pid: child.pid };
@@ -128,4 +145,4 @@ export function submitMacosDurableIntent({ event, controlRoot, controlRepository
 export const redactLog = value => String(value || "").slice(0, MAX_LOG)
   .replace(/\b(?:github_pat_|gh[opusr]_)[A-Za-z0-9_]+/gi, "[REDACTED]")
   .replace(/((?:authorization\s*:\s*)?(?:bearer|token)\s+)[A-Za-z0-9._~+/=-]+/gi, "$1[REDACTED]")
-  .replace(/((?:api[_-]?key|secret|token)\s*[:=]\s*)[A-Za-z0-9._~+/=-]{12,}/gi, "$1[REDACTED]");
+  .replace(/((?:api[_-]?key|secret|token|password|prompt)\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\r\n,}\]]+?)(?=(?:\s+(?:api[_-]?key|secret|token|password|prompt)\s*[:=])|[,}\]]|$)/gi, "$1[REDACTED]");

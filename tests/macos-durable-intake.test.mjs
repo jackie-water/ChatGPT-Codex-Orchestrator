@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { submitMacosDurableIntent, durablePaths, readMacosDurableStatus } from "../src/lib/macos-durable-intake.mjs";
+import { submitMacosDurableIntent, durablePaths, readMacosDurableStatus, claimMacosDurableWorker, updateMacosDurableStatus, redactLog } from "../src/lib/macos-durable-intake.mjs";
 
 const write = (file, value, mode = 0o600) => { fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 }); fs.writeFileSync(file, JSON.stringify(value, null, 2) + "\n", { mode }); };
 function fixture() {
@@ -44,13 +44,52 @@ test("partial, unknown, conflicting and symlinked durable state fail closed", ()
   }); } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
-test("spawn failure is terminal and never claims a worker", () => {
+test("spawn failure is ambiguous and remains recoverable as UNKNOWN", () => {
   const f = fixture();
   try { withHome(f.home, () => {
     assert.throws(() => submitMacosDurableIntent({ ...f.args, event: f.event, spawnWorker: () => { throw new Error("fake spawn"); } }), /spawn/i);
     const dir = path.join(f.home, ".chatgpt-codex-orchestrator", "instances", "durable-test", "macos-durable-intake");
     const receipt = fs.readdirSync(dir).find(name => name.endsWith(".receipt.json"));
-    assert.equal(JSON.parse(fs.readFileSync(path.join(dir, receipt))).status, "FAILED");
+    assert.equal(JSON.parse(fs.readFileSync(path.join(dir, receipt))).status, "UNKNOWN");
+  }); } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("worker claim and receipt transitions are exclusive and monotonic", () => {
+  const f = fixture();
+  try { withHome(f.home, () => {
+    const first = submitMacosDurableIntent({ ...f.args, event: f.event, spawnWorker: fakeSpawn([]) });
+    assert.equal(claimMacosDurableWorker({ receiptPath: first.receipt_path, key: first.task_id }), true);
+    assert.equal(claimMacosDurableWorker({ receiptPath: first.receipt_path, key: first.task_id }), false);
+    updateMacosDurableStatus({ receiptPath: first.receipt_path, patch: { status: "SUCCEEDED" } });
+    const unchanged = updateMacosDurableStatus({ receiptPath: first.receipt_path, patch: { status: "UNKNOWN" } });
+    assert.equal(unchanged.status, "SUCCEEDED");
+  }); } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("spawn error after return is settled UNKNOWN and secrets/prompts are redacted", () => {
+  const f = fixture();
+  try { withHome(f.home, () => {
+    const listeners = {};
+    const child = { pid: 4243, once(name, fn) { listeners[name] = fn; }, unref() {} };
+    const first = submitMacosDurableIntent({ ...f.args, event: f.event, spawnWorker: () => child });
+    listeners.error({ code: "ENOENT" });
+    assert.equal(JSON.parse(fs.readFileSync(first.receipt_path, "utf8")).status, "UNKNOWN");
+    assert.match(redactLog("token=abcdefghijklmnop prompt=do-not-store"), /token=\[REDACTED\].*prompt=\[REDACTED\]/);
+    assert.equal(redactLog('password="secret phrase" api-key=abcdefghijklmnop secret: second-secret'), 'password=[REDACTED] api-key=[REDACTED] secret: [REDACTED]');
+    void first;
+  }); } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("preserves an exact multi-user authorization array", () => {
+  const f = fixture();
+  try { withHome(f.home, () => {
+    const first = submitMacosDurableIntent({ ...f.args, trustedGithubUsername: ["trusted", "reviewer"], event: f.event, spawnWorker: fakeSpawn([]) });
+    const intent = JSON.parse(fs.readFileSync(first.receipt_path.replace(".receipt.json", ".intent.json"), "utf8"));
+    assert.deepEqual(intent.trusted_github_username, ["trusted", "reviewer"]);
+    const worker = fs.readFileSync(new URL("../runtime/scripts/macos-durable-worker.mjs", import.meta.url), "utf8");
+    const dispatch = fs.readFileSync(new URL("../runtime/scripts/macos-dispatch.mjs", import.meta.url), "utf8");
+    assert.match(worker, /JSON\.stringify\(intent\.trusted_github_username\)/);
+    assert.match(dispatch, /Trusted usernames must be a unique validated array/);
   }); } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
