@@ -4,6 +4,7 @@ import crypto from "node:crypto";
 import { spawn as nativeSpawn, execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { planMacosCodexRun, getValidatedMacosCodexPlan } from "./macos-codex-run-contract.mjs";
+import { macosNativeProcessIdentityEnabled, nativeProcessStartIdentity } from "./macos-native-process-identity.mjs";
 
 const MAX_LOG = 32768;
 const MAX_TIMEOUT = 30 * 60 * 1000;
@@ -55,6 +56,7 @@ function replaceJson(file, value) {
 }
 function processStartIdentity(pid) {
   if (process.platform === "darwin") {
+    if (macosNativeProcessIdentityEnabled()) return nativeProcessStartIdentity(pid);
     try {
       const value = execFileSync("ps", ["-p", String(pid), "-o", "lstart="], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
       return value || null;
