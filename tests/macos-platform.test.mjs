@@ -87,3 +87,17 @@ test("runtime install rejects forged or wrong-instance native capability before 
     }
   } finally { if(previousHome===undefined) delete process.env.HOME; else process.env.HOME=previousHome; }
 });
+
+test("runtime start verifies the same helper and persisted plist before bootstrap",()=>{
+  const home=fs.mkdtempSync(path.join(os.tmpdir(),"orch-macos-start-")); const previousHome=process.env.HOME; process.env.HOME=home;
+  const instance=path.join(home,"instance"), runner=path.join(instance,"runner"), helper=path.join(instance,"runtime","native","macos","process-identity"), plistDir=path.join(home,"Library","LaunchAgents"), plist=path.join(plistDir,"com.chatgpt.codex.runner.plist");
+  fs.mkdirSync(path.dirname(helper),{recursive:true,mode:0o700}); fs.mkdirSync(plistDir,{recursive:true,mode:0o700}); fs.mkdirSync(instance,{recursive:true,mode:0o700}); fs.writeFileSync(runner,"runner\n",{mode:0o700}); fs.writeFileSync(helper,"helper\n",{mode:0o700});
+  const state={sandbox_only:true,target_environment_ready:false,instance_id:"instance-1",installation_id:"install-1",runner_owner:"install-1",runner_label:"runner-1",launch_agent_label:"com.chatgpt.codex.runner",runner_path:runner,instance_root:instance,macos_setup_approved:true,macos_action_approval:"start"};
+  const capability={status:"PASS",installation_id:"install-1",instance_path:instance,helper_path:helper,receipt_path:path.join(instance,"macos-native-helper-capability.json")}; let launches=[];
+  const commandRunner=(command,args)=>{ launches.push(args); return command==="launchctl"&&args[0]==="list"?{ok:true,output:""}:{ok:false,output:"unexpected"}; };
+  try {
+    fs.writeFileSync(plist,`<string>${helper}</string><key>ORCHESTRATOR_MACOS_NATIVE_HELPER</key><key>ORCHESTRATOR_MACOS_NATIVE_PROCESS_IDENTITY</key>`,{mode:0o600});
+    const blocked=macosRuntimeAction("start",{state,home,platform:"darwin",commandRunner,capabilityVerifier:()=>({...capability, status:"ERROR",error_id:"tampered"})}); assert.equal(blocked.status,"ERROR"); assert.equal(launches.some(args=>args[0]==="bootstrap"),false);
+    launches=[]; fs.writeFileSync(plist,"<string>/foreign/helper</string>",{mode:0o600}); const mismatch=macosRuntimeAction("start",{state,home,platform:"darwin",commandRunner,capabilityVerifier:()=>capability}); assert.equal(mismatch.status,"ERROR"); assert.equal(mismatch.error_id,"MACOS-PLIST-NATIVE-PATH-MISMATCH"); assert.equal(launches.some(args=>args[0]==="bootstrap"),false);
+  } finally { if(previousHome===undefined) delete process.env.HOME; else process.env.HOME=previousHome; }
+});

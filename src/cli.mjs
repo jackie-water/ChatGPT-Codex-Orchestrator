@@ -294,9 +294,9 @@ function runSetup() {
     let nativePrepared;
     try { nativePrepared=prepareMacosNativeHelper({state,home:os.homedir(),approved:true}); }
     catch(error) {
-      return emit({status:"ERROR",error_id:"MACOS-NATIVE-PREPARE-IO",recoverable:true,preferred_language:lang,message:"macOS native helper preparation failed closed; existing installer state and disabled gates were preserved.",details:"Native helper filesystem/build/proof operation failed.",mutations_performed:false},1);
+      return emit({status:"ERROR",error_id:"MACOS-NATIVE-PREPARE-IO",recoverable:true,preferred_language:lang,message:"macOS native helper preparation failed closed; pending evidence was preserved and the target remains disabled.",details:String(error.message||error),recovery_status:"MANUAL_RECOVERY_REQUIRED",partial_mutation:true,mutations_performed:"UNKNOWN"},1);
     }
-    if(nativePrepared.status!=="PASS") return emit({status:nativePrepared.status==="NEEDS_USER_ACTION"?"NEEDS_USER_ACTION":"ERROR",error_id:nativePrepared.error_id||"MACOS-NATIVE-PREPARE",recoverable:nativePrepared.status!=="ERROR",preferred_language:lang,message:"macOS native helper capability is unavailable; no native identity was enabled and the target remains disabled.",details:nativePrepared.details||nativePrepared.reason||null,capability:nativePrepared,mutations_performed:nativePrepared.mutations_performed===true},1);
+    if(nativePrepared.status!=="PASS") return emit({status:nativePrepared.status==="NEEDS_USER_ACTION"?"NEEDS_USER_ACTION":"ERROR",error_id:nativePrepared.error_id||"MACOS-NATIVE-PREPARE",recoverable:nativePrepared.status!=="ERROR",preferred_language:lang,message:"macOS native helper capability is unavailable; no native identity was enabled and the target remains disabled.",details:nativePrepared.details||nativePrepared.reason||null,capability:nativePrepared,mutations_performed:nativePrepared.mutations_performed??"UNKNOWN"},1);
     state.macos_native_installation_id=state.installation_id;
     state.instance_root=nativePrepared.instance_path;
     state.macos_native_capability={status:"VERIFIED",instance_path:nativePrepared.instance_path,helper_path:nativePrepared.helper_path,receipt_path:nativePrepared.receipt_path,source_review_commit:nativePrepared.source_review_commit,source_sha256:nativePrepared.source_sha256,binary_sha256:nativePrepared.binary_sha256};

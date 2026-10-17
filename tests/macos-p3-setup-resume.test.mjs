@@ -36,6 +36,26 @@ test("Darwin resume does not treat sandbox_verified alone as evidence",()=>{
   assert.match(mac,/action_id:"sandbox_verification"/);
 });
 
+test("Darwin native preparation errors report partial or unknown mutation state",()=>{
+  assert.match(mac,/recovery_status:"MANUAL_RECOVERY_REQUIRED"/);
+  assert.match(mac,/partial_mutation:true/);
+  assert.match(mac,/mutations_performed:nativePrepared\.mutations_performed\?\?"UNKNOWN"/);
+});
+
+const diagnosticText=value=>String(value??"")
+  .replace(/https?:\/\/[^\s"'`<>]+/gi,"[redacted-url]")
+  .replace(/\b(?:bearer|token|secret|password|credential|authorization|cookie)\b\s*[:=]\s*[^\s,;}]+/gi,"[redacted-credential]")
+  .slice(0,200);
+const resumeActionId=(result,label)=>{
+  let parsed={};
+  try { parsed=JSON.parse(result.stdout||"{}"); } catch {}
+  if(parsed.action_id!=="sandbox_verification"){
+    const details=typeof parsed.details==="string"?diagnosticText(parsed.details):
+      parsed.details&&typeof parsed.details==="object"?diagnosticText(JSON.stringify(Object.keys(parsed.details).filter(key=>!/(token|secret|password|credential|authorization|cookie|url|path)/i.test(key)).slice(0,12))):"";
+    assert.fail(`${label} unexpected action_id: ${JSON.stringify({exit_code:result.status,status:parsed.status,error_id:parsed.error_id,action_id:parsed.action_id,details,stderr:diagnosticText(result.stderr)})}`);
+  }
+};
+
 test("Darwin resume uses isolated child-process evidence and remains idempotent",{skip:process.platform!=="darwin"},()=>{
   const root=fs.mkdtempSync(path.join(os.tmpdir(),"codex-macos-p3-") );
   const home=path.join(root,"home"), bin=path.join(root,"bin"), stateDir=path.join(root,"state");
@@ -46,7 +66,20 @@ test("Darwin resume uses isolated child-process evidence and remains idempotent"
   writeBin("gh",'case "${1-}" in --version) echo gh-version;; auth) [ "${2-}" = status ];; api) [ "${2-}" = user ] && [ "${3-}" = --jq ] && [ "${4-}" = .login ] && echo owner;; issue) case "${2-}" in list) echo "[]";; create) echo "https://github.com/owner/control/issues/247";; esac;; *) exit 0;; esac');
   writeBin("codex",'case "${1-}" in --version) echo codex-version;; login) [ "${2-}" = status ];; *) exit 0;; esac');
   const sdk=path.join(root,"sdk"); fs.mkdirSync(path.join(sdk,"usr","include","sys"),{recursive:true,mode:0o700}); fs.writeFileSync(path.join(sdk,"usr","include","libproc.h"),"fixture\n",{mode:0o600}); fs.writeFileSync(path.join(sdk,"usr","include","sys","proc_info.h"),"fixture\n",{mode:0o600});
-  writeBin("xcrun",'if [ "${1-}" = "--find" ]; then echo /usr/bin/clang; elif [ "${3-}" = "--show-sdk-path" ]; then echo '+JSON.stringify(sdk)+'; else out=""; for arg in "$@"; do if [ "$arg" = "-o" ]; then shift; out="${1-}"; break; fi; shift; done; cat > "$out" <<\'EOF\'\n#!/bin/sh\nprintf \'{"status":"OK","pid":%s,"start_sec":1,"start_usec":2}\\n\' "$1"\nEOF\nchmod 700 "$out"; fi');
+  const reviewedSource=path.resolve("runtime/native/macos/process_identity.c");
+  const compiledHelper=path.join(root,"trusted-process-identity");
+  const prerequisiteFailure=(message,details="")=>assert.fail(`Darwin test prerequisite failure: ${message}${details?` (${diagnosticText(details)})`:""}`);
+  if(!fs.existsSync("/usr/bin/xcrun")) prerequisiteFailure("Apple /usr/bin/xcrun is unavailable; install the Xcode Command Line Tools");
+  const toolchain=(args)=>spawnSync("/usr/bin/xcrun",args,{cwd:"/",env:{PATH:"/usr/bin:/bin:/usr/sbin:/sbin",LC_ALL:"C"},shell:false,timeout:5000,maxBuffer:8192,encoding:"utf8",stdio:["ignore","pipe","pipe"]});
+  const clang=toolchain(["--find","clang"]); if(clang.error||clang.status!==0) prerequisiteFailure("Apple clang is unavailable; install the Xcode Command Line Tools",clang.stderr||clang.error?.message);
+  const realSdk=toolchain(["--sdk","macosx","--show-sdk-path"]); const realSdkPath=String(realSdk.stdout||"").trim();
+  if(realSdk.error||realSdk.status!==0||!realSdkPath) prerequisiteFailure("macOS SDK is unavailable through /usr/bin/xcrun",realSdk.stderr||realSdk.error?.message);
+  const requiredHeaders=["usr/include/libproc.h","usr/include/sys/proc_info.h"];
+  if(requiredHeaders.some(header=>{try{return !fs.statSync(path.join(realSdkPath,header)).isFile();}catch{return true;}})) prerequisiteFailure("macOS SDK libproc headers are unavailable; install the Xcode Command Line Tools");
+  const built=spawnSync("/usr/bin/xcrun",["--sdk","macosx","clang","-std=c11","-Wall","-Wextra","-Werror","-isysroot",realSdkPath,reviewedSource,"-o",compiledHelper],{cwd:root,env:{PATH:"/usr/bin:/bin:/usr/sbin:/sbin",LC_ALL:"C"},shell:false,timeout:5000,maxBuffer:8192,encoding:"utf8",stdio:["ignore","pipe","pipe"]});
+  if(built.error||built.status!==0||!fs.existsSync(compiledHelper)) prerequisiteFailure("reviewed native helper compilation failed",built.stderr||built.error?.message);
+  fs.chmodSync(compiledHelper,0o700);
+  writeBin("xcrun",'if [ "${1-}" = "--find" ]; then echo /usr/bin/clang; elif [ "${3-}" = "--show-sdk-path" ]; then echo '+JSON.stringify(sdk)+'; else out=""; prev=""; for arg in "$@"; do if [ "$prev" = "-o" ]; then out="$arg"; break; fi; prev="$arg"; done; [ -n "$out" ]; cp '+JSON.stringify(compiledHelper)+' "$out"; chmod 700 "$out"; fi');
   writeBin("launchctl",'case "${1-}" in list) exit 0;; *) exit 1;; esac');
   writeBin("git","case \"${1-}\" in --version) echo git-version;; fetch) exit 0;; rev-parse) case \"$*\" in *origin/test/install-smoke-fixture2*) exit 1;; *) exit 0;; esac;; show) if grep -qx complete "+JSON.stringify(mode)+"; then echo ready-evidence >> "+JSON.stringify(audit)+"; echo 'export const status = \"ready\";'; else echo 'export const status = \"not-ready\";'; fi;; *) exit 0;; esac");
   const installation="fixture-22A1", short="fixture2", sandboxProject="sandbox-"+short, chat="https://chatgpt.com/c/chat-232";
@@ -58,10 +91,10 @@ test("Darwin resume uses isolated child-process evidence and remains idempotent"
   const save=state=>fs.writeFileSync(stateFile,JSON.stringify(state));
   const read=()=>JSON.parse(fs.readFileSync(stateFile,"utf8"));
   try {
-    save(base); let result=run(), state=read(); assert.equal(JSON.parse(result.stdout).action_id,"sandbox_verification"); assert.equal(state.target_environment_ready,false); assert.equal(state.sandbox_smoke_started,true); assert.equal(state.sandbox_smoke_issue,"https://github.com/owner/control/issues/247");
-    save({...state,sandbox_verified:true}); result=run(); state=read(); assert.equal(JSON.parse(result.stdout).action_id,"sandbox_verification"); assert.equal(state.target_environment_ready,false);
-    fs.writeFileSync(mode,"complete\n"); save({...base,sandbox_verified:false,sandbox_smoke_started:true,sandbox_smoke_issue:"https://github.com/owner/control/issues/247"}); result=run(); state=read(); assert.equal(JSON.parse(result.stdout).action_id,"sandbox_verification"); assert.equal(state.macos_native_setup,"SANDBOX_READY"); assert.equal(state.target_environment_ready,false);
-    const waitingAt=state.last_error?.at; result=run(); state=read(); assert.equal(JSON.parse(result.stdout).action_id,"sandbox_verification"); assert.equal(state.macos_native_setup,"SANDBOX_READY"); assert.equal(state.last_error?.at,waitingAt); assert.equal(state.target_environment_ready,false);
+    save(base); let result=run(), state=read(); resumeActionId(result,"first resume"); assert.equal(state.target_environment_ready,false); assert.equal(state.sandbox_smoke_started,true); assert.equal(state.sandbox_smoke_issue,"https://github.com/owner/control/issues/247");
+    save({...state,sandbox_verified:true}); result=run(); state=read(); resumeActionId(result,"sandbox-verified resume"); assert.equal(state.target_environment_ready,false);
+    fs.writeFileSync(mode,"complete\n"); save({...base,sandbox_verified:false,sandbox_smoke_started:true,sandbox_smoke_issue:"https://github.com/owner/control/issues/247"}); result=run(); state=read(); resumeActionId(result,"completion resume"); assert.equal(state.macos_native_setup,"SANDBOX_READY"); assert.equal(state.target_environment_ready,false);
+    const waitingAt=state.last_error?.at; result=run(); state=read(); resumeActionId(result,"idempotent resume"); assert.equal(state.macos_native_setup,"SANDBOX_READY"); assert.equal(state.last_error?.at,waitingAt); assert.equal(state.target_environment_ready,false);
     const log=fs.readFileSync(audit,"utf8"); const commands=log.split(/\r?\n/).filter(Boolean); assert.ok(log.includes("git show origin/main:src/status.mjs")); assert.ok(log.includes("ready-evidence")); assert.equal(commands.filter(line=>/(?:^|\/)gh(?:\s|$).*\bissue\s+create\b/.test(line)).length,1); assert.equal(commands.some(line=>/(?:^|\/)git\s+(?:commit|push)(?:\s|$)/.test(line)),false); assert.equal(commands.some(line=>/(?:^|\/)launchctl(?:\s|$).*(?:\bbootstrap\b|\bbootout\b)/.test(line)),false); assert.equal(commands.some(line=>/(?:^|\/)powershell(?:\.exe)?(?:\s|$)/i.test(line)),false);
   } finally { fs.rmSync(root,{recursive:true,force:true}); }
 });

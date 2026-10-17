@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { macosNativeHelperPreflight, prepareMacosNativeHelper, verifyMacosNativeCapability, REVIEWED_SOURCE_PATH, REVIEWED_SOURCE_SHA256 } from "../src/lib/macos-native-helper-install.mjs";
+import { macosNativeHelperPreflight, prepareMacosNativeHelper, verifyMacosNativeCapability, macosNativeHelperPaths, REVIEWED_SOURCE_PATH, REVIEWED_SOURCE_SHA256 } from "../src/lib/macos-native-helper-install.mjs";
 
 function toolchain(home) {
   const sdk = path.join(home, "sdk");
@@ -78,4 +78,17 @@ test("unauthorized prepare and non-Darwin paths never mutate", () => {
   const result = prepareMacosNativeHelper({ state: { installation_id: "fixture", macos_setup_approved: false }, home, platform: "darwin" });
   assert.equal(result.status, "NEEDS_USER_ACTION"); assert.equal(result.mutations_performed, false); assert.deepEqual(fs.readdirSync(home), before);
   assert.equal(macosNativeHelperPreflight({ platform: "linux", home }).status, "UNSUPPORTED");
+});
+
+test("helper-only resume requires the exact journal and returns the canonical receipt path", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "orch-native-recovery-")); const sdk = toolchain(home); const calls = [];
+  const commandRunner = (command, args) => { calls.push(args); if (args[0] === "--find") return { ok: true, stdout: "/usr/bin/clang" }; if (args[2] === "--show-sdk-path") return { ok: true, stdout: `${sdk}\n` }; fs.writeFileSync(args[args.indexOf("-o") + 1], "isolated-helper\n", { mode: 0o700 }); return { ok: true, stdout: "" }; };
+  const identityReader = pid => ({ status: "OK", pid, identity: `1:${pid}`, start_sec: 1, start_usec: pid });
+  const state = { installation_id: "recovery-1", macos_setup_approved: true, parent_pid: 123 }; const first = prepareMacosNativeHelper({ state, home, platform: "darwin", commandRunner, identityReader }); const paths = macosNativeHelperPaths({ home, installationId: state.installation_id });
+  assert.equal(first.status, "PASS"); fs.unlinkSync(paths.receiptPath); const journal = JSON.parse(fs.readFileSync(paths.journalPath, "utf8")); journal.phase = "HELPER_PUBLISHED"; fs.writeFileSync(paths.journalPath, JSON.stringify(journal), { mode: 0o600 });
+  const resumed = prepareMacosNativeHelper({ state, home, platform: "darwin", commandRunner: () => { throw new Error("resume rebuilt unexpectedly"); }, identityReader });
+  assert.equal(resumed.status, "PASS"); assert.equal(resumed.receipt_path, paths.receiptPath); assert.equal(resumed.helper_path, paths.helperPath); assert.equal(resumed.binary_sha256, first.binary_sha256); assert.equal(calls.filter(args => args.includes("-o")).length, 1);
+  fs.unlinkSync(paths.receiptPath); journal.installation_id = "foreign"; fs.writeFileSync(paths.journalPath, JSON.stringify(journal), { mode: 0o600 });
+  const foreign = prepareMacosNativeHelper({ state, home, platform: "darwin", commandRunner: () => { throw new Error("foreign artifact rebuilt unexpectedly"); }, identityReader });
+  assert.equal(foreign.status, "ERROR"); assert.equal(foreign.recovery_status, "MANUAL_RECOVERY_REQUIRED"); assert.equal(fs.existsSync(paths.helperPath), true);
 });

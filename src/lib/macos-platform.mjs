@@ -159,6 +159,16 @@ export function macosRuntimeAction(action,{state={},commandRunner=cmd,home=HOME(
   if(active&&(action==="install"||action==="repair")) return {status:"ERROR",error_id:"MACOS-RUNNER-ACTIVE",mutations_performed:false,action,launchctl_state:"loaded",preflight};
   if(readonly) return {status:preflight.status!=="READY"&&!active?"NEEDS_USER_ACTION":"PASS",mutations_performed:false,launchctl_checked:listed.ok,launchctl_state:active?"loaded":(preflight.status!=="READY"?"unknown":"not-loaded"),plist_exists:fs.existsSync(plist),preflight};
   if(state.macos_setup_approved!==true || state.macos_action_approval!==action) return {status:"NEEDS_USER_ACTION",error_id:"MACOS-ACTION-APPROVAL",mutations_performed:false,action:"Approve this exact macOS action: "+action};
+  if(action==="start") {
+    let capability;
+    try { capability=capabilityVerifier({state,home,platform,parentPid:state.parent_pid}); }
+    catch(error) { return {status:"ERROR",error_id:"MACOS-NATIVE-CAPABILITY-VERIFY",mutations_performed:false,action,details:String(error.message||error)}; }
+    const expectedInstance=state.instance_root;
+    const validCapability=capability?.status==="PASS" && capability.installation_id===state.installation_id && capability.instance_path===expectedInstance && capability.helper_path===path.join(expectedInstance,"runtime","native","macos","process-identity") && capability.receipt_path===path.join(expectedInstance,"macos-native-helper-capability.json");
+    if(!validCapability) return {status:"ERROR",error_id:capability?.error_id||"MACOS-NATIVE-CAPABILITY-INVALID",mutations_performed:false,action,capability:{status:capability?.status||"ERROR",error_id:capability?.error_id||"MACOS-NATIVE-CAPABILITY-INVALID"}};
+    try { safeLaunchAgentPath(plist); const plistText=fs.readFileSync(plist,"utf8"); if(!plistText.includes(`<string>${capability.helper_path}</string>`) || !plistText.includes("ORCHESTRATOR_MACOS_NATIVE_HELPER") || !plistText.includes("ORCHESTRATOR_MACOS_NATIVE_PROCESS_IDENTITY")) return {status:"ERROR",error_id:"MACOS-PLIST-NATIVE-PATH-MISMATCH",mutations_performed:false,action,details:"Persisted LaunchAgent native helper path is not bound to this installation."}; }
+    catch(error) { return {status:"ERROR",error_id:"MACOS-PLIST-UNSAFE",mutations_performed:false,action,details:String(error.message||error)}; }
+  }
   if(action==="install"||action==="repair") {
     let capability;
     try { capability=capabilityVerifier({state,home,platform}); }
