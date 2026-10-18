@@ -1,0 +1,10 @@
+# Control #315 — macOS native Code Review adapter Phase A, iteration 1/5 — FAILED wrapper
+
+- Project: `orchestrator-dev`, exact originating route: **`chat-303`**.
+- Repository: `jackie-water/ChatGPT-Codex-Orchestrator`; nonprotected branch `feat/macos-post-sandbox-native-20261018`.
+- **Exact source commit**: `0977d3100dd98a9e446e88576d8bfbc5568ada30`; cumulative source base `282f88b3aceac7460d8d91cd1161486267a760e7`.
+- Implementation execution: isolated Mac Codex CLI issue #315, `EXECUTED_UNVALIDATED` with exit 0, no Codex commit. Executor log SHA256 `5971c37d3502ef61d8bca0a637e04a67d854dfff2b2daf0a93dc483bbe1d1c68`. Permanent local receipt `short-turn-evidence/issue-315-macos-post-sandbox-review-adapter-codex-v1/terminal.json`.
+- Changed allowed surfaces: `runtime/scripts/macos-code-review.mjs`, `src/lib/macos-code-review-runtime.mjs`, `tests/macos-code-review-runtime.test.mjs`, `src/lib/control-runtime-bundle.mjs`, `tests/control-runtime-bundle.test.mjs`, `templates/control-repo/orchestrator.macos.yml.template`. Native reviewer predecessor #265 `b28898d608d400a643e738f3b2144b284ba639eb` studied and adapted, not cherry-picked wholesale.
+- Independent wrapper `short-turn-evidence/issue-315-macos-post-sandbox-review-adapter-wrapper-v1/terminal.json`, SHA256 `62c63ca0f5a77f3aa4a016270baabdc613d0de79330656168d95f04514761a93`, **FAIL**: focused default 35/35 PASS, serial 35/35 PASS; full default **415 total/398 PASS/7 FAIL/10 SKIP**, full serial same. Seven deterministic `ENOENT` in runtime refresh fixtures: `tests/control-runtime-refresh.test.mjs` omitted the newly bundled `src/lib/macos-code-review-runtime.mjs` from its fake source nativeModules list. No assertion of successful full validation.
+- Resolution: one concise delta-only `[CODEX-RUN]` #316 REVISE 2/5 against this exact reviewed SHA; allowed surface only `tests/control-runtime-refresh.test.mjs`. No duplicate Codex #315, no unsupported runner, no merge, no deployment.
+- This record is immutable implementation+wrapper evidence only; not a PASS or merge authorization.
