@@ -51,6 +51,64 @@ test("malicious PID text cannot alter argv and runner is shell-free with bounded
   assert.equal(parseMacosNativeProcessIdentity(record(42, 9, 8), 42).status, "OK");
 });
 
+test("native observation uses one bounded privileged invocation and preserves strict identity parsing", () => {
+  const invocations = [];
+  const observed = readMacosNativeProcessIdentity(42, {
+    platform: "darwin",
+    helperPath: "/bin/sh",
+    spawnSync: (file, argv, options) => {
+      invocations.push({ file, argv, options });
+      return { status: 0, signal: null, stdout: record(42, 1792231843, 243316) };
+    }
+  });
+  assert.equal(observed.status, "OK");
+  assert.equal(observed.identity, "1792231843:243316");
+  assert.equal(invocations.length, 1);
+  assert.equal(invocations[0].file, "/bin/sh");
+  assert.deepEqual(invocations[0].argv, ["42"]);
+  assert.deepEqual(invocations[0].options, {
+    cwd: "/",
+    env: { PATH: "/usr/bin:/bin", LC_ALL: "C" },
+    shell: false,
+    timeout: 500,
+    maxBuffer: 4096,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+});
+
+test("native timeout and signal outcomes fail closed without retry or identity claim", () => {
+  for (const child of [
+    { error: { code: "ETIMEDOUT" }, status: null, signal: null, stdout: "" },
+    { status: null, signal: "SIGTERM", stdout: "" }
+  ]) {
+    let calls = 0;
+    const observed = readMacosNativeProcessIdentity(42, {
+      platform: "darwin",
+      helperPath: "/bin/sh",
+      spawnSync: () => { calls += 1; return child; }
+    });
+    assert.equal(observed.status, "RUNNER_TIMEOUT");
+    assert.equal(calls, 1);
+    assert.throws(
+      () => nativeProcessStartIdentity(42, { platform: "darwin", helperPath: "/bin/sh", spawnSync: () => child }),
+      error => error.code === "NATIVE_PROCESS_IDENTITY_RUNNER_TIMEOUT"
+    );
+  }
+});
+
+test("unexpected native execution errors and malformed output remain fail-closed", () => {
+  assert.equal(readMacosNativeProcessIdentity(42, {
+    platform: "darwin", helperPath: "/bin/sh", spawnSync: () => { throw Object.assign(new Error("I/O failure"), { code: "EIO" }); }
+  }).status, "RUNNER_ERROR");
+  assert.equal(readMacosNativeProcessIdentity(42, {
+    platform: "darwin", helperPath: "/bin/sh", spawnSync: () => ({ status: 70, signal: null, stdout: JSON.stringify({ status: "UNEXPECTED_ERROR", pid: 42, errno: 5 }) + "\n" })
+  }).status, "UNEXPECTED_ERROR");
+  assert.equal(readMacosNativeProcessIdentity(42, {
+    platform: "darwin", helperPath: "/private/tmp/no-such-process-identity-helper", spawnSync: () => { throw new Error("must not run"); }
+  }).status, "HELPER_UNAVAILABLE");
+});
+
 test("trusted helper accepts normalized absolute paths while checking lexical ancestors", () => {
   const observed = readMacosNativeProcessIdentity(42, {
     platform: "darwin", helperPath: "/bin/../bin/sh",

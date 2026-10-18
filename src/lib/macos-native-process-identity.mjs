@@ -4,7 +4,7 @@ import { spawnSync as nativeSpawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const MAX_OUTPUT = 4096;
-const TIMEOUT_MS = 250;
+const TIMEOUT_MS = 500;
 const PID_TEXT = /^[1-9][0-9]{0,9}$/;
 const DEFAULT_HELPER = fileURLToPath(new URL("../../runtime/native/macos/process-identity", import.meta.url));
 const ERRNO = Object.freeze({ EINVAL: 22, EPERM: 1, EACCES: 13, ESRCH: 3 });
