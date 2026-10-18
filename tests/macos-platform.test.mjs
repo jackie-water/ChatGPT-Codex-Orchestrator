@@ -115,5 +115,7 @@ test("runtime start accepts the renderer's XML-escaped helper path and rejects r
     bootstraps=0;
     fs.writeFileSync(plist,`<key>ORCHESTRATOR_MACOS_NATIVE_HELPER</key><string>${helper}</string><key>ORCHESTRATOR_MACOS_NATIVE_PROCESS_IDENTITY</key><string>1</string>`,{mode:0o600});
     const rejected=macosRuntimeAction("start",{state,home,platform:"darwin",commandRunner,capabilityVerifier:()=>capability}); assert.equal(rejected.error_id,"MACOS-PLIST-NATIVE-PATH-MISMATCH"); assert.equal(bootstraps,0);
+    fs.writeFileSync(plist,`${renderLaunchAgent({label:state.launch_agent_label,runnerPath:runner,instanceRoot:instance,nativeHelperPath:helper,nativeProcessIdentity:true}).replace("</dict></plist>",`<key>ORCHESTRATOR_MACOS_NATIVE_HELPER</key><string>/foreign/helper</string></dict></plist>`)}`,{mode:0o600});
+    const duplicate=macosRuntimeAction("start",{state,home,platform:"darwin",commandRunner,capabilityVerifier:()=>capability}); assert.equal(duplicate.error_id,"MACOS-PLIST-NATIVE-PATH-MISMATCH"); assert.equal(bootstraps,0);
   } finally { if(previousHome===undefined) delete process.env.HOME; else process.env.HOME=previousHome; }
 });

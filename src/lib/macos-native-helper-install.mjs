@@ -14,6 +14,7 @@ export const HELPER_RELATIVE_PATH = path.join("runtime", "native", "macos", "pro
 export const RECEIPT_NAME = "macos-native-helper-capability.json";
 export const INSTALL_JOURNAL_NAME = "macos-native-helper-install.json";
 const INSTALL_LOCK_NAME = ".macos-native-helper-install.lock";
+const inMemoryClaims = new Map();
 const MAX_OUTPUT = 8192;
 const owner = () => typeof process.getuid === "function" ? process.getuid() : null;
 const defaultRunner = (command, args, options = {}) => { const r = realSpawnSync(command, args, { encoding: "utf8", shell: false, timeout: 5000, maxBuffer: MAX_OUTPUT, ...options }); return { status: r.status, ok: r.status === 0, stdout: r.stdout || "", stderr: r.stderr || "", error: r.error }; };
@@ -128,20 +129,48 @@ function recoveryFailure(paths, error_id, reason) { return { status: "ERROR", er
 function writerId(state) { return String(state.macos_native_writer_id || `pid:${process.pid}`); }
 function writerClaim(paths, state, fsImpl) {
   const lockPath = path.join(paths.instanceRoot, INSTALL_LOCK_NAME); const id = writerId(state);
-  const claim = { schema_version: 1, owner_id: id, pid: process.pid, installation_id: state.installation_id, instance_path: paths.instanceRoot, created_at: new Date().toISOString() };
-  try { atomicPrivateJson(lockPath, claim, fsImpl, { replace: false }); return { status: "OWNED", lockPath, owner_id: id }; }
+  const claim = { schema_version: 1, claim_id: crypto.randomUUID(), owner_id: id, pid: process.pid, installation_id: state.installation_id, instance_path: paths.instanceRoot, created_at: new Date().toISOString() };
+  try {
+    atomicPrivateJson(lockPath, claim, fsImpl, { replace: false });
+    const stat = fsImpl.lstatSync(lockPath);
+    const owned = stat.isFile() && stat.nlink === 1 && uidAllowed(stat) && exactMode(stat, 0o600);
+    if (!owned) throw new Error("new writer claim is not private");
+    const record = { ...claim, dev: stat.dev, ino: stat.ino };
+    inMemoryClaims.set(lockPath, record);
+    return { status: "OWNED", lockPath, owner_id: id, claim_id: record.claim_id, dev: stat.dev, ino: stat.ino };
+  }
   catch (error) {
     if (error?.code !== "EEXIST") return { status: "UNKNOWN", lockPath, reason: String(error.message || error) };
     try {
       const safe = safeExistingPath(lockPath, { privateFile: true, strictAncestors: true, fsImpl });
       if (!safe.ok) return { status: "UNKNOWN", lockPath, reason: safe.reason };
       const existing = JSON.parse(fsImpl.readFileSync(lockPath, "utf8"));
-      if (existing.schema_version !== 1 || existing.installation_id !== state.installation_id || existing.instance_path !== paths.instanceRoot || typeof existing.owner_id !== "string" || !Number.isSafeInteger(existing.pid) || existing.pid <= 0) return { status: "UNKNOWN", lockPath, reason: "existing writer claim is invalid or ambiguous" };
-      if (existing.owner_id === id) return { status: "OWNED", lockPath, owner_id: id, resumed: true };
+      const stat = fsImpl.lstatSync(lockPath);
+      if (existing.schema_version !== 1 || typeof existing.claim_id !== "string" || existing.installation_id !== state.installation_id || existing.instance_path !== paths.instanceRoot || typeof existing.owner_id !== "string" || !Number.isSafeInteger(existing.pid) || existing.pid <= 0 || !stat.isFile() || stat.nlink !== 1 || !uidAllowed(stat) || !exactMode(stat, 0o600)) return { status: "UNKNOWN", lockPath, reason: "existing writer claim is invalid or ambiguous" };
+      const remembered = inMemoryClaims.get(lockPath);
+      if (remembered && remembered.claim_id === existing.claim_id && remembered.pid === process.pid && existing.pid === process.pid && remembered.dev === stat.dev && remembered.ino === stat.ino) return { status: "OWNED", lockPath, owner_id: id, claim_id: existing.claim_id, dev: stat.dev, ino: stat.ino, resumed: true };
       let active = false; try { process.kill(existing.pid, 0); active = true; } catch (probe) { active = probe?.code === "EPERM"; }
       return { status: active ? "BUSY" : "UNKNOWN", lockPath, owner_id: existing.owner_id, pid: existing.pid, reason: active ? "another writer owns this installation" : "writer claim may be stale; refusing reclamation" };
     } catch (readError) { return { status: "UNKNOWN", lockPath, reason: String(readError.message || readError) }; }
   }
+}
+function releaseWriterClaim(claim, state, fsImpl) {
+  if (!claim?.lockPath || !claim.claim_id) return { ok: false, reason: "missing private claim identity" };
+  try {
+    const safe = safeExistingPath(claim.lockPath, { privateFile: true, strictAncestors: true, fsImpl });
+    if (!safe.ok) return { ok: false, reason: safe.reason };
+    const stat = fsImpl.lstatSync(claim.lockPath);
+    const existing = JSON.parse(fsImpl.readFileSync(claim.lockPath, "utf8"));
+    if (!stat.isFile() || stat.nlink !== 1 || !uidAllowed(stat) || !exactMode(stat, 0o600) || stat.dev !== claim.dev || stat.ino !== claim.ino || existing.schema_version !== 1 || existing.claim_id !== claim.claim_id || existing.pid !== process.pid || existing.installation_id !== state.installation_id || existing.instance_path !== path.dirname(claim.lockPath)) return { ok: false, reason: "writer claim identity changed or is ambiguous" };
+    fsImpl.unlinkSync(claim.lockPath);
+    inMemoryClaims.delete(claim.lockPath);
+    return { ok: true };
+  } catch (error) { return { ok: false, reason: String(error.message || error) }; }
+}
+function preJournalFailure(paths, state, claim, result, fsImpl) {
+  const released = releaseWriterClaim(claim, state, fsImpl);
+  if (!released.ok) return { ...result, recovery_status: "MANUAL_RECOVERY_REQUIRED", cleanup_status: "UNKNOWN", cleanup_reason: released.reason, mutations_performed: "UNKNOWN" };
+  return { ...result, cleanup_status: "RELEASED", mutations_performed: false };
 }
 function writerClaimFailure(paths, claim) { return { status: "ERROR", error_id: claim.status === "BUSY" ? "MACOS-NATIVE-INSTALL-BUSY" : "MACOS-NATIVE-INSTALL-OWNERSHIP-UNKNOWN", recovery_status: "MANUAL_RECOVERY_REQUIRED", action: "Retry only with the verified same writer owner, or resolve the existing writer claim manually; do not delete or replace the helper, receipt, journal, or claim.", instance_path: paths.instanceRoot, helper_path: paths.helperPath, receipt_path: paths.receiptPath, journal_path: paths.journalPath, lock_path: claim.lockPath, reason: claim.reason, mutations_performed: false }; }
 
@@ -149,6 +178,12 @@ export function prepareMacosNativeHelper({ state = {}, home = os.homedir(), sour
   if (platform !== "darwin") return { status: "UNSUPPORTED", mutations_performed: false, error_id: "MACOS-NATIVE-UNSUPPORTED" }; if (!approved) return { status: "NEEDS_USER_ACTION", mutations_performed: false, error_id: "MACOS-NATIVE-APPROVAL", action_id: "macos_setup_approval" }; const installationId = String(state.installation_id || ""); if (!installationId || state.macos_native_installation_id && state.macos_native_installation_id !== installationId) return { status: "ERROR", mutations_performed: false, error_id: "MACOS-NATIVE-INSTALLATION-MISMATCH" };
   const paths = macosNativeHelperPaths({ home, installationId });
   const hasReceipt = fsImpl.existsSync(paths.receiptPath), hasHelper = fsImpl.existsSync(paths.helperPath);
+  let preparedJournal = null;
+  if (!hasReceipt && !hasHelper && fsImpl.existsSync(paths.journalPath)) {
+    const trusted = readTrustedJournal(paths, state, fsImpl);
+    if (!trusted.ok || trusted.journal.phase !== "PREPARED") return recoveryFailure(paths, trusted.error_id || "MACOS-NATIVE-JOURNAL-MISMATCH", trusted.reason || "journal is not an exact PREPARED recovery record");
+    preparedJournal = trusted.journal;
+  }
   if (hasReceipt || hasHelper) {
     if (hasHelper && !hasReceipt) {
       const trusted = readTrustedJournal(paths, state, fsImpl);
@@ -172,7 +207,8 @@ export function prepareMacosNativeHelper({ state = {}, home = os.homedir(), sour
   let mutationStage = "none";
   try { const rootAncestors = existingPrivateAncestors(paths.instanceRoot, fsImpl); if (!rootAncestors.ok) throw new Error(`Unsafe private instance path: ${rootAncestors.reason}`); mutationStage = "directories_pending"; ensurePrivateTree(paths.instanceRoot, fsImpl); ensurePrivateTree(path.dirname(paths.helperPath), fsImpl); mutationStage = "directories"; }
   catch (error) { const message = String(error.message || error); const reason = message.includes("Unsafe private instance path:") ? message.replace(/^.*Unsafe private instance path: /, "") : "private directory filesystem operation failed"; return { status: "ERROR", error_id: "MACOS-NATIVE-INSTANCE-UNSAFE", mutations_performed: mutationStage === "none" ? false : "UNKNOWN", instance: { instance_root: paths.instanceRoot, private_root: false }, details: `Unable to prepare the private native instance directory: ${reason}` }; }
-  const claim = writerClaim(paths, state, fsImpl); if (claim.status !== "OWNED") return writerClaimFailure(paths, claim);
+  let claim = null;
+  if (preparedJournal) { claim = writerClaim(paths, state, fsImpl); if (claim.status !== "OWNED") return writerClaimFailure(paths, claim); }
   const temp = path.join(paths.instanceRoot, `.process-identity.${process.pid}.${crypto.randomUUID()}.tmp`);
   const snapshot = path.join(paths.instanceRoot, `.reviewed-source.${process.pid}.${crypto.randomUUID()}.c`);
   const source = snapshotReviewedSource(sourcePath, snapshot, fsImpl); if (source.status !== "PASS") return { ...source, mutations_performed: mutationStage !== "none" ? "UNKNOWN" : false };
@@ -184,9 +220,11 @@ export function prepareMacosNativeHelper({ state = {}, home = os.homedir(), sour
   const binary = safeExistingPath(temp, { executable: true, fsImpl }); if (!binary.ok) return { status: "ERROR", error_id: "MACOS-NATIVE-BINARY-UNSAFE", mutations_performed: true, details: binary.reason };
   const binarySha256 = sha256(temp, fsImpl); const proof = proofIdentity(temp, { platform, identityReader, parentPid: state.parent_pid ?? process.ppid });
   if (proof.status !== "PASS") return { ...proof, error_id: proof.error_id, mutations_performed: true, source_sha256: source.source_sha256, binary_sha256: binarySha256 };
-  const targetSafe = fsImpl.existsSync(paths.helperPath) ? safeExistingPath(paths.helperPath, { executable: true, fsImpl }) : { ok: true }; if (!targetSafe.ok) return { status: "ERROR", error_id: "MACOS-NATIVE-TARGET-COLLISION", mutations_performed: true, details: targetSafe.reason };
-  const journal = { schema_version: 1, phase: "PREPARED", installation_id: installationId, instance_path: paths.instanceRoot, helper_path: paths.helperPath, receipt_path: paths.receiptPath, source_review_commit: REVIEWED_SOURCE_COMMIT, source_sha256: source.source_sha256, binary_sha256: binarySha256, architecture: os.arch(), proof: proof.proof, created_at: new Date().toISOString() };
-  try { atomicPrivateJson(paths.journalPath, journal, fsImpl, { replace: false }); mutationStage = "journal"; if (!fsImpl.existsSync(paths.helperPath)) fsImpl.renameSync(temp, paths.helperPath); else return { status: "ERROR", error_id: "MACOS-NATIVE-TARGET-COLLISION", mutations_performed: true, journal_path: paths.journalPath }; fsImpl.chmodSync(paths.helperPath, 0o700); const helperDirFd = fsImpl.openSync(path.dirname(paths.helperPath), "r"); try { fsImpl.fsyncSync(helperDirFd); } finally { fsImpl.closeSync(helperDirFd); } mutationStage = "helper_published"; atomicPrivateJson(paths.journalPath, { ...journal, phase: "HELPER_PUBLISHED" }, fsImpl); const receipt = { schema_version: 1, status: "VERIFIED", installation_id: installationId, instance_path: paths.instanceRoot, helper_path: paths.helperPath, source_review_commit: REVIEWED_SOURCE_COMMIT, source_sha256: source.source_sha256, binary_sha256: binarySha256, architecture: os.arch(), proof: proof.proof, timestamp: new Date().toISOString() }; atomicReceipt(paths.receiptPath, receipt, fsImpl); atomicPrivateJson(paths.journalPath, { ...journal, phase: "COMPLETE", receipt_timestamp: receipt.timestamp }, fsImpl); return { ...receipt, status: "PASS", mutations_performed: true, receipt_path: paths.receiptPath, journal_path: paths.journalPath }; }
+  if (!claim) { claim = writerClaim(paths, state, fsImpl); if (claim.status !== "OWNED") return writerClaimFailure(paths, claim); }
+  const targetSafe = fsImpl.existsSync(paths.helperPath) ? safeExistingPath(paths.helperPath, { executable: true, fsImpl }) : { ok: true }; if (!targetSafe.ok) return preJournalFailure(paths, state, claim, { status: "ERROR", error_id: "MACOS-NATIVE-TARGET-COLLISION", mutations_performed: true, details: targetSafe.reason }, fsImpl);
+  if (preparedJournal && (preparedJournal.binary_sha256 !== binarySha256 || preparedJournal.source_sha256 !== source.source_sha256 || JSON.stringify(preparedJournal.proof) !== JSON.stringify(proof.proof))) return preJournalFailure(paths, state, claim, recoveryFailure(paths, "MACOS-NATIVE-RECOVERY-JOURNAL-MISMATCH", "fresh source, binary digest, or process proof does not match the durable PREPARED journal"), fsImpl);
+  const journal = preparedJournal || { schema_version: 1, phase: "PREPARED", installation_id: installationId, instance_path: paths.instanceRoot, helper_path: paths.helperPath, receipt_path: paths.receiptPath, source_review_commit: REVIEWED_SOURCE_COMMIT, source_sha256: source.source_sha256, binary_sha256: binarySha256, architecture: os.arch(), proof: proof.proof, created_at: new Date().toISOString() };
+  try { if (!preparedJournal) { atomicPrivateJson(paths.journalPath, journal, fsImpl, { replace: false }); mutationStage = "journal"; } if (!fsImpl.existsSync(paths.helperPath)) fsImpl.renameSync(temp, paths.helperPath); else return preJournalFailure(paths, state, claim, { status: "ERROR", error_id: "MACOS-NATIVE-TARGET-COLLISION", mutations_performed: true, journal_path: paths.journalPath }, fsImpl); fsImpl.chmodSync(paths.helperPath, 0o700); const helperDirFd = fsImpl.openSync(path.dirname(paths.helperPath), "r"); try { fsImpl.fsyncSync(helperDirFd); } finally { fsImpl.closeSync(helperDirFd); } mutationStage = "helper_published"; atomicPrivateJson(paths.journalPath, { ...journal, phase: "HELPER_PUBLISHED" }, fsImpl); const receipt = { schema_version: 1, status: "VERIFIED", installation_id: installationId, instance_path: paths.instanceRoot, helper_path: paths.helperPath, source_review_commit: REVIEWED_SOURCE_COMMIT, source_sha256: source.source_sha256, binary_sha256: binarySha256, architecture: os.arch(), proof: proof.proof, timestamp: new Date().toISOString() }; atomicReceipt(paths.receiptPath, receipt, fsImpl); atomicPrivateJson(paths.journalPath, { ...journal, phase: "COMPLETE", receipt_timestamp: receipt.timestamp }, fsImpl); return { ...receipt, status: "PASS", mutations_performed: true, receipt_path: paths.receiptPath, journal_path: paths.journalPath }; }
   catch (error) { return { status: "ERROR", error_id: mutationStage === "helper_published" ? "MACOS-NATIVE-RECEIPT-WRITE" : "MACOS-NATIVE-PUBLISH", recovery_status: "RESUME_ALLOWED_ONLY_WITH_EXACT_JOURNAL", journal_path: paths.journalPath, helper_path: paths.helperPath, receipt_path: paths.receiptPath, details: String(error.message || error), mutations_performed: mutationStage === "helper_published" ? true : "UNKNOWN" }; }
 }
 

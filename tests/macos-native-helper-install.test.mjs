@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { macosNativeHelperPreflight, prepareMacosNativeHelper, verifyMacosNativeCapability, macosNativeHelperPaths, REVIEWED_SOURCE_PATH, REVIEWED_SOURCE_SHA256 } from "../src/lib/macos-native-helper-install.mjs";
+import { macosNativeHelperPreflight, prepareMacosNativeHelper, verifyMacosNativeCapability, macosNativeHelperPaths, REVIEWED_SOURCE_PATH, REVIEWED_SOURCE_SHA256, REVIEWED_SOURCE_COMMIT } from "../src/lib/macos-native-helper-install.mjs";
 
 function toolchain(home) {
   const sdk = path.join(home, "sdk");
@@ -19,6 +19,26 @@ const preflightOnlyCommandRunner = (sdk, calls = []) => (command, args) => {
   if (command === "xcrun" && args.length === 3 && args[0] === "--sdk" && args[1] === "macosx" && args[2] === "--show-sdk-path") return { ok: true, status: 0, stdout: `${sdk}\n` };
   throw new Error("test fixture compile invocation");
 };
+
+function preparedJournalFixture({ installationId, instanceRoot, helperPath, receiptPath }) {
+  return {
+    schema_version: 1,
+    phase: "PREPARED",
+    installation_id: installationId,
+    instance_path: instanceRoot,
+    helper_path: helperPath,
+    receipt_path: receiptPath,
+    source_review_commit: REVIEWED_SOURCE_COMMIT,
+    source_sha256: REVIEWED_SOURCE_SHA256,
+    binary_sha256: "a".repeat(64),
+    architecture: os.arch(),
+    proof: {
+      self: { status: "OK", pid: process.pid, identity: `fixture-self:${process.pid}`, start_sec: 1, start_usec: 1 },
+      parent: { status: "OK", pid: process.ppid, identity: `fixture-parent:${process.ppid}`, start_sec: 1, start_usec: 2 }
+    },
+    created_at: "2026-01-01T00:00:00.000Z"
+  };
+}
 
 test("macOS native preflight is read-only and reports reviewed source digest", () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "orch-native-preflight-"));
@@ -105,12 +125,12 @@ test("concurrent native writer claims fail closed without replacing the first jo
   const sdk = toolchain(home);
   const calls = [];
   const state = { installation_id: "claim-1", macos_setup_approved: true, macos_native_writer_id: "writer-b" };
-  const { instanceRoot, journalPath, helperPath } = macosNativeHelperPaths({ home, installationId: state.installation_id });
+  const { instanceRoot, journalPath, helperPath, receiptPath } = macosNativeHelperPaths({ home, installationId: state.installation_id });
   fs.mkdirSync(instanceRoot, { recursive: true, mode: 0o700 }); fs.chmodSync(instanceRoot, 0o700);
   const lockPath = path.join(instanceRoot, ".macos-native-helper-install.lock");
-  const journal = "first-writer journal sentinel\n";
+  const journal = JSON.stringify(preparedJournalFixture({ installationId: state.installation_id, instanceRoot, helperPath, receiptPath }));
   fs.writeFileSync(journalPath, journal, { mode: 0o600 });
-  fs.writeFileSync(lockPath, JSON.stringify({ schema_version: 1, owner_id: "writer-a", pid: process.pid, installation_id: state.installation_id, instance_path: instanceRoot }), { mode: 0o600 });
+  fs.writeFileSync(lockPath, JSON.stringify({ schema_version: 1, claim_id: "foreign-claim", owner_id: "writer-a", pid: process.pid, installation_id: state.installation_id, instance_path: instanceRoot, created_at: "2026-01-01T00:00:00.000Z" }), { mode: 0o600 });
   const result = prepareMacosNativeHelper({ state, home, platform: "darwin", commandRunner: preflightOnlyCommandRunner(sdk, calls) });
   assert.equal(result.status, "ERROR"); assert.equal(result.error_id, "MACOS-NATIVE-INSTALL-BUSY");
   assert.equal(calls.filter(({ args }) => args.includes("-o")).length, 0);
@@ -119,19 +139,46 @@ test("concurrent native writer claims fail closed without replacing the first jo
   assert.deepEqual(JSON.parse(fs.readFileSync(lockPath, "utf8")).owner_id, "writer-a");
 });
 
+test("failed compile releases only its newly minted private claim", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "orch-native-claim-cleanup-")); const sdk = toolchain(home);
+  const state = { installation_id: "cleanup-1", macos_setup_approved: true, macos_native_writer_id: "same-id" };
+  const paths = macosNativeHelperPaths({ home, installationId: state.installation_id });
+  const commandRunner = (command, args) => {
+    if (args[0] === "--find") return { ok: true, stdout: "/usr/bin/clang" };
+    if (args[2] === "--show-sdk-path") return { ok: true, stdout: `${sdk}\n` };
+    return { ok: false, stderr: "compile failed" };
+  };
+  const identityReader = pid => ({ status: "OK", pid, identity: `cleanup:${pid}`, start_sec: 1, start_usec: pid });
+  const result = prepareMacosNativeHelper({ state, home, platform: "darwin", commandRunner, identityReader });
+  assert.equal(result.error_id, "MACOS-NATIVE-BUILD-FAILED");
+  assert.equal(fs.existsSync(path.join(paths.instanceRoot, ".macos-native-helper-install.lock")), false);
+  assert.equal(fs.existsSync(paths.journalPath), false); assert.equal(fs.existsSync(paths.helperPath), false); assert.equal(fs.existsSync(paths.receiptPath), false);
+});
+
+test("PREPARED journal recovery reenters only the same in-memory writer", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "orch-native-prepared-recovery-")); const sdk = toolchain(home);
+  const calls = []; const state = { installation_id: "prepared-1", macos_setup_approved: true, parent_pid: 123, macos_native_writer_id: "same-id" };
+  const commandRunner = (command, args) => { calls.push(args); if (args[0] === "--find") return { ok: true, stdout: "/usr/bin/clang" }; if (args[2] === "--show-sdk-path") return { ok: true, stdout: `${sdk}\n` }; fs.writeFileSync(args[args.indexOf("-o") + 1], "isolated-helper\n", { mode: 0o700 }); return { ok: true, stdout: "" }; };
+  const identityReader = pid => ({ status: "OK", pid, identity: `prepared:${pid}`, start_sec: 1, start_usec: pid });
+  const first = prepareMacosNativeHelper({ state, home, platform: "darwin", commandRunner, identityReader }); const paths = macosNativeHelperPaths({ home, installationId: state.installation_id });
+  assert.equal(first.status, "PASS"); fs.unlinkSync(paths.helperPath); fs.unlinkSync(paths.receiptPath); const journal = JSON.parse(fs.readFileSync(paths.journalPath, "utf8")); journal.phase = "PREPARED"; fs.writeFileSync(paths.journalPath, JSON.stringify(journal), { mode: 0o600 });
+  const recovered = prepareMacosNativeHelper({ state, home, platform: "darwin", commandRunner, identityReader });
+  assert.equal(recovered.status, "PASS"); assert.equal(fs.existsSync(paths.helperPath), true); assert.equal(fs.existsSync(paths.receiptPath), true); assert.equal(calls.filter(args => args.includes("-o")).length, 2);
+});
+
 test("ambiguous native writer claim is not reclaimed", () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "orch-native-unknown-"));
   const sdk = toolchain(home);
   const state = { installation_id: "unknown-1", macos_setup_approved: true, macos_native_writer_id: "writer-b" };
-  const { instanceRoot, journalPath, helperPath } = macosNativeHelperPaths({ home, installationId: state.installation_id });
+  const { instanceRoot, journalPath, helperPath, receiptPath } = macosNativeHelperPaths({ home, installationId: state.installation_id });
   fs.mkdirSync(instanceRoot, { recursive: true, mode: 0o700 }); fs.chmodSync(instanceRoot, 0o700);
   const lockPath = path.join(instanceRoot, ".macos-native-helper-install.lock");
-  const journal = "ambiguous-writer journal sentinel\n";
+  const journal = JSON.stringify(preparedJournalFixture({ installationId: state.installation_id, instanceRoot, helperPath, receiptPath }));
   fs.writeFileSync(journalPath, journal, { mode: 0o600 });
-  fs.writeFileSync(lockPath, JSON.stringify({ schema_version: 1, owner_id: "writer-a", pid: 99999999, installation_id: state.installation_id, instance_path: instanceRoot }), { mode: 0o600 });
+  fs.writeFileSync(lockPath, JSON.stringify({ schema_version: 1, claim_id: "same-id-foreign-pid", owner_id: "writer-b", pid: 99999999, installation_id: state.installation_id, instance_path: instanceRoot, created_at: "2026-01-01T00:00:00.000Z" }), { mode: 0o600 });
   const result = prepareMacosNativeHelper({ state, home, platform: "darwin", commandRunner: preflightOnlyCommandRunner(sdk) });
   assert.equal(result.status, "ERROR"); assert.equal(result.error_id, "MACOS-NATIVE-INSTALL-OWNERSHIP-UNKNOWN");
   assert.equal(fs.readFileSync(journalPath, "utf8"), journal);
   assert.equal(fs.existsSync(helperPath), false);
-  assert.deepEqual(JSON.parse(fs.readFileSync(lockPath, "utf8")).owner_id, "writer-a");
+  assert.deepEqual(JSON.parse(fs.readFileSync(lockPath, "utf8")).owner_id, "writer-b");
 });
