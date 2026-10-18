@@ -2,7 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import vm from "node:vm";
 import { callbackReceiptMatches, receiptDomSource } from "../runtime/scripts/callback-receipt.mjs";
-import { validateCallbackState, assertSafeMutation, nextDeliveryState, sendGate, reconcileReceipt, createCallbackStateStore, deliverCallback, isValidCallbackId } from "../runtime/scripts/callback-delivery.mjs";
+import { validateCallbackState, assertSafeMutation, canInsertCallbackDraft, selectSafeSendButton, isBusyComposerControl, nextDeliveryState, sendGate, reconcileReceipt, createCallbackStateStore, deliverCallback, isValidCallbackId } from "../runtime/scripts/callback-delivery.mjs";
+import { wakeDestinationMatches } from "../runtime/scripts/wake-chat.mjs";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -92,6 +93,24 @@ test("wake-chat receipt and send destination guards use normalized conversation 
   const accepts = href => normalizeConversationUrl(href) === normalizeConversationUrl(expected);
   for (const href of [expected, `${expected}?query=1`, `${expected}#hash`]) assert.equal(accepts(href), true);
   for (const href of ["https://chatgpt.com/c/other", "https://chat.openai.com/c/chat-27"]) assert.equal(accepts(href), false);
+  assert.equal(wakeDestinationMatches(`${expected}?query=1`, expected), true);
+  assert.equal(wakeDestinationMatches("https://chatgpt.com/c/other", expected), false);
+});
+
+test("send selection is scoped to a genuine composer control and busy detection is case insensitive", () => {
+  const destination = "https://chatgpt.com/c/chat-303";
+  const message = "[CODEX-AUTO callback_id=x] payload";
+  const candidates = [{testid:"send-feedback"}, {testid:"composer-send-button", aria:"Send"}];
+  assert.equal(selectSafeSendButton({destination, expectedDestination:destination, draft:message, message, buttons:candidates}), 1);
+  for (const button of [{testid:"submit"}, {text:"Submit", type:"submit"}, {testid:"send-feedback", aria:"Send feedback"}, {testid:"send-feedback", aria:"Send"}]) {
+    assert.equal(selectSafeSendButton({destination, expectedDestination:destination, draft:message, message, buttons:[button]}), -1);
+  }
+  for (const button of [{aria:"STOP GENERATING"}, {title:"Stop-Control"}, {text:"cancel GENERATION"}, {testid:"stop-control"}]) {
+    assert.equal(isBusyComposerControl(button), true);
+    assert.equal(selectSafeSendButton({destination, expectedDestination:destination, draft:message, message, buttons:[button, {aria:"Send"}]}), -1);
+  }
+  assert.deepEqual(canInsertCallbackDraft({destination, expectedDestination:destination, draft:"", message, busy:true}), {ok:false, reason:"chat-busy-generating"});
+  assert.equal(canInsertCallbackDraft({destination, expectedDestination:destination, draft:"unrelated", message, busy:false}).ok, false);
 });
 
 test("shipped sender helpers keep mutation and send gates fail closed", () => {
