@@ -10,7 +10,7 @@ const git = (cwd, args, encoding = "utf8") => spawnSync("/usr/bin/git", ["-C", c
 const run = (cwd, args) => { const result = spawnSync("/usr/bin/git", ["-C", cwd, ...args], { encoding: "utf8" }); assert.equal(result.status, 0, result.stderr); return result.stdout.trim(); };
 const sha = cwd => run(cwd, ["rev-parse", "HEAD"]);
 
-function fixture(t) {
+function fixture(t, { forkCheckpoint = false } = {}) {
   const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "sandbox-merge-") ); t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const home = path.join(root, "home"), control = path.join(root, "control"), bare = path.join(root, "sandbox.git");
   const instance = "fixture01", project = `sandbox-${instance}`, instanceRoot = path.join(home, ".chatgpt-codex-orchestrator", "instances", instance), automation = path.join(instanceRoot, "automation", project), work = path.join(root, "work");
@@ -21,7 +21,7 @@ function fixture(t) {
   const base = sha(work); run(work, ["branch", "feat/task"]);
   fs.writeFileSync(path.join(work, "change.txt"), "change\n"); run(work, ["checkout", "-q", "feat/task"]); run(work, ["add", "."]); run(work, ["commit", "-q", "-m", "change"]); const approved = sha(work);
   const review = `<!-- CODEX_ORCHESTRATOR_CODE_REVIEW_V1 -->\n# Review\n\n- project: ${project}\n- repository: trusted/chatgpt-codex-orchestrator-sandbox-${instance}\n- source_branch: feat/task\n- reviewed_commit: ${approved}\n- checkpoint_branch: codex/checkpoints\n\nStatus: CODE_REVIEW_COMPLETE\n`;
-  run(work, ["branch", "codex/checkpoints", approved]); run(work, ["checkout", "-q", "codex/checkpoints"]); fs.mkdirSync(path.join(work, ".codex/reviews/by-commit"), { recursive: true }); fs.writeFileSync(path.join(work, ".codex/reviews/by-commit", `${approved}.md`), review); run(work, ["add", "."]); run(work, ["commit", "-q", "-m", "review"]); const checkpoint = sha(work);
+  run(work, ["branch", "codex/checkpoints", forkCheckpoint ? base : approved]); run(work, ["checkout", "-q", "codex/checkpoints"]); fs.mkdirSync(path.join(work, ".codex/reviews/by-commit"), { recursive: true }); fs.writeFileSync(path.join(work, ".codex/reviews/by-commit", `${approved}.md`), review); run(work, ["add", "."]); run(work, ["commit", "-q", "-m", "review"]); const checkpoint = sha(work);
   run(work, ["remote", "add", "origin", bare]); run(work, ["push", "-q", "origin", "main", "feat/task", "codex/checkpoints"]);
   run(root, ["clone", "-q", bare, automation]); run(automation, ["config", "core.filemode", "false"]);
   fs.writeFileSync(path.join(control, "instance.json"), JSON.stringify({ instance_id: instance, trusted_github_username: "trusted", control_repository: "trusted/control", platform: "darwin", arch: "arm64" }));
@@ -36,6 +36,50 @@ function fixture(t) {
 function call(f, event = f.event({})) { return preflightMacosSandboxMerge({ event, controlRoot: f.control, controlRepository: "trusted/control", trustedGithubUsername: "trusted", home: f.home, sandboxOrigin: f.bare }); }
 
 test("valid exact approval returns a read-only merge plan", t => { const f = fixture(t); const before = f.refs(); const defaultRecord = git(f.automation, ["ls-remote", "origin", "refs/heads/main"]).trim(); const [defaultSha, defaultRef] = defaultRecord.split(/\s+/); assert.match(defaultSha, /^[0-9a-f]{40}$/); assert.equal(defaultRef, "refs/heads/main"); const plan = call(f); assert.deepEqual(plan, { approved_sha: f.approved, remote_default_before: defaultSha, remote_source: f.approved, checkpoint: f.checkpoint, review_file: `.codex/reviews/by-commit/${f.approved}.md`, route: "https://chatgpt.com/c/chat-303" }); assert.equal(f.refs(), before); });
+
+test("accepts an independently forked checkpoint with exact review evidence", t => {
+  const f = fixture(t, { forkCheckpoint: true });
+  const before = f.refs();
+  const plan = call(f);
+  assert.equal(plan.approved_sha, f.approved);
+  assert.equal(plan.checkpoint, f.checkpoint);
+  assert.equal(f.refs(), before);
+});
+
+test("fetches newly advanced remote objects from a stale automation clone", t => {
+  const f = fixture(t);
+  const publisher = path.join(f.root, "publisher");
+  run(f.root, ["clone", "-q", f.bare, publisher]);
+  run(publisher, ["config", "user.name", "fixture"]);
+  run(publisher, ["config", "user.email", "fixture@example.invalid"]);
+  run(publisher, ["checkout", "-q", "-B", "feat/task", "origin/feat/task"]);
+  fs.writeFileSync(path.join(publisher, "advanced.txt"), "advanced\n");
+  run(publisher, ["add", "."]); run(publisher, ["commit", "-q", "-m", "advanced source"]);
+  const advanced = sha(publisher);
+  run(publisher, ["checkout", "-q", "-B", "codex/checkpoints", "origin/codex/checkpoints"]);
+  const review = `<!-- CODEX_ORCHESTRATOR_CODE_REVIEW_V1 -->\n# Review\n\n- project: ${f.project}\n- repository: trusted/chatgpt-codex-orchestrator-sandbox-fixture01\n- source_branch: feat/task\n- reviewed_commit: ${advanced}\n- checkpoint_branch: codex/checkpoints\n\nStatus: CODE_REVIEW_COMPLETE\n`;
+  fs.writeFileSync(path.join(publisher, ".codex/reviews/by-commit", `${advanced}.md`), review);
+  run(publisher, ["add", "."]); run(publisher, ["commit", "-q", "-m", "advanced review"]);
+  const advancedCheckpoint = sha(publisher);
+  run(publisher, ["push", "-q", "origin", "feat/task", "codex/checkpoints"]);
+  const before = f.refs();
+  const plan = call(f, f.event({ approved_commit: advanced }));
+  assert.deepEqual({ approved_sha: plan.approved_sha, remote_source: plan.remote_source, checkpoint: plan.checkpoint }, { approved_sha: advanced, remote_source: advanced, checkpoint: advancedCheckpoint });
+  assert.equal(f.refs(), before);
+});
+
+test("rejects a checkpoint branch that drifts to an unreviewed head", t => {
+  const f = fixture(t);
+  const publisher = path.join(f.root, "checkpoint-drift");
+  run(f.root, ["clone", "-q", f.bare, publisher]);
+  run(publisher, ["checkout", "-q", "-B", "codex/checkpoints", "origin/main"]);
+  fs.writeFileSync(path.join(publisher, "drift.txt"), "drift\n");
+  run(publisher, ["add", "."]); run(publisher, ["commit", "-q", "-m", "drifted checkpoint"]);
+  run(publisher, ["push", "-q", "--force", "origin", "codex/checkpoints"]);
+  const before = f.refs();
+  assert.throws(() => call(f), /REVIEW_EVIDENCE_MISSING/);
+  assert.equal(f.refs(), before);
+});
 
 for (const [name, mutate, code] of [
   ["stale approved SHA", f => ({ event: f.event({ approved_commit: "0000000000000000000000000000000000000000" }) }), "APPROVED_SHA_STALE"],

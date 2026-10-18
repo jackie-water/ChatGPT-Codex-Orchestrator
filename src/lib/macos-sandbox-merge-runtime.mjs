@@ -81,11 +81,37 @@ function gitStatus(repo) {
 }
 
 function remoteHead(repo, branch) {
+  if (!safeRef(branch)) fail("REMOTE_HEAD_UNVERIFIED");
   const lines = runGit(repo, ["ls-remote", "--heads", "origin", `refs/heads/${branch}`]).split(/\r?\n/).filter(Boolean);
   if (lines.length !== 1) fail("REMOTE_HEAD_UNVERIFIED");
   const [sha, ref] = lines[0].split(/\s+/);
   if (!SHA.test(sha) || ref !== `refs/heads/${branch}`) fail("REMOTE_HEAD_UNVERIFIED");
   return sha.toLowerCase();
+}
+
+function fetchPinnedRefs(repo, heads) {
+  const refspecs = Object.entries(heads).map(([branch, sha]) => {
+    if (!safeRef(branch) || !SHA.test(sha)) fail("REMOTE_HEAD_UNVERIFIED");
+    return `+refs/heads/${branch}:refs/remotes/origin/${branch}`;
+  });
+  const result = spawnSync(gitExecutable(), ["-C", repo, "-c", "core.hooksPath=/dev/null", "fetch", "--no-tags", "--no-write-fetch-head", "origin", ...refspecs], {
+    encoding: "utf8", timeout: 30000, maxBuffer: 2 * 1024 * 1024
+  });
+  if (result.error || result.status !== 0) fail("REMOTE_OBJECT_FETCH_FAILED");
+  for (const [branch, expected] of Object.entries(heads)) {
+    const local = runGit(repo, ["rev-parse", `refs/remotes/origin/${branch}`]).toLowerCase();
+    const objectType = spawnSync(gitExecutable(), ["-C", repo, "-c", "core.hooksPath=/dev/null", "cat-file", "-t", expected], { encoding: "utf8", timeout: 30000 });
+    if (local !== expected || objectType.error || objectType.status !== 0 || objectType.stdout.trim() !== "commit") fail("REMOTE_OBJECT_UNVERIFIED");
+  }
+}
+
+function pinnedRemoteHeads(repo, branches) {
+  const heads = {};
+  for (const branch of branches) {
+    if (heads[branch] && heads[branch] !== remoteHead(repo, branch)) fail("REMOTE_HEAD_UNVERIFIED");
+    heads[branch] = remoteHead(repo, branch);
+  }
+  return heads;
 }
 
 function ancestor(repo, older, newer, code = "SOURCE_ANCESTRY_FAILED") {
@@ -189,13 +215,16 @@ export function preflightMacosSandboxMerge({ event, controlRoot, controlReposito
   const instanceRoot = path.join(home, ".chatgpt-codex-orchestrator", "instances", instance.instance_id);
   const automation = privatePath(path.join(instanceRoot, "automation", project.local_path_key), { leaf: true });
   safeClone(automation, project.repository, sandboxOrigin);
-  const defaultHead = remoteHead(automation, project.default_branch);
-  const sourceHead = remoteHead(automation, request.source_branch);
-  const checkpoint = remoteHead(automation, project.checkpoint_branch);
+  const pinned = pinnedRemoteHeads(automation, [project.default_branch, request.source_branch, project.checkpoint_branch]);
+  fetchPinnedRefs(automation, pinned);
+  const reconciled = pinnedRemoteHeads(automation, [project.default_branch, request.source_branch, project.checkpoint_branch]);
+  for (const branch of Object.keys(pinned)) if (reconciled[branch] !== pinned[branch]) fail("REMOTE_HEAD_DRIFT");
+  const defaultHead = pinned[project.default_branch];
+  const sourceHead = pinned[request.source_branch];
+  const checkpoint = pinned[project.checkpoint_branch];
   if (sourceHead !== request.approved_commit.toLowerCase()) fail("APPROVED_SHA_STALE");
   if (request.source_branch === project.default_branch || project.protected_branches?.includes?.(request.source_branch)) fail("PROTECTED_SOURCE_BRANCH");
   if (!ancestor(automation, defaultHead, request.approved_commit, "DEFAULT_ANCESTRY_FAILED")) fail("NON_FAST_FORWARD_SOURCE");
-  if (!ancestor(automation, request.approved_commit, checkpoint, "CHECKPOINT_ANCESTRY_FAILED")) fail("CHECKPOINT_DIVERGED");
   const reviewFile = reviewBytes(automation, checkpoint, request, project);
   const diffCheck = spawnSync(gitExecutable(), ["-C", automation, "-c", "core.hooksPath=/dev/null", "diff", "--check", `${defaultHead}..${request.approved_commit}`], { encoding: "utf8", timeout: 30000 });
   if (diffCheck.error || diffCheck.status !== 0) fail("DIFF_CHECK_FAILED");
