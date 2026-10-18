@@ -20,7 +20,17 @@ function stable(v){if(Array.isArray(v))return`[${v.map(stable).join(",")}]`;if(v
 function digest(v){return crypto.createHash("sha256").update(stable(v)).digest("hex");}
 function now(){return new Date().toISOString();}
 function ensureDir(d){fs.mkdirSync(d,{recursive:true,mode:0o700});fs.chmodSync(d,0o700);}
-function safeDir(d){assert(typeof d==="string"&&path.isAbsolute(d),"INVALID_STATE_DIRECTORY");return d;}
+function rejectSymlinkPath(target,code="UNTRUSTED_STATE_PATH"){
+  assert(path.isAbsolute(target),"INVALID_STATE_PATH");
+  const parsed=path.parse(target),parts=target.slice(parsed.root.length).split(path.sep).filter(Boolean);
+  let current=parsed.root;
+  for(const part of parts){
+    current=path.join(current,part);
+    try{assert(!fs.lstatSync(current).isSymbolicLink(),code);}
+    catch(e){if(e.code!=="ENOENT")throw e;break;}
+  }
+}
+function safeDir(d){assert(typeof d==="string"&&path.isAbsolute(d),"INVALID_STATE_DIRECTORY");rejectSymlinkPath(d);return d;}
 function safeTaskId(taskId){
   assert(typeof taskId==="string"&&taskId.length>0&&taskId.length<=160,"INVALID_TASK_ID");
   assert(!path.isAbsolute(taskId)&&!/[\\/]/.test(taskId)&&taskId!=="."&&taskId!==".."&&!/\p{Cc}/u.test(taskId),"INVALID_TASK_ID");
@@ -33,14 +43,14 @@ function atomicWrite(file,value,exclusive=false){ensureDir(path.dirname(file));c
 function withLock(dir,fn){ensureDir(path.dirname(dir));try{fs.mkdirSync(dir,{mode:0o700});}catch(e){if(e.code==="EEXIST")fail("STATE_CONTENTION");throw e;}try{return fn();}finally{try{fs.rmdirSync(dir);}catch{fail("STATE_UNCERTAIN");}}}
 function paths(root,taskId){
   const r=safeDir(root),id=safeTaskId(taskId),tasks=path.join(r,"tasks");
-  rejectSymlink(tasks);
+  rejectSymlinkPath(tasks);
   const base=path.join(tasks,id);
-  rejectSymlink(base);
+  rejectSymlinkPath(base);
   return{root:r,base,state:path.join(base,"state.json"),journal:path.join(base,"journal.jsonl"),outbox:path.join(base,"outbox.json"),resultOutbox:path.join(base,"result-outbox.json"),lock:path.join(base,".lock")};
 }
 function urlParts(u){assert(typeof u==="string"&&CHAT_URL.test(u),"INVALID_CHAT_URL");const m=u.match(CHAT_URL);return{projectSlug:m[1]||null,conversationId:m[2]};}
 function instanceRouteFile(instanceId){assert(typeof instanceId==="string"&&/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(instanceId),"INVALID_INSTANCE");return path.join(os.homedir(),".chatgpt-codex-orchestrator","instances",instanceId,"chat-routes.json");}
-function trustedRoute(o,id){assert(!o?.routeRegistry,"UNTRUSTED_ROUTE_REGISTRY");const file=instanceRouteFile(id.instanceId);assert(fs.existsSync(file),"UNTRUSTED_ROUTE_REGISTRY");const reg=readJson(file);assert(reg&&Array.isArray(reg.routes),"UNTRUSTED_ROUTE_REGISTRY");const p=urlParts(id.chatUrl);const matches=reg.routes.filter(x=>x?.status==="active"&&x.route===id.route&&(x.projectKey||x.internalProject||x.project)===id.project&&(x.chat_url||x.chatUrl)===id.chatUrl);assert(matches.length===1,"UNREGISTERED_ROUTE");const rec=matches[0];assert(rec.projectKey===id.project||rec.internalProject===id.project||rec.project===id.project,"PROJECT_KEY_MISMATCH");assert(!p.projectSlug||rec.project_slug===p.projectSlug||rec.projectSlug===p.projectSlug,"PINNED_ROUTE_MISMATCH");return{instanceId:id.instanceId,project:rec.projectKey||rec.internalProject||rec.project,route:rec.route,chat_url:rec.chat_url||rec.chatUrl,status:"active",projectSlug:p.projectSlug};}
+function trustedRoute(o,id){assert(!o?.routeRegistry,"UNTRUSTED_ROUTE_REGISTRY");const file=instanceRouteFile(id.instanceId);assert(fs.existsSync(file),"UNTRUSTED_ROUTE_REGISTRY");const reg=readJson(file);assert(reg&&Array.isArray(reg.routes),"UNTRUSTED_ROUTE_REGISTRY");const p=urlParts(id.chatUrl);const matches=reg.routes.filter(x=>x?.status==="active"&&x.route===id.route&&(x.projectKey||x.internalProject||x.project)===id.project&&(x.chat_url||x.chatUrl)===id.chatUrl);assert(matches.length===1,"UNREGISTERED_ROUTE");const rec=matches[0];assert(rec.projectKey===id.project||rec.internalProject===id.project||rec.project===id.project,"PROJECT_KEY_MISMATCH");const suppliedSlugs=[rec.project_slug,rec.projectSlug].filter(v=>v!==undefined);assert(suppliedSlugs.length===0||suppliedSlugs.every(v=>v===suppliedSlugs[0]),"PINNED_ROUTE_MISMATCH");assert(!suppliedSlugs.length||suppliedSlugs[0]===p.projectSlug,"PINNED_ROUTE_MISMATCH");return{instanceId:id.instanceId,project:rec.projectKey||rec.internalProject||rec.project,route:rec.route,chat_url:rec.chat_url||rec.chatUrl,status:"active",projectSlug:p.projectSlug};}
 function identity(input,o){const{instanceId,project,route,chatUrl,taskId,logicalIteration}=input||{};for(const[n,v]of Object.entries({instanceId,project,route,taskId}))assert(typeof v==="string"&&ID.test(v),"INVALID_IDENTITY",n);assert(Number.isInteger(logicalIteration)&&logicalIteration>0,"INVALID_ITERATION");const rec=trustedRoute(o,{instanceId,project,route,chatUrl});return{instanceId,project,route,chatUrl,taskId,logicalIteration,routeRecord:rec};}
 function suppliedValue(o,names,conflictCode,blocked){const values=names.filter(n=>Object.hasOwn(o||{},n)&&o[n]!==undefined).map(n=>o[n]);if(blocked)for(const value of values)assert(!blocked.has(value),"PROTECTED_BRANCH");if(values.length>1)assert(values.every(v=>v===values[0]),conflictCode);return values.length?values[0]:null;}
 function protectedBranches(s){return new Set([...PROTECTED,...(s?.protectedBranches||[])]);}
