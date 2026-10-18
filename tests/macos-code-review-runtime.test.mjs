@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { callbackRecord, codexReviewArgv, ensurePendingCallback, parseReviewEvidence, pendingWakesPath, publicationIntentPath, publicationIntentRecord, redactReviewOutput, reportSha256, validatePublicationIntent, validateReviewEvent, writeCheckpointEvidence, writePrivate } from "../src/lib/macos-code-review-runtime.mjs";
+import { callbackRecord, codexReviewArgv, ensurePendingCallback, executeMacosCodeReview, parseReviewEvidence, pendingWakesPath, publicationIntentPath, publicationIntentRecord, redactReviewOutput, reportSha256, validatePublicationIntent, validateReviewEvent, writeCheckpointEvidence, writePrivate } from "../src/lib/macos-code-review-runtime.mjs";
 
 const sha = "9203170f74b57dade7702fb0530e994ecf531c17";
 test("native Codex child argv keeps read-only isolation and disables repository instructions", () => {
@@ -54,6 +54,38 @@ function fixture() {
   fs.writeFileSync(path.join(instanceRoot, "chat-routes.json"), JSON.stringify({ routes: [{ route: "chat-232", project: `sandbox-${instance}`, chat_url: "https://chatgpt.com/g/project/c/chat-232", status: "active" }] }), { mode: 0o600 });
   const event = body => ({ repository: { full_name: "trusted/control" }, issue: { title: "[CODE-REVIEW] native adapter", number: 258, user: { login: "trusted" }, body: JSON.stringify({ project: `sandbox-${instance}`, source_branch: "feat/task", reviewed_commit: sha, review_route: "chat-232", ...body }) } });
   return { root, home, control, instanceRoot, event };
+}
+
+function barePublicationFixture(report, { postPush = true } = {}) {
+  const f = fixture();
+  const bare = path.join(f.root, "remote.git"), source = path.join(f.root, "source");
+  assert.equal(spawnSync("git", ["init", "--bare", "-q", bare]).status, 0);
+  assert.equal(spawnSync("git", ["init", "-q", source]).status, 0);
+  const sourceGit = args => spawnSync("git", ["-C", source, ...args], { encoding: "utf8" });
+  for (const args of [["config", "user.name", "fixture"], ["config", "user.email", "fixture@example.invalid"]]) assert.equal(sourceGit(args).status, 0);
+  fs.writeFileSync(path.join(source, "base"), "base\n");
+  assert.equal(sourceGit(["add", "base"]).status, 0); assert.equal(sourceGit(["commit", "-q", "-m", "base"]).status, 0);
+  const base = sourceGit(["rev-parse", "HEAD"]).stdout.trim();
+  assert.equal(sourceGit(["branch", "main", base]).status, 0);
+  assert.equal(sourceGit(["branch", "feat/task", base]).status, 0);
+  let published = base;
+  if (postPush) {
+    fs.mkdirSync(path.join(source, ".codex", "reviews", "by-commit"), { recursive: true });
+    fs.writeFileSync(path.join(source, ".codex", "reviews", "by-commit", `${sha}.md`), report);
+    assert.equal(sourceGit(["add", "."]).status, 0); assert.equal(sourceGit(["commit", "-q", "-m", "review"]).status, 0);
+    published = sourceGit(["rev-parse", "HEAD"]).stdout.trim();
+  }
+  assert.equal(sourceGit(["remote", "add", "origin", bare]).status, 0);
+  assert.equal(sourceGit(["push", "-q", "origin", "main", "feat/task"]).status, 0);
+  assert.equal(sourceGit(["push", "-q", "origin", `${published}:refs/heads/codex/checkpoints`]).status, 0);
+  const v = validateReviewEvent({ event: f.event({}), controlRoot: f.control, controlRepository: "trusted/control", trustedGithubUsername: "trusted", home: f.home });
+  assert.equal(spawnSync("git", ["-C", f.automation, "remote", "set-url", "origin", bare]).status, 0);
+  const review = { status: "CODE_REVIEW_COMPLETE", checkpoint: base, report };
+  return { ...f, v, base, published, review, source, bare };
+}
+
+function journalFor(f, review) {
+  return publicationIntentRecord(f.v, review);
 }
 
 test("accepts prefix title, 0644 Control metadata, and exact Sandbox project Chat URL", t => {
@@ -195,6 +227,49 @@ test("crash after remote push reconciles one callback without changing the persi
   ensurePendingCallback(file, callback);
   assert.deepEqual(JSON.parse(fs.readFileSync(intent, "utf8")), journal);
   assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).delivery_state, "PENDING");
+});
+
+test("isolated bare Git pre-push crash resumes the journal without rerunning Codex", async t => {
+  const report = `<!-- CODEX_ORCHESTRATOR_CODE_REVIEW_V1 -->\n- project: sandbox-fixture01\n- repository: trusted/chatgpt-codex-orchestrator-sandbox-fixture01\n- source_branch: feat/task\n- reviewed_commit: ${sha}\n\nStatus: CODE_REVIEW_COMPLETE\n`;
+  const f = barePublicationFixture(report, { postPush: false }); t.after(() => fs.rmSync(f.root, { recursive: true, force: true }));
+  const journal = journalFor(f, f.review);
+  let codexRuns = 0;
+  const recovered = await executeMacosCodeReview(f.v, { resumeOnly: true, publicationIntent: journal, spawn: () => { codexRuns++; return { status: 0 }; } });
+  assert.equal(recovered.status, "CODE_REVIEW_COMPLETE"); assert.equal(recovered.checkpoint, f.base); assert.equal(codexRuns, 0);
+});
+
+test("isolated bare Git post-push recovery preserves trailing-newline bytes and queues one callback", async t => {
+  const report = `<!-- CODEX_ORCHESTRATOR_CODE_REVIEW_V1 -->\n- project: sandbox-fixture01\n- repository: trusted/chatgpt-codex-orchestrator-sandbox-fixture01\n- source_branch: feat/task\n- reviewed_commit: ${sha}\n\nStatus: CODE_REVIEW_COMPLETE\n`;
+  const f = barePublicationFixture(report); t.after(() => fs.rmSync(f.root, { recursive: true, force: true }));
+  const journal = journalFor(f, f.review); let codexRuns = 0;
+  const recovered = await executeMacosCodeReview(f.v, { resumeOnly: true, publicationIntent: journal, spawn: () => { codexRuns++; return { status: 0 }; } });
+  assert.equal(recovered.status, "ALREADY_EXISTS"); assert.equal(recovered.checkpoint, f.published); assert.equal(codexRuns, 0);
+  const callback = callbackRecord(f.v, { status: recovered.priorStatus }, recovered.checkpoint);
+  const file = path.join(pendingWakesPath(f.v), `${callback.callback_id}.json`); fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  ensurePendingCallback(file, callback); ensurePendingCallback(file, callback);
+  assert.equal(fs.readdirSync(pendingWakesPath(f.v)).length, 1);
+});
+
+test("isolated bare Git tampering and ambiguous checkpoint drift fail closed", async t => {
+  const report = `<!-- CODEX_ORCHESTRATOR_CODE_REVIEW_V1 -->\n- project: sandbox-fixture01\n- repository: trusted/chatgpt-codex-orchestrator-sandbox-fixture01\n- source_branch: feat/task\n- reviewed_commit: ${sha}\n\nStatus: CODE_REVIEW_COMPLETE\n`;
+  const f = barePublicationFixture(report); t.after(() => fs.rmSync(f.root, { recursive: true, force: true }));
+  const journal = journalFor(f, f.review);
+  const tampered = `${report}tampered`;
+  fs.writeFileSync(path.join(f.source, ".codex", "reviews", "by-commit", `${sha}.md`), tampered);
+  const sourceGit = args => spawnSync("git", ["-C", f.source, ...args], { encoding: "utf8" });
+  assert.equal(sourceGit(["add", "."]).status, 0); assert.equal(sourceGit(["commit", "-q", "-m", "tamper"]).status, 0);
+  const tamperedCommit = sourceGit(["rev-parse", "HEAD"]).stdout.trim();
+  assert.equal(sourceGit(["push", "-q", "--force", "origin", `${tamperedCommit}:refs/heads/codex/checkpoints`]).status, 0);
+  await assert.rejects(() => executeMacosCodeReview(f.v, { resumeOnly: true, publicationIntent: journal }), /PUBLICATION_EVIDENCE_MISMATCH/);
+
+  const unrelated = path.join(f.root, "unrelated"); assert.equal(spawnSync("git", ["init", "-q", unrelated]).status, 0);
+  const unrelatedGit = args => spawnSync("git", ["-C", unrelated, ...args], { encoding: "utf8" });
+  for (const args of [["config", "user.name", "fixture"], ["config", "user.email", "fixture@example.invalid"]]) assert.equal(unrelatedGit(args).status, 0);
+  fs.mkdirSync(path.join(unrelated, ".codex", "reviews", "by-commit"), { recursive: true }); fs.writeFileSync(path.join(unrelated, ".codex", "reviews", "by-commit", `${sha}.md`), report);
+  assert.equal(unrelatedGit(["add", "."]).status, 0); assert.equal(unrelatedGit(["commit", "-q", "-m", "drift"]).status, 0);
+  const drift = unrelatedGit(["rev-parse", "HEAD"]).stdout.trim(); assert.equal(unrelatedGit(["remote", "add", "origin", f.bare]).status, 0);
+  assert.equal(unrelatedGit(["push", "-q", "--force", "origin", `${drift}:refs/heads/codex/checkpoints`]).status, 0);
+  await assert.rejects(() => executeMacosCodeReview(f.v, { resumeOnly: true, publicationIntent: journal }), /PUBLICATION_EVIDENCE_MISMATCH/);
 });
 
 test("same SHA resume is idempotent and tampered or drifted journals fail closed", t => {

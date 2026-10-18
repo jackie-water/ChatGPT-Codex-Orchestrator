@@ -95,6 +95,13 @@ function git(repo, args, options = {}) {
   if (result.error || result.status !== 0) fail(`GIT_${args[0].toUpperCase()}_FAILED`);
   return result.stdout.trim();
 }
+function gitRaw(repo, args) {
+  const result = spawnSync("git", ["-C", repo, "-c", "core.hooksPath=/dev/null", ...args], {
+    encoding: "buffer", timeout: 30000, maxBuffer: 2 * 1024 * 1024
+  });
+  if (result.error || result.status !== 0) fail(`GIT_${args[0].toUpperCase()}_FAILED`);
+  return result.stdout;
+}
 function remoteHead(repo, branch) {
   const lines = git(repo, ["ls-remote", "--heads", "origin", `refs/heads/${branch}`]).split(/\r?\n/).filter(Boolean);
   if (!lines.length) return null;
@@ -106,6 +113,12 @@ function remoteHead(repo, branch) {
 function objectExists(repo, object) {
   const result = spawnSync("git", ["-C", repo, "-c", "core.hooksPath=/dev/null", "cat-file", "-e", object], { encoding: "utf8", timeout: 30000 });
   if (result.error || ![0, 1].includes(result.status)) fail("GIT_OBJECT_PROBE_UNCERTAIN");
+  return result.status === 0;
+}
+function isAncestor(repo, ancestor, descendant) {
+  if (!SHA.test(ancestor || "") || !SHA.test(descendant || "")) fail("PUBLICATION_EVIDENCE_MISMATCH");
+  const result = spawnSync("git", ["-C", repo, "-c", "core.hooksPath=/dev/null", "merge-base", "--is-ancestor", ancestor, descendant], { encoding: "utf8", timeout: 30000 });
+  if (result.error || ![0, 1].includes(result.status)) fail("PUBLICATION_EVIDENCE_MISMATCH");
   return result.status === 0;
 }
 function exactOrigin(repo, repository) {
@@ -146,13 +159,13 @@ export function codexReviewArgv(reviewModel, reviewReasoning, defaultBranch) {
   return ["exec", "--ignore-user-config", "-m", reviewModel, "-c", `model_reasoning_effort=${reviewReasoning}`, "-c", "project_doc_max_bytes=0", "-c", "approval_policy=never", "-c", "sandbox_mode=read-only", "-c", "features.plugins=false", "-c", "features.apps=false", "-c", "features.hooks=false", "review", "--base", `origin/${defaultBranch}`];
 }
 
-export function parseReviewEvidence(content, { project, repository, sourceBranch, reviewedCommit }) {
+export function parseReviewEvidence(content, { project, repository, sourceBranch, reviewedCommit, checkpointBranch = null }) {
   const marker = "<!-- CODEX_ORCHESTRATOR_CODE_REVIEW_V1 -->";
   if (typeof content !== "string" || content.split(marker).length !== 2 || !content.startsWith(`${marker}\n`)) return null;
   const field = name => { const matches = [...content.matchAll(new RegExp(`^- ${name}: ([^\\n]+)$`, "gm"))]; return matches.length === 1 ? matches[0][1].trim() : null; };
   const statusLines = content.match(/^Status: (CODE_REVIEW_COMPLETE|CODE_REVIEW_FAILED|CODE_REVIEW_SKIPPED_DOCS_ONLY)$/gm) || [];
   const status = statusLines.length === 1 ? statusLines[0].slice("Status: ".length) : null;
-  if (!status || field("project") !== project || field("repository") !== repository || field("source_branch") !== sourceBranch || field("reviewed_commit")?.toLowerCase() !== reviewedCommit.toLowerCase()) return null;
+  if (!status || field("project") !== project || field("repository") !== repository || field("source_branch") !== sourceBranch || field("reviewed_commit")?.toLowerCase() !== reviewedCommit.toLowerCase() || (checkpointBranch !== null && field("checkpoint_branch") !== checkpointBranch)) return null;
   return { status, project, repository, source_branch: sourceBranch, reviewed_commit: reviewedCommit.toLowerCase() };
 }
 
@@ -236,12 +249,17 @@ export async function executeMacosCodeReview(v, { codex = "codex", spawn = spawn
   const evidencePath = `.codex/reviews/by-commit/${req.reviewed_commit.toLowerCase()}.md`;
   try {
     if (!objectExists(automation, `${checkpoint}:${evidencePath}`)) throw Object.assign(new Error("NOT_FOUND"), { code: "NOT_FOUND" });
-    const prior = parseReviewEvidence(git(automation, ["show", `${checkpoint}:${evidencePath}`]), { project: req.project, repository: project.repository, sourceBranch: req.source_branch, reviewedCommit: req.reviewed_commit });
+    const evidenceBytes = gitRaw(automation, ["show", `${checkpoint}:${evidencePath}`]);
+    const prior = parseReviewEvidence(evidenceBytes.toString("utf8"), { project: req.project, repository: project.repository, sourceBranch: req.source_branch, reviewedCommit: req.reviewed_commit, checkpointBranch: project.checkpoint_branch });
     if (prior) {
       if (publicationIntent) {
         validatePublicationIntent(v, publicationIntent);
-        const expectedCheckpoint = publicationIntent.state === "PUBLISHED" ? publicationIntent.checkpoint_commit : publicationIntent.checkpoint_before;
-        if (expectedCheckpoint !== checkpoint || publicationIntent.review_status !== prior.status || reportSha256(git(automation, ["show", `${checkpoint}:${evidencePath}`])) !== publicationIntent.report_sha256) fail("PUBLICATION_EVIDENCE_MISMATCH");
+        if (publicationIntent.review_status !== prior.status || reportSha256(evidenceBytes) !== publicationIntent.report_sha256) fail("PUBLICATION_EVIDENCE_MISMATCH");
+        if (publicationIntent.state === "PUBLISHED") {
+          if (publicationIntent.checkpoint_commit !== checkpoint) fail("PUBLICATION_EVIDENCE_MISMATCH");
+        } else if (!isAncestor(automation, publicationIntent.checkpoint_before, checkpoint)) {
+          fail("PUBLICATION_EVIDENCE_MISMATCH");
+        }
       }
       return { status: "ALREADY_EXISTS", priorStatus: prior.status, checkpoint, evidencePath };
     }
@@ -271,4 +289,4 @@ export async function executeMacosCodeReview(v, { codex = "codex", spawn = spawn
 
 export function pendingWakesPath(v) { return path.join(v.home, ".chatgpt-codex-orchestrator", "instances", v.instance.instance_id, "pending-wakes"); }
 export function publicationIntentPath(v, reviewedCommit) { if (!SHA.test(reviewedCommit)) fail("INVALID_PUBLICATION_INTENT_SHA"); return path.join(v.home, ".chatgpt-codex-orchestrator", "instances", v.instance.instance_id, "review-publication-intents", `${reviewedCommit.toLowerCase()}.json`); }
-export { privateFile, privateTree, readJson, writePrivate, writeCheckpointEvidence, git, remoteHead, controlFile, objectExists };
+export { privateFile, privateTree, readJson, writePrivate, writeCheckpointEvidence, git, gitRaw, remoteHead, controlFile, objectExists };
