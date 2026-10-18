@@ -155,6 +155,15 @@ test("generated native entrypoints reach argument rejection and review/merge rem
   assert.deepEqual(fs.readdirSync(home), []);
 });
 
+test("macOS workflow scopes write permission only to Code Review and persists checkout credentials", () => {
+  const template = fs.readFileSync(path.join(sourceRoot, "templates", "control-repo", "orchestrator.macos.yml.template"), "utf8");
+  const workflow = renderWorkflow(template, { runnerLabel: "fixture", platform: "darwin", arch: "arm64", trustedGithubUsername: "trusted" });
+  assert.match(workflow, /permissions:\n  contents: read\n  issues: read/);
+  assert.match(workflow, /code-review:[\s\S]*?permissions:\n      contents: write\n      issues: read[\s\S]*?persist-credentials: true/);
+  const job = name => workflow.match(new RegExp(`\\n  ${name}:[\\s\\S]*?(?=\\n  [^ \\n][^:]*:|$)`))?.[0] || "";
+  for (const name of ["register-chat", "run-codex", "merge-approved"]) assert.doesNotMatch(job(name), /contents: write|persist-credentials: true/);
+});
+
 test("missing or unbundled source dependencies reject before any Control writes", t => {
   const { root, controlRoot } = temporary(t);
   const fixtureSource = sourceFixture(root, controlRoot);

@@ -134,7 +134,8 @@ function fixture(t,{platform="darwin",arch=platform==="darwin"?"arm64":"x64",git
   const metadata={
     schema_version:1,instance_id:state.instance_id,trusted_github_username:state.github_login,
     platform,arch,runner_label:state.runner_label,control_repository:state.control_repository,
-    launch_agent_label:platform==="darwin"?state.launch_agent_label:null
+    launch_agent_label:platform==="darwin"?state.launch_agent_label:null,
+    ...(platform==="darwin"?{codex_executable:fs.realpathSync(process.execPath)}: {})
   };
   const preserved={
     "instance.json":JSON.stringify(metadata,null,2)+"\n",
@@ -326,7 +327,9 @@ test("runtime refresh requires complete persistent state and never trusts the Is
 });
 
 test("runtime refresh rejects missing, legacy, malformed and conflicting instance metadata",async t=>{
-  for(const field of ["schema_version","instance_id","trusted_github_username","platform","arch","runner_label","control_repository","launch_agent_label"]){
+  const fields=["schema_version","instance_id","trusted_github_username","platform","arch","runner_label","control_repository","launch_agent_label"];
+  if(process.platform==="darwin") fields.push("codex_executable");
+  for(const field of fields){
     await t.test("missing persisted "+field,t=>{
       const f=fixture(t); delete f.metadata[field]; f.writeMetadata(); assertRejected(f);
     });

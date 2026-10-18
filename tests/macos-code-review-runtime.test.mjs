@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { callbackRecord, codexReviewArgv, ensurePendingCallback, executeMacosCodeReview, parseReviewEvidence, pendingWakesPath, publicationIntentPath, publicationIntentRecord, redactReviewOutput, reportSha256, validatePublicationIntent, validateReviewEvent, writeCheckpointEvidence, writePrivate } from "../src/lib/macos-code-review-runtime.mjs";
+import { callbackRecord, codexReviewArgv, ensurePendingCallback, executeMacosCodeReview, parseReviewEvidence, pendingWakesPath, publicationIntentPath, publicationIntentRecord, redactReviewOutput, reportSha256, trustedCodeReviewCodexExecutable, validatePublicationIntent, validateReviewEvent, writeCheckpointEvidence, writePrivate } from "../src/lib/macos-code-review-runtime.mjs";
 
 const sha = "9203170f74b57dade7702fb0530e994ecf531c17";
 test("native Codex child argv keeps read-only isolation and disables repository instructions", () => {
@@ -46,7 +46,7 @@ function fixture() {
   fs.mkdirSync(automation, { recursive: true, mode: 0o700 });
   spawnSync("git", ["-C", automation, "init", "-q"]);
   spawnSync("git", ["-C", automation, "remote", "add", "origin", `https://github.com/trusted/chatgpt-codex-orchestrator-sandbox-${instance}.git`]);
-  const instanceJson = { schema_version: 1, instance_id: instance, trusted_github_username: "trusted", control_repository: "trusted/control", platform: "darwin", arch: "arm64", runner_label: "codex-orchestrator-fixture" };
+  const instanceJson = { schema_version: 1, instance_id: instance, trusted_github_username: "trusted", control_repository: "trusted/control", platform: "darwin", arch: "arm64", runner_label: "codex-orchestrator-fixture", codex_executable: fs.realpathSync(process.execPath) };
   const projects = { projects: { [`sandbox-${instance}`]: { enabled: true, repository: `trusted/chatgpt-codex-orchestrator-sandbox-${instance}`, local_path_key: `sandbox-${instance}`, default_branch: "main", checkpoint_branch: "codex/checkpoints", code_review: { enabled: true, review_model: "gpt-5.6-luna", review_reasoning: "medium" } }, target: { enabled: false, repository: "trusted/target" } } };
   fs.writeFileSync(path.join(control, "instance.json"), JSON.stringify(instanceJson), { mode: 0o644 });
   fs.writeFileSync(path.join(control, "projects.json"), JSON.stringify(projects), { mode: 0o644 });
@@ -55,6 +55,24 @@ function fixture() {
   const event = body => ({ repository: { full_name: "trusted/control" }, issue: { title: "[CODE-REVIEW] native adapter", number: 258, user: { login: "trusted" }, body: JSON.stringify({ project: `sandbox-${instance}`, source_branch: "feat/task", reviewed_commit: sha, review_route: "chat-303", ...body }) } });
   return { root, home, control, instanceRoot, automation, event };
 }
+
+test("Code Review Codex binding accepts a pinned private executable and rejects PATH/symlink/mode changes", t => {
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "macos-review-codex-pin-")); t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const bin = path.join(root, "bin"), executable = path.join(bin, "codex"); fs.mkdirSync(bin, { mode: 0o700 }); fs.writeFileSync(executable, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+  assert.equal(trustedCodeReviewCodexExecutable(executable), executable);
+  assert.throws(() => trustedCodeReviewCodexExecutable("codex"), /PINNED/);
+  const link = path.join(root, "link"); fs.symlinkSync(executable, link); assert.throws(() => trustedCodeReviewCodexExecutable(link), /SYMLINKED/);
+  fs.chmodSync(executable, 0o777); assert.throws(() => trustedCodeReviewCodexExecutable(executable), /UNTRUSTED/);
+});
+
+test("Code Review refuses a missing or changed installer binding before Codex invocation", t => {
+  const f = fixture(); t.after(() => fs.rmSync(f.root, { recursive: true, force: true }));
+  const original = JSON.parse(fs.readFileSync(path.join(f.control, "instance.json"), "utf8"));
+  delete original.codex_executable; fs.writeFileSync(path.join(f.control, "instance.json"), JSON.stringify(original));
+  assert.throws(() => validateReviewEvent({ event: f.event({}), controlRoot: f.control, controlRepository: "trusted/control", trustedGithubUsername: "trusted", home: f.home }), /CODEX_EXECUTABLE_BINDING_MISSING/);
+  original.codex_executable = path.join(f.root, "foreign", "codex"); fs.writeFileSync(path.join(f.control, "instance.json"), JSON.stringify(original));
+  assert.throws(() => validateReviewEvent({ event: f.event({}), controlRoot: f.control, controlRepository: "trusted/control", trustedGithubUsername: "trusted", home: f.home }), /CODEX_EXECUTABLE_UNTRUSTED|CODEX_EXECUTABLE_BINDING/);
+});
 
 function barePublicationFixture(report, { postPush = true } = {}) {
   const f = fixture();

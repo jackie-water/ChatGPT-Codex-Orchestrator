@@ -29,7 +29,7 @@ try {
   const intent = publicationIntentPath(v, v.req.reviewed_commit);
   const hasIntent = fs.existsSync(intent);
   const journal = hasIntent ? validatePublicationIntent(v, JSON.parse(privateFile(intent).toString("utf8"))) : null;
-  const review = await executeMacosCodeReview(v, { resumeOnly: hasIntent, publicationIntent: journal });
+  const review = await executeMacosCodeReview(v, { codex: v.instance.codex_executable, resumeOnly: hasIntent, publicationIntent: journal });
   if (review.status === "ALREADY_EXISTS") {
     if (journal) writePrivate(intent, { ...journal, state: "PUBLISHED", checkpoint_commit: review.checkpoint }, false);
     const record = callbackRecord(v, { status: review.priorStatus }, review.checkpoint);
