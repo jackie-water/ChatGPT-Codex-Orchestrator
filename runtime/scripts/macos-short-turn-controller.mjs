@@ -9,7 +9,7 @@ function main() {
   if(command==="register") result=registerTask({stateDir,identity:{instanceId:get("instance-id"),project:get("project"),route:get("route"),chatUrl:get("chat-url"),taskId,logicalIteration:Number(get("iteration"))},maxIterations:Number(get("max-iterations")||5)});
   else if(command==="next-action") result=casRegisterNextAction({stateDir,taskId,expectedVersion:Number(get("expected-version")),nextAction:JSON.parse(get("action"))});
   else if(command==="ingest") result=ingestEvidence({stateDir,taskId,expectedVersion:Number(get("expected-version")),evidence:JSON.parse(get("evidence"))});
-  else if(command==="claim") result=claimCallbackReceipt({stateDir,taskId,callbackId:get("callback-id"),message:get("message")});
+  else if(command==="claim") result=claimCallbackReceipt({stateDir,taskId,callbackId:get("callback-id"),message:get("message"),role:get("role")||"user",proof:get("proof")?JSON.parse(get("proof")):undefined});
   else if(command==="ack") result=acknowledgeCallback({stateDir,taskId,expectedVersion:Number(get("expected-version")),outcome:get("outcome"),successor:get("successor")?JSON.parse(get("successor")):null});
   else if(command==="status") result=statusTask({stateDir,taskId});
   else if(command==="reconcile") result=reconcileTask({stateDir,taskId,evidence:JSON.parse(get("evidence"))});
