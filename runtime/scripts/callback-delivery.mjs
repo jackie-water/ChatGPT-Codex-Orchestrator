@@ -47,6 +47,22 @@ export function assertSafeMutation({destination, expectedDestination, draft, mes
   if (draft && draft !== message) throw new Error("No mutation performed: draft-changed");
 }
 
+export function canInsertCallbackDraft({destination, expectedDestination, draft, message, busy = false}) {
+  if (destination !== expectedDestination) return {ok:false, reason:"destination-changed"};
+  if (busy) return {ok:false, reason:"chat-busy-generating"};
+  if (draft && draft !== message) return {ok:false, reason:"draft-changed"};
+  return {ok:true};
+}
+
+export function selectSafeSendButton({destination, expectedDestination, draft, message, busy = false, buttons = []}) {
+  if (destination !== expectedDestination || busy || draft !== message) return -1;
+  return buttons.findIndex(button => {
+    if (button.disabled) return false;
+    const labels = [button.aria, button.title, button.text].map(value => String(value || "").trim()).filter(Boolean);
+    return labels.some(value => /^(send|send prompt|send message)$/i.test(value)) || /(?:^|[-_])send(?:[-_]|$)/i.test(String(button.testid || ""));
+  });
+}
+
 export function nextDeliveryState(state, next) {
   if (!states.has(state) || !states.has(next)) throw new Error("Invalid callback delivery state");
   const allowed = {

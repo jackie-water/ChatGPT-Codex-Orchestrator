@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { callbackReceiptMatches, normalizeReceiptText, receiptMatcherSource, receiptDomSource } from "./callback-receipt.mjs";
-import { createCallbackStateStore, assertSafeMutation, deliverCallback, nextDeliveryState, reconcileReceipt, isValidCallbackId } from "./callback-delivery.mjs";
+import { createCallbackStateStore, assertSafeMutation, canInsertCallbackDraft, selectSafeSendButton, deliverCallback, nextDeliveryState, reconcileReceipt, isValidCallbackId } from "./callback-delivery.mjs";
 const message = process.argv.slice(2).join(" ");
 if (!message.trim()) {
   console.error("WAKE_CHAT_FAILED: missing message");
@@ -240,7 +240,10 @@ async function insertText(send, text) {
     "const current=(el instanceof HTMLInputElement||el instanceof HTMLTextAreaElement?el.value:(el.innerText??el.textContent??'')).trim();" +
     "const text=" + JSON.stringify(text) + ";" +
     "if(current===text) return {ok:true,reused:true,text:current};" +
-    "if(current) return {ok:false,reason:'draft-changed',text:current};" +
+    "const canInsert=" + canInsertCallbackDraft.toString() + ";" +
+    "const busy=[...(el.closest('form')?.querySelectorAll('button')||[])].some(b=>/(^|\\s)(stop|cancel)(\\s|$)|stop generating|cancel generation/i.test([b.getAttribute('aria-label')||'',b.getAttribute('title')||'',b.innerText||b.textContent||''].join(' ')));" +
+    "const guard=canInsert({destination:location.origin+location.pathname,expectedDestination:" + JSON.stringify(normalizeConversationUrl(expected)) + ",draft:current,message:text,busy});" +
+    "if(!guard.ok) return {ok:false,reason:guard.reason,text:current};" +
     "el.focus();" +
     "if(el instanceof HTMLTextAreaElement||el instanceof HTMLInputElement){" +
       "const proto=el instanceof HTMLTextAreaElement?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;" +
@@ -354,22 +357,16 @@ async function sendMessage(send) {
         }
       }
 
-      const label = b => [b.aria,b.testid,b.title,b.text].join(' ').toLowerCase();
-      const busy = buttons.some(b => !b.disabled && /(^|\\s)(stop|cancel)(\\s|$)|stop generating|cancel generation/.test(label(b)));
-      const sendButton = buttons.find(b => {
-        if (b.disabled) return false;
-        const accessible = [b.aria,b.title,b.text].map(x => x.trim()).filter(Boolean);
-        return accessible.some(x => /^(send|send prompt|send message)$/i.test(x)) || /(?:^|[-_])send(?:[-_]|$)/i.test(b.testid);
-      });
-
-      if (busy) return {ok:false, reason:'chat-busy-generating'};
-      if (sendButton) {
-        sendButton.el.click();
+      const busy = buttons.some(b => !b.disabled && /(^|\\s)(stop|cancel)(\\s|$)|stop generating|cancel generation/.test([b.aria,b.title,b.text].join(' ')));
+      const select = ${selectSafeSendButton.toString()};
+      const sendIndex = select({destination:location.origin + location.pathname, expectedDestination:${JSON.stringify(normalizeConversationUrl(expected))}, draft:actual, message:${JSON.stringify(message)}, busy, buttons});
+      if (sendIndex >= 0) {
+        buttons[sendIndex].el.click();
         return {
           ok:true,
           clicked:true,
           method:'button-click',
-          button:{aria:sendButton.aria,testid:sendButton.testid,title:sendButton.title,type:sendButton.type,text:sendButton.text}
+          button:{aria:buttons[sendIndex].aria,testid:buttons[sendIndex].testid,title:buttons[sendIndex].title,type:buttons[sendIndex].type,text:buttons[sendIndex].text}
         };
       }
 
