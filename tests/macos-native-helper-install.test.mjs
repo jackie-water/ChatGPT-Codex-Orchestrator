@@ -166,6 +166,37 @@ test("PREPARED journal recovery reenters only the same in-memory writer", () => 
   assert.equal(recovered.status, "PASS"); assert.equal(fs.existsSync(paths.helperPath), true); assert.equal(fs.existsSync(paths.receiptPath), true); assert.equal(calls.filter(args => args.includes("-o")).length, 2);
 });
 
+test("same-process helper-only resume binds ownership to the logical writer id", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "orch-native-owner-binding-")); const sdk = toolchain(home); const calls = [];
+  const commandRunner = (command, args) => { calls.push(args); if (args[0] === "--find") return { ok: true, stdout: "/usr/bin/clang" }; if (args[2] === "--show-sdk-path") return { ok: true, stdout: `${sdk}\n` }; fs.writeFileSync(args[args.indexOf("-o") + 1], "isolated-helper\n", { mode: 0o700 }); return { ok: true, stdout: "" }; };
+  const identityReader = pid => ({ status: "OK", pid, identity: `owner-binding:${pid}`, start_sec: 1, start_usec: pid });
+  const writerA = { installation_id: "owner-binding-1", macos_setup_approved: true, parent_pid: 123, macos_native_writer_id: "writer-A" };
+  const first = prepareMacosNativeHelper({ state: writerA, home, platform: "darwin", commandRunner, identityReader }); const paths = macosNativeHelperPaths({ home, installationId: writerA.installation_id });
+  assert.equal(first.status, "PASS"); fs.unlinkSync(paths.helperPath); fs.unlinkSync(paths.receiptPath);
+  const journal = JSON.parse(fs.readFileSync(paths.journalPath, "utf8")); journal.phase = "PREPARED"; fs.writeFileSync(paths.journalPath, JSON.stringify(journal), { mode: 0o600 });
+  const beforeLock = fs.readFileSync(path.join(paths.instanceRoot, ".macos-native-helper-install.lock"), "utf8"); const beforeJournal = fs.readFileSync(paths.journalPath, "utf8");
+  const writerB = { ...writerA, macos_native_writer_id: "writer-B" };
+  const secondCalls = [];
+  const resumed = prepareMacosNativeHelper({ state: writerB, home, platform: "darwin", commandRunner: preflightOnlyCommandRunner(sdk, secondCalls), identityReader });
+  assert.equal(resumed.status, "ERROR"); assert.ok(resumed.error_id === "MACOS-NATIVE-INSTALL-BUSY" || resumed.error_id === "MACOS-NATIVE-INSTALL-OWNERSHIP-UNKNOWN"); assert.equal(calls.filter(args => args.includes("-o")).length, 1);
+  assert.equal(secondCalls.filter(({ args }) => args.includes("-o")).length, 0);
+  assert.equal(fs.readFileSync(path.join(paths.instanceRoot, ".macos-native-helper-install.lock"), "utf8"), beforeLock); assert.equal(fs.readFileSync(paths.journalPath, "utf8"), beforeJournal);
+  assert.equal(fs.existsSync(paths.helperPath), false); assert.equal(fs.existsSync(paths.receiptPath), false);
+});
+
+test("claim retirement fails closed when the validated pathname is replaced", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "orch-native-claim-race-")); const sdk = toolchain(home); let helperChecks = 0;
+  const state = { installation_id: "claim-race-1", macos_setup_approved: true, macos_native_writer_id: "writer-race" };
+  const paths = macosNativeHelperPaths({ home, installationId: state.installation_id });
+  const commandRunner = (command, args) => { if (args[0] === "--find") return { ok: true, stdout: "/usr/bin/clang" }; if (args[2] === "--show-sdk-path") return { ok: true, stdout: `${sdk}\n` }; fs.writeFileSync(args[args.indexOf("-o") + 1], "isolated-helper\n", { mode: 0o700 }); return { ok: true, stdout: "" }; };
+  const identityReader = pid => ({ status: "OK", pid, identity: `claim-race:${pid}`, start_sec: 1, start_usec: pid });
+  const fsImpl = { ...fs, existsSync(file) { if (file === paths.helperPath) { helperChecks += 1; if (helperChecks === 2) fs.writeFileSync(file, "competing-helper\n", { mode: 0o700 }); } return fs.existsSync(file); }, beforeWriterClaimRetirement(lockPath) { fs.writeFileSync(lockPath, JSON.stringify({ schema_version: 1, claim_id: "foreign-at-boundary", owner_id: "foreign-writer", pid: process.pid, installation_id: state.installation_id, instance_path: paths.instanceRoot, created_at: "2026-01-01T00:00:00.000Z" }), { mode: 0o600 }); } };
+  const result = prepareMacosNativeHelper({ state, home, platform: "darwin", commandRunner, identityReader, fsImpl });
+  assert.equal(result.status, "ERROR"); assert.equal(result.recovery_status, "MANUAL_RECOVERY_REQUIRED"); assert.equal(result.cleanup_status, "UNKNOWN"); assert.notEqual(result.mutations_performed, false);
+  assert.equal(fs.readFileSync(paths.helperPath, "utf8"), "competing-helper\n"); assert.equal(JSON.parse(fs.readFileSync(path.join(paths.instanceRoot, ".macos-native-helper-install.lock"), "utf8")).owner_id, "foreign-writer");
+  assert.equal(fs.readdirSync(paths.instanceRoot).some(name => name.startsWith(".process-identity.") && name.endsWith(".tmp")), true);
+});
+
 test("ambiguous native writer claim is not reclaimed", () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "orch-native-unknown-"));
   const sdk = toolchain(home);

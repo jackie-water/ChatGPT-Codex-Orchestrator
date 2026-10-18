@@ -148,7 +148,7 @@ function writerClaim(paths, state, fsImpl) {
       const stat = fsImpl.lstatSync(lockPath);
       if (existing.schema_version !== 1 || typeof existing.claim_id !== "string" || existing.installation_id !== state.installation_id || existing.instance_path !== paths.instanceRoot || typeof existing.owner_id !== "string" || !Number.isSafeInteger(existing.pid) || existing.pid <= 0 || !stat.isFile() || stat.nlink !== 1 || !uidAllowed(stat) || !exactMode(stat, 0o600)) return { status: "UNKNOWN", lockPath, reason: "existing writer claim is invalid or ambiguous" };
       const remembered = inMemoryClaims.get(lockPath);
-      if (remembered && remembered.claim_id === existing.claim_id && remembered.pid === process.pid && existing.pid === process.pid && remembered.dev === stat.dev && remembered.ino === stat.ino) return { status: "OWNED", lockPath, owner_id: id, claim_id: existing.claim_id, dev: stat.dev, ino: stat.ino, resumed: true };
+      if (remembered && remembered.owner_id === id && existing.owner_id === id && remembered.claim_id === existing.claim_id && remembered.pid === process.pid && existing.pid === process.pid && remembered.dev === stat.dev && remembered.ino === stat.ino) return { status: "OWNED", lockPath, owner_id: id, claim_id: existing.claim_id, dev: stat.dev, ino: stat.ino, resumed: true };
       let active = false; try { process.kill(existing.pid, 0); active = true; } catch (probe) { active = probe?.code === "EPERM"; }
       return { status: active ? "BUSY" : "UNKNOWN", lockPath, owner_id: existing.owner_id, pid: existing.pid, reason: active ? "another writer owns this installation" : "writer claim may be stale; refusing reclamation" };
     } catch (readError) { return { status: "UNKNOWN", lockPath, reason: String(readError.message || readError) }; }
@@ -161,15 +161,17 @@ function releaseWriterClaim(claim, state, fsImpl) {
     if (!safe.ok) return { ok: false, reason: safe.reason };
     const stat = fsImpl.lstatSync(claim.lockPath);
     const existing = JSON.parse(fsImpl.readFileSync(claim.lockPath, "utf8"));
-    if (!stat.isFile() || stat.nlink !== 1 || !uidAllowed(stat) || !exactMode(stat, 0o600) || stat.dev !== claim.dev || stat.ino !== claim.ino || existing.schema_version !== 1 || existing.claim_id !== claim.claim_id || existing.pid !== process.pid || existing.installation_id !== state.installation_id || existing.instance_path !== path.dirname(claim.lockPath)) return { ok: false, reason: "writer claim identity changed or is ambiguous" };
-    fsImpl.unlinkSync(claim.lockPath);
-    inMemoryClaims.delete(claim.lockPath);
-    return { ok: true };
+    if (!stat.isFile() || stat.nlink !== 1 || !uidAllowed(stat) || !exactMode(stat, 0o600) || stat.dev !== claim.dev || stat.ino !== claim.ino || existing.schema_version !== 1 || existing.claim_id !== claim.claim_id || existing.owner_id !== claim.owner_id || existing.pid !== process.pid || existing.installation_id !== state.installation_id || existing.instance_path !== path.dirname(claim.lockPath)) return { ok: false, reason: "writer claim identity changed or is ambiguous" };
+    // Node's standard filesystem API has no identity-conditional unlink/openat
+    // primitive. A pathname unlink after this disjoint validation could remove a
+    // replacement claim, so retain the evidence and require manual recovery.
+    if (typeof fsImpl.beforeWriterClaimRetirement === "function") fsImpl.beforeWriterClaimRetirement(claim.lockPath);
+    return { ok: false, reason: "atomic identity-conditional claim retirement is unavailable; preserved the validated claim rather than unlinking by pathname" };
   } catch (error) { return { ok: false, reason: String(error.message || error) }; }
 }
 function preJournalFailure(paths, state, claim, result, fsImpl) {
   const released = releaseWriterClaim(claim, state, fsImpl);
-  if (!released.ok) return { ...result, recovery_status: "MANUAL_RECOVERY_REQUIRED", cleanup_status: "UNKNOWN", cleanup_reason: released.reason, mutations_performed: "UNKNOWN" };
+  if (!released.ok) return { ...result, recovery_status: "MANUAL_RECOVERY_REQUIRED", cleanup_status: "UNKNOWN", cleanup_reason: released.reason, cleanup_required: true, preserved_lock_path: claim?.lockPath || null, mutations_performed: "UNKNOWN" };
   return { ...result, cleanup_status: "RELEASED", mutations_performed: false };
 }
 function writerClaimFailure(paths, claim) { return { status: "ERROR", error_id: claim.status === "BUSY" ? "MACOS-NATIVE-INSTALL-BUSY" : "MACOS-NATIVE-INSTALL-OWNERSHIP-UNKNOWN", recovery_status: "MANUAL_RECOVERY_REQUIRED", action: "Retry only with the verified same writer owner, or resolve the existing writer claim manually; do not delete or replace the helper, receipt, journal, or claim.", instance_path: paths.instanceRoot, helper_path: paths.helperPath, receipt_path: paths.receiptPath, journal_path: paths.journalPath, lock_path: claim.lockPath, reason: claim.reason, mutations_performed: false }; }
