@@ -5,7 +5,15 @@ import crypto from "node:crypto";
 import { callbackReceiptMatches, normalizeReceiptText, receiptMatcherSource, receiptDomSource } from "./callback-receipt.mjs";
 import { createCallbackStateStore, assertSafeMutation, canInsertCallbackDraft, selectSafeSendButton, isBusyComposerControl, deliverCallback, nextDeliveryState, reconcileReceipt, isValidCallbackId } from "./callback-delivery.mjs";
 const message = process.argv.slice(2).join(" ");
-const isMain = Boolean(process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url)));
+function isMainModule() {
+  if (!process.argv[1]) return false;
+  try {
+    return fs.realpathSync.native(path.resolve(process.argv[1])) === fs.realpathSync.native(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+const isMain = isMainModule();
 if (isMain && !message.trim()) {
   console.error("WAKE_CHAT_FAILED: missing message");
   process.exit(2);
