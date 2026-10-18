@@ -8,6 +8,9 @@ import { spawnSync } from "node:child_process";
 const ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const CALLBACK = /^[A-Za-z0-9._-]{1,160}$/;
 const TRUSTED_TERMINAL_PROOFS = new Set(["committed-user-turn", "existing-user-message"]);
+const DELIVERY_TIMEOUT_MS = 130000;
+const DELIVERY_CLEANUP_CUSHION_MS = 10000;
+const DELIVERY_SPAWN_TIMEOUT_MS = DELIVERY_TIMEOUT_MS + DELIVERY_CLEANUP_CUSHION_MS;
 const usage = "Usage: register-chat.mjs (--event-path FILE | --recover) --control-root DIR --trusted-github-username USER[,USER...] [--deliver]";
 function fail(message) { throw new Error(message); }
 function args() {
@@ -76,7 +79,7 @@ function main() {
     if (result.state.delivery_state === "DELIVERED" && TRUSTED_TERMINAL_PROOFS.has(result.state.verified_by)) {
       console.log(`CHAT_ROUTE_ALREADY_DELIVERED callback_id=${result.callbackId} verified_by=${result.state.verified_by}`);
     } else {
-      const fingerprint = crypto.createHash("sha256").update(fs.readFileSync(result.file)).digest("hex"); const env = {...process.env, ORCHESTRATOR_CHAT_URL:normalized, CODEX_CALLBACK_ID:result.callbackId, CODEX_CALLBACK_STATE_FILE:result.file, CODEX_CALLBACK_EXPECTED_FINGERPRINT:fingerprint}; if (["DRAFT_INSERTED", "SUBMISSION_ATTEMPTED", "DELIVERED"].includes(result.state.delivery_state)) env.CODEX_RECONCILE_ONLY = "1"; else delete env.CODEX_RECONCILE_ONLY; const wake = path.join(import.meta.dirname, "wake-chat.mjs"); const r = spawnSync(process.execPath, [wake, result.state.message], {env, encoding:"utf8", timeout:30000, killSignal:"SIGTERM"}); const final = readJson(result.file); if (r.error?.code === "ETIMEDOUT") fail("Registration queued but delivery reconciliation timed out"); if (r.status !== 0 || final.delivery_state !== "DELIVERED" || !TRUSTED_TERMINAL_PROOFS.has(final.verified_by)) fail(`Registration queued but delivery was not verified${r.stderr ? `: ${r.stderr.trim()}` : ""}`); result.state = final;
+    const fingerprint = crypto.createHash("sha256").update(fs.readFileSync(result.file)).digest("hex"); const env = {...process.env, ORCHESTRATOR_CHAT_URL:normalized, CODEX_CALLBACK_ID:result.callbackId, CODEX_CALLBACK_STATE_FILE:result.file, CODEX_CALLBACK_EXPECTED_FINGERPRINT:fingerprint, CODEX_WAKE_DEADLINE_MS:String(DELIVERY_TIMEOUT_MS)}; if (["DRAFT_INSERTED", "SUBMISSION_ATTEMPTED", "DELIVERED"].includes(result.state.delivery_state)) env.CODEX_RECONCILE_ONLY = "1"; else delete env.CODEX_RECONCILE_ONLY; const wake = path.join(import.meta.dirname, "wake-chat.mjs"); const r = spawnSync(process.execPath, [wake, result.state.message], {env, encoding:"utf8", timeout:DELIVERY_SPAWN_TIMEOUT_MS, killSignal:"SIGTERM"}); const final = readJson(result.file); if (r.error?.code === "ETIMEDOUT") fail("Registration queued but delivery reconciliation timed out"); if (r.status !== 0 || final.delivery_state !== "DELIVERED" || !TRUSTED_TERMINAL_PROOFS.has(final.verified_by)) fail(`Registration queued but delivery was not verified${r.stderr ? `: ${r.stderr.trim()}` : ""}`); result.state = final;
     }
   }
   console.log(`CHAT_ROUTE_REGISTERED project=${result.project} route=${result.route} callback_id=${result.callbackId} delivery_state=${result.state.delivery_state}`);

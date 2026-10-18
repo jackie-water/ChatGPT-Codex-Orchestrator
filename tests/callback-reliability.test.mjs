@@ -2,11 +2,14 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import vm from "node:vm";
 import { callbackReceiptMatches, receiptDomSource } from "../runtime/scripts/callback-receipt.mjs";
-import { validateCallbackState, assertSafeMutation, nextDeliveryState, sendGate, reconcileReceipt, createCallbackStateStore, deliverCallback, isValidCallbackId } from "../runtime/scripts/callback-delivery.mjs";
+import { validateCallbackState, assertSafeMutation, canInsertCallbackDraft, selectSafeSendButton, isBusyComposerControl, nextDeliveryState, sendGate, reconcileReceipt, createCallbackStateStore, deliverCallback, isValidCallbackId } from "../runtime/scripts/callback-delivery.mjs";
+import { wakeDestinationMatches } from "../runtime/scripts/wake-chat.mjs";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const extract = root => vm.runInNewContext(`(${receiptDomSource()})`, {}).call(null, root);
 class Element {
@@ -92,6 +95,62 @@ test("wake-chat receipt and send destination guards use normalized conversation 
   const accepts = href => normalizeConversationUrl(href) === normalizeConversationUrl(expected);
   for (const href of [expected, `${expected}?query=1`, `${expected}#hash`]) assert.equal(accepts(href), true);
   for (const href of ["https://chatgpt.com/c/other", "https://chat.openai.com/c/chat-27"]) assert.equal(accepts(href), false);
+  assert.equal(wakeDestinationMatches(`${expected}?query=1`, expected), true);
+  assert.equal(wakeDestinationMatches("https://chatgpt.com/c/other", expected), false);
+});
+
+test("send selection is scoped to a genuine composer control and busy detection is case insensitive", () => {
+  const destination = "https://chatgpt.com/c/chat-303";
+  const message = "[CODEX-AUTO callback_id=x] payload";
+  const candidates = [{testid:"send-feedback"}, {testid:"composer-send-button", aria:"Send"}];
+  assert.equal(selectSafeSendButton({destination, expectedDestination:destination, draft:message, message, buttons:candidates}), 1);
+  for (const button of [{testid:"submit"}, {text:"Submit", type:"submit"}, {testid:"send-feedback", aria:"Send feedback"}, {testid:"send-feedback", aria:"Send"}]) {
+    assert.equal(selectSafeSendButton({destination, expectedDestination:destination, draft:message, message, buttons:[button]}), -1);
+  }
+  for (const button of [{aria:"STOP GENERATING"}, {title:"Stop-Control"}, {text:"cancel GENERATION"}, {testid:"stop-control"}]) {
+    assert.equal(isBusyComposerControl(button), true);
+    assert.equal(selectSafeSendButton({destination, expectedDestination:destination, draft:message, message, buttons:[button, {aria:"Send"}]}), -1);
+  }
+  assert.equal(selectSafeSendButton({destination, expectedDestination:destination, draft:message, message, buttons:[{aria:"Stop generating", disabled:true}, {aria:"Send", disabled:false}]}), 1);
+  assert.equal(selectSafeSendButton({destination, expectedDestination:destination, draft:message, message, buttons:[{aria:"Cancel generation", disabled:true}, {testid:"composer-send-button"}]}), 1);
+  assert.deepEqual(canInsertCallbackDraft({destination, expectedDestination:destination, draft:"", message, busy:true}), {ok:false, reason:"chat-busy-generating"});
+  assert.equal(canInsertCallbackDraft({destination, expectedDestination:destination, draft:"unrelated", message, busy:false}).ok, false);
+});
+
+test("browser-serialized send selector stays self-contained and fail-closed", () => {
+  const browserSelect = vm.runInNewContext(`(${selectSafeSendButton.toString()})`, {});
+  const destination = "https://chatgpt.com/c/chat-303";
+  const message = "[CODEX-AUTO callback_id=x] payload";
+  const run = (buttons, overrides = {}) => browserSelect({
+    destination,
+    expectedDestination: destination,
+    draft: message,
+    message,
+    buttons,
+    ...overrides
+  });
+
+  assert.equal(run([{testid:"send-feedback"}, {aria:"Send"}]), 1);
+  assert.equal(run([{aria:"STOP GENERATING"}, {aria:"Send"}]), -1);
+  assert.equal(run([{aria:"STOP GENERATING", disabled:true}, {aria:"Send"}]), 1);
+  assert.equal(run([{aria:"Send", disabled:true}]), -1);
+  assert.equal(run([{aria:"Send"}], {destination:"https://chatgpt.com/c/other"}), -1);
+  assert.equal(run([{aria:"Send"}], {draft:"changed"}), -1);
+});
+
+test("wake-chat identifies its real CLI path when spaces and Unicode are present", async () => {
+  const sourceDir = path.dirname(fileURLToPath(new URL("../runtime/scripts/wake-chat.mjs", import.meta.url)));
+  const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "wake chat fixture é-λ-"));
+  for (const name of ["wake-chat.mjs", "callback-delivery.mjs", "callback-receipt.mjs"]) {
+    fs.copyFileSync(path.join(sourceDir, name), path.join(fixtureDir, name));
+  }
+  const fixture = path.join(fixtureDir, "wake-chat.mjs");
+  const result = spawnSync(process.execPath, [fixture], {encoding:"utf8"});
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /WAKE_CHAT_FAILED: missing message/);
+
+  const imported = await import(`${pathToFileURL(fixture).href}?library-test=1`);
+  assert.equal(typeof imported.wakeDestinationMatches, "function");
 });
 
 test("shipped sender helpers keep mutation and send gates fail closed", () => {
@@ -126,6 +185,43 @@ test("production callback state store fails closed on disappearance, conflicts, 
   const make=(overrides={}, expectedFingerprint="")=>createCallbackStateStore({file,expected:record.chat_url,callbackId:"x",message:"payload",expectedFingerprint,fsModule:Object.assign(Object.create(fs),overrides),pathModule:path}); let store=make({},crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex")); const before=fs.readFileSync(file,"utf8"); fs.writeFileSync(file,before+" "); assert.throws(()=>store.read(),/fingerprint changed/); assert.throws(()=>store.update("DRAFT_INSERTED"),/fingerprint changed/); assert.equal(fs.readFileSync(file,"utf8"),before+" "); write();
   for (const method of ["writeFileSync","renameSync"]) { store=make({[method](){throw new Error(method);}}); assert.throws(()=>store.update("DRAFT_INSERTED"),new RegExp(method)); assert.deepEqual(JSON.parse(fs.readFileSync(file)),record); }
   fs.unlinkSync(file); assert.throws(()=>store.read(),/Callback state disappeared/); assert.throws(()=>store.update("DRAFT_INSERTED"),/Callback state disappeared/); assert.equal(fs.existsSync(file),false); write(); const fp=make().update("DRAFT_INSERTED"); assert.equal(fp,crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex"));
+});
+
+test("a missing Send click remains retry-eligible", async () => {
+  let state="PENDING", updates=[];
+  const result=await deliverCallback({read:()=>({delivery_state:state}),hasReceipt:async()=>false,update:next=>{state=next;updates.push(next);},beforeSend:async()=>{},send:async()=>({clicked:false,reason:"send-control-not-ready"})});
+  assert.deepEqual(result,{action:"not-sent",state:"PENDING",result:{clicked:false,reason:"send-control-not-ready"}});
+  assert.equal(state,"PENDING");
+  assert.deepEqual(updates,["DRAFT_INSERTED","PENDING"]);
+});
+
+test("a proven pre-click wake deadline returns the drafted callback to PENDING and permits retry", async () => {
+  let state="PENDING", sends=0, updates=[];
+  const deadline=Object.assign(new Error("deadline while waiting for Send"), {code:"WAKE_DEADLINE_EXCEEDED", preClickProven:true});
+  await assert.rejects(()=>deliverCallback({read:()=>({delivery_state:state}),hasReceipt:async()=>false,update:next=>{state=next;updates.push(next);},beforeSend:async()=>{},send:async()=>{sends++;throw deadline;}}), /deadline/);
+  assert.equal(state,"PENDING");
+  const retry=await deliverCallback({read:()=>({delivery_state:state}),hasReceipt:async()=>false,update:next=>{state=next;updates.push(next);},beforeSend:async()=>{},send:async()=>{sends++;return {clicked:true};}});
+  assert.equal(retry.action,"sent");
+  assert.equal(sends,2);
+  assert.deepEqual(updates,["DRAFT_INSERTED","PENDING","DRAFT_INSERTED","SUBMISSION_ATTEMPTED"]);
+});
+
+test("an ambiguous Runtime.evaluate deadline remains SUBMISSION_ATTEMPTED and never resends", async () => {
+  let state="PENDING", sends=0;
+  const ambiguous=Object.assign(new Error("Runtime.evaluate timed out"), {code:"WAKE_DEADLINE_EXCEEDED", submissionAttempted:true});
+  await assert.rejects(()=>deliverCallback({read:()=>({delivery_state:state}),hasReceipt:async()=>false,update:next=>{state=next;},beforeSend:async()=>{},send:async()=>{sends++;throw ambiguous;}}), /timed out/);
+  assert.equal(state,"SUBMISSION_ATTEMPTED");
+  assert.equal((await deliverCallback({read:()=>({delivery_state:state}),hasReceipt:async()=>false,update:()=>{},send:async()=>{sends++;}})).action,"reconcile");
+  assert.equal(sends,1);
+});
+
+test("an ambiguous submit becomes reconcile-only and is never resent", async () => {
+  let state="PENDING", sends=0;
+  const ambiguous=Object.assign(new Error("CDP lost after click"),{code:"SUBMISSION_AMBIGUOUS",submissionAttempted:true});
+  await assert.rejects(()=>deliverCallback({read:()=>({delivery_state:state}),hasReceipt:async()=>false,update:next=>{state=next;},beforeSend:async()=>{},send:async()=>{sends++;throw ambiguous;}}));
+  assert.equal(state,"SUBMISSION_ATTEMPTED");
+  assert.equal((await deliverCallback({read:()=>({delivery_state:state}),hasReceipt:async()=>false,update:()=>{},send:async()=>{sends++;}})).action,"reconcile");
+  assert.equal(sends,1);
 });
 
 test("production delivery helper retries without blind resend and counts only irreversible submission", async () => {

@@ -6,6 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { assertSafeRuntimePath, prepareControlRuntimeFiles, writeControlRuntimeFiles } from "../src/lib/control-runtime-bundle.mjs";
+import { renderWorkflow } from "../src/lib/control-render.mjs";
 
 const sourceRoot = fs.realpathSync(fileURLToPath(new URL("../", import.meta.url)));
 function temporary(t) {
@@ -49,8 +50,8 @@ test("runtime payload contains only the explicit scripts and native dependency c
     fs.writeFileSync(target, "must not be packaged\n");
   }
   const files = prepareControlRuntimeFiles({ sourceRoot: fixtureSource, controlRoot });
-  assert.equal(files.length, 34);
-  assert.equal(files.filter(file => file.path.startsWith("src/lib/")).length, 5);
+  assert.equal(files.length, 35);
+  assert.equal(files.filter(file => file.path.startsWith("src/lib/")).length, 6);
   assert.ok(files.every(file => Buffer.isBuffer(file.content) && !file.content.includes("must not be packaged")));
   assert.deepEqual(fs.readdirSync(controlRoot), []);
   writeControlRuntimeFiles({ controlRoot, files });
@@ -145,7 +146,7 @@ test("generated native entrypoints reach argument rejection and review/merge rem
     assert.match(result.stderr, message, name);
     assert.doesNotMatch(result.stderr, /ERR_MODULE_NOT_FOUND|Cannot find module/, name);
   }
-  for (const [name, message] of [["macos-code-review.mjs", /refusing false PASS/], ["macos-merge-approved.mjs", /refusing merge/]]) {
+  for (const [name, message] of [["macos-code-review.mjs", /requires a validated event path/], ["macos-merge-approved.mjs", /refusing merge/]]) {
     const result = spawnSync(process.execPath, [path.join(controlRoot, "scripts", name)], {
       cwd: home, env: childEnvironment(home), encoding: "utf8", timeout: 10000
     });
@@ -153,6 +154,15 @@ test("generated native entrypoints reach argument rejection and review/merge rem
     assert.match(result.stderr, message);
   }
   assert.deepEqual(fs.readdirSync(home), []);
+});
+
+test("macOS workflow scopes write permission only to Code Review and persists checkout credentials", () => {
+  const template = fs.readFileSync(path.join(sourceRoot, "templates", "control-repo", "orchestrator.macos.yml.template"), "utf8");
+  const workflow = renderWorkflow(template, { runnerLabel: "fixture", platform: "darwin", arch: "arm64", trustedGithubUsername: "trusted" });
+  assert.match(workflow, /permissions:\n  contents: read\n  issues: read/);
+  assert.match(workflow, /code-review:[\s\S]*?permissions:\n      contents: write\n      issues: read[\s\S]*?persist-credentials: true/);
+  const job = name => workflow.match(new RegExp(`\\n  ${name}:[\\s\\S]*?(?=\\n  [^ \\n][^:]*:|$)`))?.[0] || "";
+  for (const name of ["register-chat", "run-codex", "merge-approved"]) assert.doesNotMatch(job(name), /contents: write|persist-credentials: true/);
 });
 
 test("missing or unbundled source dependencies reject before any Control writes", t => {

@@ -14,6 +14,7 @@ import { renderProjectInstructions } from "./lib/project-instructions.mjs";
 import { ensureInstallerChatRegistration, normalizeChatUrl } from "./lib/chat-registration.mjs";
 import { pendingCallbackCount, doctorHealth, repairHealth } from "./lib/runtime-health.mjs";
 import { macosPrerequisites, migrationPreflight, macosRuntimeAction, prepareMigrationIntent } from "./lib/macos-platform.mjs";
+import { macosNativeHelperPreflight, prepareMacosNativeHelper, verifyMacosNativeCapability } from "./lib/macos-native-helper-install.mjs";
 import {
   sandboxSmokeStatus,
   startSandboxSmoke,
@@ -109,7 +110,7 @@ function dryRun() {
         node:node.ok,
         github_cli:gh.ok,
         codex:codex.ok,
-        ...(mac?{node_22_or_newer:mac.node,session_auth:mac.session_auth}: {})
+        ...(mac?{node_22_or_newer:mac.node,session_auth:mac.session_auth,native_helper_preflight:mac.native_helper}: {})
       },
       action:"Install any supported missing prerequisites automatically."
     },
@@ -168,6 +169,7 @@ function dryRun() {
     dry_run:true,
     mutations_performed:false,
     migration_preflight:process.platform==="darwin"?migrationPreflight({state}):null,
+    macos_native_helper:process.platform==="darwin"?macosNativeHelperPreflight({state,installationId:state.installation_id}):null,
     plan
   });
 }
@@ -259,7 +261,7 @@ function runSetup() {
   if(process.platform==="darwin") {
     const prerequisites=macosPrerequisites();
     const migration=migrationPreflight({state});
-    const ready=prerequisites.node&&prerequisites.git&&prerequisites.gh&&prerequisites.codex&&prerequisites.session_auth&&migration.status==="READY";
+    const ready=prerequisites.node&&prerequisites.git&&prerequisites.gh&&prerequisites.codex&&prerequisites.session_auth&&prerequisites.native_helper?.status==="PASS"&&migration.status==="READY";
     if(!ready) return emit({status:"ERROR",error_id:"MACOS-PREREQUISITE-OR-MIGRATION",recoverable:true,preferred_language:lang,mutations_performed:false,message:"macOS preflight found a prerequisite or migration conflict; no installation mutation was performed.",prerequisites,migration},1);
     if(!state.macos_setup_approved) return emit(action(state,"macos_setup_approval","setup.macos.approval",{mutations_performed:false,details:"Approval is required before native setup can write instance state or a LaunchAgent."}));
     if(!prerequisites.github_auth) return emit(action(state,"github_cli_authorization","setup.github_cli.connect",{helper_command:"node src/cli.mjs github-login --json",mutations_performed:false}));
@@ -288,6 +290,17 @@ function runSetup() {
       catch(error){ state.last_error={error_id:"SETUP-011",message:String(error.message||error),at:new Date().toISOString()}; saveState(state); return emit({status:"ERROR",error_id:"SETUP-011",recoverable:true,preferred_language:lang,message:"Native macOS Control/Sandbox preparation failed; no runner or service was started.",details:String(error.message||error)},1); }
     }
     if(state.github_plugin_authorization_verified!==true || state.github_plugin_authorization_installation_id!==state.installation_id || state.github_plugin_authorization_control_repository!==state.control_repository || state.github_plugin_authorization_sandbox_repository!==state.sandbox_repository || state.github_plugin_authorization_chat_url!==state.reviewer_chat_url) return emit(action(state,"generated_repo_authorization","setup.generated_repo.connect",{repositories:[state.control_repository,state.sandbox_repository],chat_url:state.reviewer_chat_url,verification_requirement:"The controlling Chat must confirm access to these exact generated private repositories and record this exact current Chat URL; local gh status and boolean answers are not proof.",mutations_performed:true}));
+    if(state.macos_native_installation_id && state.macos_native_installation_id!==state.installation_id) return emit({status:"ERROR",error_id:"MACOS-NATIVE-INSTALLATION-MISMATCH",recoverable:false,preferred_language:lang,message:"Native helper capability belongs to a different installation; target and Runner remain disabled.",mutations_performed:false},1);
+    let nativePrepared;
+    try { nativePrepared=prepareMacosNativeHelper({state,home:os.homedir(),approved:true}); }
+    catch(error) {
+      return emit({status:"ERROR",error_id:"MACOS-NATIVE-PREPARE-IO",recoverable:true,preferred_language:lang,message:"macOS native helper preparation failed closed; pending evidence was preserved and the target remains disabled.",details:String(error.message||error),recovery_status:"MANUAL_RECOVERY_REQUIRED",partial_mutation:true,mutations_performed:"UNKNOWN"},1);
+    }
+    if(nativePrepared.status!=="PASS") return emit({status:nativePrepared.status==="NEEDS_USER_ACTION"?"NEEDS_USER_ACTION":"ERROR",error_id:nativePrepared.error_id||"MACOS-NATIVE-PREPARE",recoverable:nativePrepared.status!=="ERROR",preferred_language:lang,message:"macOS native helper capability is unavailable; no native identity was enabled and the target remains disabled.",details:nativePrepared.details||nativePrepared.reason||null,capability:nativePrepared,mutations_performed:nativePrepared.mutations_performed??"UNKNOWN"},1);
+    state.macos_native_installation_id=state.installation_id;
+    state.instance_root=nativePrepared.instance_path;
+    state.macos_native_capability={status:"VERIFIED",instance_path:nativePrepared.instance_path,helper_path:nativePrepared.helper_path,receipt_path:nativePrepared.receipt_path,source_review_commit:nativePrepared.source_review_commit,source_sha256:nativePrepared.source_sha256,binary_sha256:nativePrepared.binary_sha256};
+    saveState(state);
     const registration=ensureInstallerChatRegistration(state,{projectKey:state.sandbox_project_key});
     if(registration.status!=="READY"){ state.sandbox_chat_registration_issue=registration.issue?.url||null; saveState(state); return emit({status:"NEEDS_USER_ACTION",action_id:"sandbox_chat_registration",preferred_language:lang,message:"Register the explicit Sandbox callback in the originating Chat before CODEX-RUN.",registration_issue:registration.issue?.url||null,mutations_performed:true}); }
     const registered=registration.record;
@@ -785,10 +798,12 @@ function githubLogin() {
 function runtimeChecks(state) {
   if(process.platform==="darwin") {
     const result=macosRuntimeAction("status",{state});
+    const native=verifyMacosNativeCapability({state});
     return {control_repository:Boolean(state.control_repository),control_clone:Boolean(state.control_clone_path&&fs.existsSync(state.control_clone_path)),
       project_clone:Boolean(state.project_clone_path&&fs.existsSync(state.project_clone_path)),runner_configured:Boolean(state.runner_path),
       runner_running:Boolean(result.launchctl_state==="loaded"&&result.launchctl_checked===true&&result.preflight?.inventory?.runner?.ownership==="OTHER_OR_CURRENT"),reviewer_browser:false,
-      codex_authenticated:macosPrerequisites().session_auth,pending_callbacks:pendingCallbackCount(state),migration:result.status};
+      codex_authenticated:macosPrerequisites().session_auth,pending_callbacks:pendingCallbackCount(state),migration:result.status,
+      macos_native_helper:native.status==="PASS",macos_native_helper_status:native.status};
   }
   const pendingCallbacks=pendingCallbackCount(state);
 
@@ -839,7 +854,7 @@ function doctor() {
     reviewer_chat_configured:Boolean(state.reviewer_chat_url),
     ...runtimeChecks(state)
   };
-  if(process.platform==="darwin") checks.migration_preflight=migrationPreflight({state});
+  if(process.platform==="darwin") { checks.migration_preflight=migrationPreflight({state}); checks.macos_native_helper=verifyMacosNativeCapability({state}); }
 
   let preflight=true;
   let preflightDetails=null;

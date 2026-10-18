@@ -13,6 +13,7 @@ import {
   safeKey,
   canonicalInstallationId
 } from "./control-render.mjs";
+import { trustedCodeReviewCodexExecutable } from "./macos-code-review-runtime.mjs";
 
 function run(command,args,{cwd,allowFailure=false}={}){
   const r=spawnSafeSync(command,args,{cwd,encoding:"utf8"});
@@ -214,13 +215,24 @@ function requireRuntimePlatform(platform,arch){
   throw new Error("Instance platform or architecture is missing or unsupported for runtime refresh");
 }
 
-function writeInstanceMetadata(controlPath,{instanceId,trustedGithubUsername,launchAgentLabel,runnerLabel,controlRepository,platform=process.platform,arch=process.arch}){
+function pinCodexExecutable(platform,execute=run){
+  if(platform!=="darwin") return null;
+  const found=execute("which",["codex"],{allowFailure:true}).stdout.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
+  if(found.length!==1||!path.isAbsolute(found[0])) throw new Error("Installed macOS Codex executable could not be pinned");
+  try {
+    const pinned=fs.realpathSync(found[0]);
+    return trustedCodeReviewCodexExecutable(pinned);
+  } catch { throw new Error("Installed macOS Codex executable could not be pinned"); }
+}
+
+function writeInstanceMetadata(controlPath,{instanceId,trustedGithubUsername,launchAgentLabel,runnerLabel,controlRepository,codexExecutable,platform=process.platform,arch=process.arch}){
   requireRuntimePlatform(platform,arch);
   if(!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(instanceId)) throw new Error("Invalid instance id");
   if(!/^[A-Za-z0-9-]+$/.test(String(trustedGithubUsername||""))) throw new Error("Invalid trusted GitHub login");
   if(!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(String(runnerLabel||""))) throw new Error("Invalid runner identity");
   if(!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(String(controlRepository||""))) throw new Error("Invalid Control repository identity");
   if(launchAgentLabel!==undefined&&launchAgentLabel!==null&&!/^com\.chatgpt\.codex\.[A-Za-z0-9-]+$/.test(launchAgentLabel)) throw new Error("Invalid LaunchAgent label");
+  if(platform==="darwin"&&(!codexExecutable||!path.isAbsolute(codexExecutable))) throw new Error("Pinned macOS Codex executable is missing");
   assertSafeRuntimePath(path.join(controlPath,"instance.json"),{allowMissing:true,type:"file"});
   fs.writeFileSync(path.join(controlPath,"instance.json"),JSON.stringify({
     schema_version:1,
@@ -230,7 +242,8 @@ function writeInstanceMetadata(controlPath,{instanceId,trustedGithubUsername,lau
     runner_label:runnerLabel,
     control_repository:controlRepository,
     trusted_github_username:trustedGithubUsername,
-    launch_agent_label:launchAgentLabel||null
+    launch_agent_label:launchAgentLabel||null,
+    ...(platform==="darwin"?{codex_executable:codexExecutable}: {})
   },null,2)+"\n");
 }
 
@@ -245,11 +258,48 @@ function runtimeRefreshIdentity(state){
   const metadata=JSON.parse(fs.readFileSync(metadataPath,"utf8"));
   if(metadata.schema_version!==1||metadata.instance_id!==state.instance_id||metadata.platform!==platform||metadata.arch!==arch||
     metadata.trusted_github_username!==state.github_login||metadata.runner_label!==state.runner_label||metadata.control_repository!==state.control_repository) throw new Error("Persisted Control instance identity does not match installation state for runtime refresh");
-  if(platform==="darwin"&&(!/^com\.chatgpt\.codex\.[A-Za-z0-9-]+$/.test(String(state.launch_agent_label||""))||metadata.launch_agent_label!==state.launch_agent_label)) throw new Error("Existing macOS LaunchAgent identity is incomplete or mismatched for runtime refresh");
+  if(platform==="darwin"&&(!/^com\.chatgpt\.codex\.[A-Za-z0-9-]+$/.test(String(state.launch_agent_label||""))||metadata.launch_agent_label!==state.launch_agent_label||typeof metadata.codex_executable!=="string"||!path.isAbsolute(metadata.codex_executable))) throw new Error("Existing macOS runtime identity is incomplete or mismatched for runtime refresh");
   if(platform==="win32"&&(metadata.launch_agent_label!==null||state.launch_agent_label!=null)) throw new Error("Persisted Windows instance has an ambiguous LaunchAgent identity");
   if(state.environment?.platform&&state.environment.platform!==platform) throw new Error("Persisted instance platform conflicts with installation environment");
   if(state.environment?.arch&&state.environment.arch!==arch) throw new Error("Persisted instance architecture conflicts with installation environment");
-  return {platform,arch,runnerLabel:state.runner_label,trustedGithubUsername:metadata.trusted_github_username};
+  return {platform,arch,runnerLabel:state.runner_label,trustedGithubUsername:metadata.trusted_github_username,codexExecutable:metadata.codex_executable||null};
+}
+
+function upgradeRuntimeIdentity({state,instanceId,commandRunner=run}){
+  const platform=state.instance_platform;
+  const arch=state.instance_arch;
+  requireRuntimePlatform(platform,arch);
+  if(platform!==process.platform||arch!==process.arch) throw new Error("Existing instance platform or architecture does not match this host");
+  if(!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(instanceId)||
+    (state.instance_id!==undefined&&state.instance_id!==instanceId)||
+    !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(String(state.runner_label||""))||
+    !/^[A-Za-z0-9-]+$/.test(String(state.github_login||""))||
+    !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(String(state.control_repository||""))||
+    !state.installation_id||state.runner_owner!==state.installation_id) throw new Error("Existing instance or trusted owner identity is incomplete for upgrade");
+  if(state.environment?.platform&&state.environment.platform!==platform) throw new Error("Persisted instance platform conflicts with installation environment");
+  if(state.environment?.arch&&state.environment.arch!==arch) throw new Error("Persisted instance architecture conflicts with installation environment");
+
+  assertSafeRuntimePath(state.control_clone_path,{type:"directory"});
+  assertSafeRuntimePath(path.join(state.control_clone_path,".git"),{type:"directory"});
+  const metadataPath=path.join(state.control_clone_path,"instance.json");
+  assertSafeRuntimePath(metadataPath,{type:"file"});
+  const metadata=JSON.parse(fs.readFileSync(metadataPath,"utf8"));
+  if(metadata.schema_version!==1||metadata.instance_id!==instanceId||metadata.platform!==platform||metadata.arch!==arch||
+    metadata.trusted_github_username!==state.github_login||metadata.runner_label!==state.runner_label||metadata.control_repository!==state.control_repository){
+    throw new Error("Persisted Control instance identity does not match installation state for upgrade");
+  }
+  if(platform==="win32"&&(metadata.launch_agent_label!==null||state.launch_agent_label!=null)) throw new Error("Persisted Windows instance has an ambiguous LaunchAgent identity");
+  if(platform==="darwin"){
+    if(!/^com\.chatgpt\.codex\.[A-Za-z0-9-]+$/.test(String(state.launch_agent_label||""))||metadata.launch_agent_label!==state.launch_agent_label) throw new Error("Existing macOS LaunchAgent identity is incomplete or mismatched for upgrade");
+    if(Object.hasOwn(metadata,"codex_executable")){
+      if(typeof metadata.codex_executable!=="string"||!path.isAbsolute(metadata.codex_executable)) throw new Error("Existing macOS Codex executable pin is invalid");
+      try { metadata.codex_executable=trustedCodeReviewCodexExecutable(metadata.codex_executable); }
+      catch { throw new Error("Existing macOS Codex executable pin is unsafe"); }
+    } else {
+      metadata.codex_executable=pinCodexExecutable(platform,commandRunner);
+    }
+  }
+  return {platform,arch,runnerLabel:state.runner_label,trustedGithubUsername:metadata.trusted_github_username,codexExecutable:metadata.codex_executable||null};
 }
 
 function prepareRuntimeWorkflow({sourceRoot,controlPath,platform,arch,runnerLabel,trustedGithubUsername}){
@@ -312,7 +362,7 @@ export function removeLegacyDefaultReviewRoutes(registryPath){
   return {changed};
 }
 
-export function upgradeControlEnvironment({state,sourceRoot=process.cwd(),home=os.homedir()}){
+export function upgradeControlEnvironment({state,sourceRoot=process.cwd(),home=os.homedir(),commandRunner=run}){
   if(!state?.control_clone_path||!fs.existsSync(path.join(state.control_clone_path,".git"))){
     throw new Error("Existing control clone is unavailable for upgrade");
   }
@@ -320,6 +370,8 @@ export function upgradeControlEnvironment({state,sourceRoot=process.cwd(),home=o
     throw new Error("Existing installation state is incomplete for upgrade");
   }
 
+  const instanceId=installationShortId(state.installation_id)||path.basename(state.runner_path);
+  const identity=upgradeRuntimeIdentity({state,instanceId,commandRunner});
   const runtimeFiles=prepareControlRuntimeFiles({sourceRoot,controlRoot:state.control_clone_path});
   const workflow=prepareRuntimeWorkflow({sourceRoot,controlPath:state.control_clone_path,platform:process.platform,arch:process.arch,runnerLabel:state.runner_label,trustedGithubUsername:state.github_login});
   const stopped=stopRetiredOriginRouter(state.control_clone_path);
@@ -333,8 +385,7 @@ export function upgradeControlEnvironment({state,sourceRoot=process.cwd(),home=o
   fs.mkdirSync(path.dirname(workflow.workflowPath),{recursive:true});
   fs.writeFileSync(workflow.workflowPath,workflow.content);
 
-  const instanceId=installationShortId(state.installation_id)||path.basename(state.runner_path);
-  writeInstanceMetadata(state.control_clone_path,{instanceId,trustedGithubUsername:state.github_login,launchAgentLabel:state.launch_agent_label,runnerLabel:state.runner_label,controlRepository:state.control_repository});
+  writeInstanceMetadata(state.control_clone_path,{instanceId,trustedGithubUsername:state.github_login,launchAgentLabel:state.launch_agent_label,runnerLabel:state.runner_label,controlRepository:state.control_repository,codexExecutable:identity.codexExecutable});
 
   const configRoot=path.join(home,".chatgpt-codex-orchestrator");
   const instanceRoot=path.join(configRoot,"instances",instanceId);
@@ -455,7 +506,7 @@ export function prepareControlEnvironment({
   ensureClone(controlRepository,paths.control);
   const runtimeFiles=prepareControlRuntimeFiles({sourceRoot,controlRoot:paths.control});
   const workflow=prepareRuntimeWorkflow({sourceRoot,controlPath:paths.control,platform:process.platform,arch:process.arch,runnerLabel:paths.runnerLabel,trustedGithubUsername:login});
-  writeInstanceMetadata(paths.control,{instanceId:short,trustedGithubUsername:login,launchAgentLabel:process.platform==="darwin"?`com.chatgpt.codex.${short.toLowerCase()}`:null,runnerLabel:paths.runnerLabel,controlRepository});
+  writeInstanceMetadata(paths.control,{instanceId:short,trustedGithubUsername:login,launchAgentLabel:process.platform==="darwin"?`com.chatgpt.codex.${short.toLowerCase()}`:null,runnerLabel:paths.runnerLabel,controlRepository,codexExecutable:pinCodexExecutable(process.platform)});
   writeControlRuntimeFiles({controlRoot:paths.control,files:runtimeFiles});
   fs.mkdirSync(path.dirname(workflow.workflowPath),{recursive:true});
   fs.writeFileSync(workflow.workflowPath,workflow.content);
