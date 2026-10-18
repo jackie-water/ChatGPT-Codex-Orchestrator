@@ -1,9 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { validateReviewEvent, executeMacosCodeReview, callbackRecord, ensurePendingCallback, pendingWakesPath, publicationIntentPath, writePrivate, writeCheckpointEvidence, privateTree, git, readJson } from "../../src/lib/macos-code-review-runtime.mjs";
+import { validateReviewEvent, executeMacosCodeReview, callbackRecord, ensurePendingCallback, pendingWakesPath, publicationIntentPath, publicationIntentRecord, validatePublicationIntent, writePrivate, writeCheckpointEvidence, privateTree, privateFile, git } from "../../src/lib/macos-code-review-runtime.mjs";
 
 if (process.argv.length === 2) { console.error("Native macOS code-review adapter requires a validated event path"); process.exit(78); }
 function args() { const out = {}; for (let i = 2; i < process.argv.length; i++) { const key = process.argv[i]; const value = process.argv[++i]; if (!key?.startsWith("--") || !value) throw Error("Invalid arguments"); out[key.slice(2).replaceAll("-", "_")] = value; } for (const key of ["event_path", "control_root", "control_repository", "trusted_github_username"]) if (!out[key]) throw Error(`Missing --${key.replaceAll("_", "-")}`); return out; }
@@ -29,22 +28,21 @@ try {
   const v = validateReviewEvent({ event: JSON.parse(fs.readFileSync(a.event_path, "utf8")), controlRoot: a.control_root, controlRepository: a.control_repository, trustedGithubUsername: a.trusted_github_username, home: process.env.HOME });
   const intent = publicationIntentPath(v, v.req.reviewed_commit);
   const hasIntent = fs.existsSync(intent);
-  if (hasIntent) {
-    const journal = readJson(intent);
-    if (journal.reviewed_commit !== v.req.reviewed_commit.toLowerCase() || journal.source_branch !== v.req.source_branch || journal.project !== v.req.project) throw Error("STALE_PUBLICATION_INTENT");
-  }
-  const review = await executeMacosCodeReview(v, { resumeOnly: hasIntent });
+  const journal = hasIntent ? validatePublicationIntent(v, JSON.parse(privateFile(intent).toString("utf8"))) : null;
+  const review = await executeMacosCodeReview(v, { resumeOnly: hasIntent, publicationIntent: journal });
   if (review.status === "ALREADY_EXISTS") {
+    if (journal) writePrivate(intent, { ...journal, state: "PUBLISHED", checkpoint_commit: review.checkpoint }, false);
     const record = callbackRecord(v, { status: review.priorStatus }, review.checkpoint);
     privateTree(pendingWakesPath(v)); ensurePendingCallback(path.join(pendingWakesPath(v), `${record.callback_id}.json`), record);
     console.log(`CODE_REVIEW_ALREADY_EXISTS checkpoint=${review.checkpoint}`);
   } else {
     privateTree(pendingWakesPath(v));
-    writePrivate(intent, { reviewed_commit: v.req.reviewed_commit.toLowerCase(), source_branch: v.req.source_branch, project: v.req.project, checkpoint_before: review.checkpoint, report_sha256: crypto.createHash("sha256").update(review.report).digest("hex"), state: "PUBLISHING" }, true);
+    const record = journal || publicationIntentRecord(v, review);
+    if (!journal) writePrivate(intent, record, true);
     const checkpoint = publish(v, review);
-    writePrivate(intent, { reviewed_commit: v.req.reviewed_commit.toLowerCase(), source_branch: v.req.source_branch, project: v.req.project, checkpoint_before: review.checkpoint, checkpoint_commit: checkpoint, report_sha256: crypto.createHash("sha256").update(review.report).digest("hex"), state: "PUBLISHED" });
-    const record = callbackRecord(v, review, checkpoint);
-    ensurePendingCallback(path.join(pendingWakesPath(v), `${record.callback_id}.json`), record);
+    writePrivate(intent, { ...record, checkpoint_commit: checkpoint, state: "PUBLISHED" }, false);
+    const callback = callbackRecord(v, review, checkpoint);
+    ensurePendingCallback(path.join(pendingWakesPath(v), `${callback.callback_id}.json`), callback);
     console.log(`CODE_REVIEW_PUBLISHED status=${review.status} checkpoint=${checkpoint}`);
     if (review.status === "CODE_REVIEW_FAILED") process.exitCode = 1;
   }

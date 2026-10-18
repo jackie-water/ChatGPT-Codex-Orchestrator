@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { callbackRecord, codexReviewArgv, ensurePendingCallback, parseReviewEvidence, pendingWakesPath, publicationIntentPath, redactReviewOutput, validateReviewEvent, writeCheckpointEvidence } from "../src/lib/macos-code-review-runtime.mjs";
+import { callbackRecord, codexReviewArgv, ensurePendingCallback, parseReviewEvidence, pendingWakesPath, publicationIntentPath, publicationIntentRecord, redactReviewOutput, reportSha256, validatePublicationIntent, validateReviewEvent, writeCheckpointEvidence, writePrivate } from "../src/lib/macos-code-review-runtime.mjs";
 
 const sha = "9203170f74b57dade7702fb0530e994ecf531c17";
 test("native Codex child argv keeps read-only isolation and disables repository instructions", () => {
@@ -168,4 +168,41 @@ test("publication intent is outside the callback-only pending-wakes directory", 
   fs.mkdirSync(pendingWakesPath(v), { recursive: true, mode: 0o700 });
   ensurePendingCallback(path.join(pendingWakesPath(v), `${callback.callback_id}.json`), callback);
   assert.deepEqual(fs.readdirSync(pendingWakesPath(v)), [`${callback.callback_id}.json`]);
+});
+
+test("crash after exclusive PUBLISHING intent preserves the exact report for one resume", t => {
+  const f = fixture(); t.after(() => fs.rmSync(f.root, { recursive: true, force: true }));
+  const v = validateReviewEvent({ event: f.event({}), controlRoot: f.control, controlRepository: "trusted/control", trustedGithubUsername: "trusted", home: f.home });
+  const review = { status: "CODE_REVIEW_COMPLETE", checkpoint: "a".repeat(40), report: "canonical redacted report\n" };
+  const intent = publicationIntentPath(v, sha), journal = publicationIntentRecord(v, review);
+  writePrivate(intent, journal, true);
+  const recovered = JSON.parse(fs.readFileSync(intent, "utf8"));
+  assert.equal(recovered.state, "PUBLISHING");
+  assert.equal(recovered.report, review.report);
+  assert.equal(recovered.report_sha256, reportSha256(review.report));
+  assert.deepEqual(validatePublicationIntent(v, recovered), recovered);
+});
+
+test("crash after remote push reconciles one callback without changing the persisted report", t => {
+  const f = fixture(); t.after(() => fs.rmSync(f.root, { recursive: true, force: true }));
+  const v = validateReviewEvent({ event: f.event({}), controlRoot: f.control, controlRepository: "trusted/control", trustedGithubUsername: "trusted", home: f.home });
+  const checkpoint = "b".repeat(40), review = { status: "CODE_REVIEW_COMPLETE", checkpoint, report: "published canonical report\n" };
+  const intent = publicationIntentPath(v, sha), journal = { ...publicationIntentRecord(v, review), state: "PUBLISHED", checkpoint_commit: checkpoint };
+  writePrivate(intent, journal, true);
+  const callback = callbackRecord(v, review, checkpoint), file = path.join(pendingWakesPath(v), `${callback.callback_id}.json`);
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  ensurePendingCallback(file, callback);
+  ensurePendingCallback(file, callback);
+  assert.deepEqual(JSON.parse(fs.readFileSync(intent, "utf8")), journal);
+  assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).delivery_state, "PENDING");
+});
+
+test("same SHA resume is idempotent and tampered or drifted journals fail closed", t => {
+  const f = fixture(); t.after(() => fs.rmSync(f.root, { recursive: true, force: true }));
+  const v = validateReviewEvent({ event: f.event({}), controlRoot: f.control, controlRepository: "trusted/control", trustedGithubUsername: "trusted", home: f.home });
+  const journal = publicationIntentRecord(v, { status: "CODE_REVIEW_FAILED", checkpoint: "c".repeat(40), report: "failure report\n" });
+  assert.equal(validatePublicationIntent(v, journal).report_sha256, validatePublicationIntent(v, structuredClone(journal)).report_sha256);
+  assert.throws(() => validatePublicationIntent(v, { ...journal, report: "tampered\n" }), /INVALID_PUBLICATION_INTENT/);
+  assert.equal(validatePublicationIntent(v, { ...journal, checkpoint_before: "d".repeat(40) }).checkpoint_before, "d".repeat(40));
+  assert.equal(journal.review_status, "CODE_REVIEW_FAILED");
 });

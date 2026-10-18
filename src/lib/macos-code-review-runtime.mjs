@@ -9,6 +9,7 @@ const ROUTE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const BRANCH = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
 const CALLBACK = /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/;
 const CHAT = /^https:\/\/chatgpt\.com\/(?:c\/[A-Za-z0-9_-]+|g\/[A-Za-z0-9_-]+\/c\/[A-Za-z0-9_-]+)\/?$/;
+const REVIEW_STATUS = /^(?:CODE_REVIEW_COMPLETE|CODE_REVIEW_FAILED|CODE_REVIEW_SKIPPED_DOCS_ONLY)$/;
 const safeGitRef = value => typeof value === "string" && value.length <= 127 && value.length > 0 && !value.includes("..") && !value.includes("@{") && value.split("/").every(part => /^(?:[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9_-])?)$/.test(part) && !part.endsWith(".lock"));
 const fail = code => { throw Object.assign(new Error(code), { code }); };
 const readJson = file => JSON.parse(controlFile(file).toString("utf8").replace(/^\uFEFF/, ""));
@@ -54,8 +55,8 @@ function controlFile(file) {
 }
 
 function writePrivate(file, value, exclusive = false) {
-  privateTree(path.dirname(file));
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  privateTree(path.dirname(file));
   const temp = `${file}.${process.pid}.${crypto.randomBytes(5).toString("hex")}.tmp`;
   const fd = fs.openSync(temp, "wx", 0o600);
   try { fs.writeFileSync(fd, JSON.stringify(value, null, 2) + "\n"); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
@@ -63,6 +64,7 @@ function writePrivate(file, value, exclusive = false) {
     if (exclusive) { fs.linkSync(temp, file); fs.unlinkSync(temp); }
     else { if (fs.existsSync(file)) privateFile(file); fs.renameSync(temp, file); }
   } finally { if (fs.existsSync(temp)) fs.unlinkSync(temp); }
+  try { const dirfd = fs.openSync(path.dirname(file), fs.constants.O_RDONLY | (fs.constants.O_DIRECTORY || 0)); try { fs.fsyncSync(dirfd); } finally { fs.closeSync(dirfd); } } catch {}
 }
 function writeCheckpointEvidence(file, content) {
   const absolute = path.resolve(file), root = path.parse(absolute).root;
@@ -187,6 +189,34 @@ export function callbackRecord(v, review, checkpoint) {
   if (!CALLBACK.test(callback_id)) fail("INVALID_CALLBACK_ID");
   return { callback_id, chat_url: v.chat_url, delivery_state: "PENDING", review_status: review.status, reviewed_commit: v.req.reviewed_commit.toLowerCase(), source_branch: v.req.source_branch, checkpoint_commit: checkpoint, review_file: `.codex/reviews/by-commit/${v.req.reviewed_commit.toLowerCase()}.md`, message: `[CODE-REVIEW-AUTO callback_id=${callback_id}] ${review.status} for ${v.req.project}, branch ${v.req.source_branch}, commit ${v.req.reviewed_commit}. Authoritative review: checkpoint_commit=${checkpoint} path=.codex/reviews/by-commit/${v.req.reviewed_commit.toLowerCase()}.md. Do not rerun Code Review for this exact commit.` };
 }
+export function reportSha256(report) { return crypto.createHash("sha256").update(report, "utf8").digest("hex"); }
+export function publicationIntentRecord(v, review) {
+  return {
+    state: "PUBLISHING",
+    project: v.req.project,
+    repository: v.project.repository,
+    source_branch: v.req.source_branch,
+    reviewed_commit: v.req.reviewed_commit.toLowerCase(),
+    review_route: v.req.review_route,
+    chat_url: v.chat_url,
+    checkpoint_branch: v.project.checkpoint_branch,
+    checkpoint_before: review.checkpoint,
+    report_sha256: reportSha256(review.report),
+    review_status: review.status,
+    report: review.report
+  };
+}
+export function validatePublicationIntent(v, journal) {
+  if (!journal || journal.state !== "PUBLISHING" && journal.state !== "PUBLISHED" ||
+      journal.project !== v.req.project || journal.repository !== v.project.repository ||
+      journal.source_branch !== v.req.source_branch || journal.reviewed_commit !== v.req.reviewed_commit.toLowerCase() ||
+      journal.review_route !== v.req.review_route || journal.chat_url !== v.chat_url ||
+      journal.checkpoint_branch !== v.project.checkpoint_branch || !SHA.test(journal.checkpoint_before || "") ||
+      !/^[0-9a-f]{64}$/.test(journal.report_sha256 || "") || !REVIEW_STATUS.test(journal.review_status || "") ||
+      typeof journal.report !== "string" || reportSha256(journal.report) !== journal.report_sha256 ||
+      (journal.state === "PUBLISHED" && !SHA.test(journal.checkpoint_commit || ""))) fail("INVALID_PUBLICATION_INTENT");
+  return journal;
+}
 export function ensurePendingCallback(file, record) {
   if (!fs.existsSync(file)) { writePrivate(file, record, true); return record; }
   const prior = JSON.parse(privateFile(file).toString("utf8"));
@@ -195,7 +225,7 @@ export function ensurePendingCallback(file, record) {
   return prior;
 }
 
-export async function executeMacosCodeReview(v, { codex = "codex", spawn = spawnSync, resumeOnly = false } = {}) {
+export async function executeMacosCodeReview(v, { codex = "codex", spawn = spawnSync, resumeOnly = false, publicationIntent = null } = {}) {
   const { req, project, automation } = v;
   git(automation, ["fetch", "--no-tags", "--prune", "origin"]);
   if (remoteHead(automation, req.source_branch) !== req.reviewed_commit.toLowerCase()) fail("REVIEW_STALE");
@@ -207,10 +237,22 @@ export async function executeMacosCodeReview(v, { codex = "codex", spawn = spawn
   try {
     if (!objectExists(automation, `${checkpoint}:${evidencePath}`)) throw Object.assign(new Error("NOT_FOUND"), { code: "NOT_FOUND" });
     const prior = parseReviewEvidence(git(automation, ["show", `${checkpoint}:${evidencePath}`]), { project: req.project, repository: project.repository, sourceBranch: req.source_branch, reviewedCommit: req.reviewed_commit });
-    if (prior && prior.status !== "CODE_REVIEW_FAILED") return { status: "ALREADY_EXISTS", priorStatus: prior.status, checkpoint, evidencePath };
+    if (prior) {
+      if (publicationIntent) {
+        validatePublicationIntent(v, publicationIntent);
+        const expectedCheckpoint = publicationIntent.state === "PUBLISHED" ? publicationIntent.checkpoint_commit : publicationIntent.checkpoint_before;
+        if (expectedCheckpoint !== checkpoint || publicationIntent.review_status !== prior.status || reportSha256(git(automation, ["show", `${checkpoint}:${evidencePath}`])) !== publicationIntent.report_sha256) fail("PUBLICATION_EVIDENCE_MISMATCH");
+      }
+      return { status: "ALREADY_EXISTS", priorStatus: prior.status, checkpoint, evidencePath };
+    }
     fail("CONFLICTING_REVIEW_EVIDENCE");
   } catch (e) { if (! ["NOT_FOUND"].includes(e.code)) throw e; }
-  if (resumeOnly) fail("PUBLICATION_INTENT_WITHOUT_VALID_EVIDENCE");
+  if (resumeOnly) {
+    validatePublicationIntent(v, publicationIntent);
+    if (publicationIntent.state !== "PUBLISHING") fail("PUBLISHED_EVIDENCE_MISSING");
+    if (publicationIntent.checkpoint_before !== checkpoint) fail("CHECKPOINT_HEAD_DRIFT");
+    return { status: publicationIntent.review_status, exit_code: null, checkpoint, evidencePath, report: publicationIntent.report, report_sha256: publicationIntent.report_sha256 };
+  }
   const workspace = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "codex-review-"));
   git(automation, ["worktree", "add", "--detach", workspace, req.reviewed_commit]);
   let result;
@@ -224,7 +266,7 @@ export async function executeMacosCodeReview(v, { codex = "codex", spawn = spawn
   if (git(automation, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])) fail("AUTOMATION_CLONE_DIRTY_AFTER_REVIEW");
   const status = result?.status === 0 ? "CODE_REVIEW_COMPLETE" : "CODE_REVIEW_FAILED";
   const report = `<!-- CODEX_ORCHESTRATOR_CODE_REVIEW_V1 -->\n# Codex Code Review\n\n- project: ${req.project}\n- repository: ${project.repository}\n- source_branch: ${req.source_branch}\n- reviewed_commit: ${req.reviewed_commit.toLowerCase()}\n- checkpoint_branch: ${project.checkpoint_branch}\n\nStatus: ${status}\n\n## Independent Codex review\n\n${redactReviewOutput(`${result?.stdout || ""}\n${result?.stderr || ""}`)}`;
-  return { status, exit_code: result?.status ?? null, checkpoint, evidencePath, report };
+  return { status, exit_code: result?.status ?? null, checkpoint, evidencePath, report, report_sha256: reportSha256(report) };
 }
 
 export function pendingWakesPath(v) { return path.join(v.home, ".chatgpt-codex-orchestrator", "instances", v.instance.instance_id, "pending-wakes"); }
