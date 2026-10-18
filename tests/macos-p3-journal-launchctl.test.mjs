@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { prepareMigrationIntent, migrationIntentPath, macosRuntimeAction } from "../src/lib/macos-platform.mjs";
+import { prepareMigrationIntent, migrationIntentPath, renderLaunchAgent, macosRuntimeAction } from "../src/lib/macos-platform.mjs";
 import { defaultLocalPaths } from "../src/lib/control-render.mjs";
 
 test("P3 migration intent uses the shared exact-eight identity and isolates installations",()=>{
@@ -70,7 +70,7 @@ test("P3 launchctl rejects an unverified post-start state",()=>{
   const old=process.env.HOME; process.env.HOME=home;
   try {
     fs.mkdirSync(plistDir,{recursive:true,mode:0o700});
-    fs.writeFileSync(plist,`<string>${helper}</string><key>ORCHESTRATOR_MACOS_NATIVE_HELPER</key><key>ORCHESTRATOR_MACOS_NATIVE_PROCESS_IDENTITY</key>`,{mode:0o600});
+    fs.writeFileSync(plist,renderLaunchAgent({label:state.launch_agent_label,runnerPath:state.runner_path,instanceRoot:state.instance_root,nativeHelperPath:helper,nativeProcessIdentity:true}),{mode:0o600});
     const result=macosRuntimeAction("start",{state,home,platform:"darwin",commandRunner:fake,capabilityVerifier:()=>capability});
     assert.equal(result.status,"ERROR"); assert.equal(result.launchctl_state,"unknown");
     assert.equal(commands.filter(x=>x[0]==="bootstrap").length,1);

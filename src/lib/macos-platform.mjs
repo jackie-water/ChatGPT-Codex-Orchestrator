@@ -53,6 +53,7 @@ export function macosPrerequisites() {
 function redactStatus(status) {
   return status.split("\n").map(line=>line.replace(/[^\s]+(token|secret|oauth|credential|password)[^\s]*/ig,"[REDACTED]")).join("\n");
 }
+function xmlEscape(value) { return String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&apos;"); }
 function gitInventory(root) {
   if(!root || !fs.existsSync(root) || !fs.existsSync(path.join(root,".git"))) return {present:false,reason:"missing-or-not-a-git-worktree"};
   const head=cmd("git",["-C",root,"rev-parse","HEAD"]), status=cmd("git",["-C",root,"status","--porcelain=v1","--untracked-files=all"]);
@@ -134,9 +135,8 @@ export function migrationPreflight({state={},home=HOME(),commandRunner=cmd}={}) 
 export function renderLaunchAgent({label,runnerPath,instanceRoot,programArguments=[],nativeHelperPath=null,nativeProcessIdentity=false}={}) {
   if(!/^com\.[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/.test(label)) throw new Error("LaunchAgent label must be reverse-DNS");
   if(!runnerPath||!instanceRoot||![runnerPath,instanceRoot].every(privatePath)) throw new Error("LaunchAgent paths must be private HOME-scoped paths");
-  const xml=x=>String(x).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;").replaceAll("'","&apos;");
-  const environment = nativeHelperPath && nativeProcessIdentity ? `<key>EnvironmentVariables</key><dict><key>ORCHESTRATOR_MACOS_NATIVE_HELPER</key><string>${xml(nativeHelperPath)}</string><key>ORCHESTRATOR_MACOS_NATIVE_PROCESS_IDENTITY</key><string>1</string></dict>` : "";
-  return `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict><key>Label</key><string>${xml(label)}</string><key>ProgramArguments</key><array>${[runnerPath,...programArguments].map(x=>`<string>${xml(x)}</string>`).join("")}</array><key>WorkingDirectory</key><string>${xml(instanceRoot)}</string>${environment}<key>RunAtLoad</key><false/></dict></plist>`;
+  const environment = nativeHelperPath && nativeProcessIdentity ? `<key>EnvironmentVariables</key><dict><key>ORCHESTRATOR_MACOS_NATIVE_HELPER</key><string>${xmlEscape(nativeHelperPath)}</string><key>ORCHESTRATOR_MACOS_NATIVE_PROCESS_IDENTITY</key><string>1</string></dict>` : "";
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict><key>Label</key><string>${xmlEscape(label)}</string><key>ProgramArguments</key><array>${[runnerPath,...programArguments].map(x=>`<string>${xmlEscape(x)}</string>`).join("")}</array><key>WorkingDirectory</key><string>${xmlEscape(instanceRoot)}</string>${environment}<key>RunAtLoad</key><false/></dict></plist>`;
 }
 
 export function macosRuntimeAction(action,{state={},commandRunner=cmd,home=HOME(),platform=process.platform,capabilityVerifier=verifyMacosNativeCapability}={}) {
@@ -166,7 +166,7 @@ export function macosRuntimeAction(action,{state={},commandRunner=cmd,home=HOME(
     const expectedInstance=state.instance_root;
     const validCapability=capability?.status==="PASS" && capability.installation_id===state.installation_id && capability.instance_path===expectedInstance && capability.helper_path===path.join(expectedInstance,"runtime","native","macos","process-identity") && capability.receipt_path===path.join(expectedInstance,"macos-native-helper-capability.json");
     if(!validCapability) return {status:"ERROR",error_id:capability?.error_id||"MACOS-NATIVE-CAPABILITY-INVALID",mutations_performed:false,action,capability:{status:capability?.status||"ERROR",error_id:capability?.error_id||"MACOS-NATIVE-CAPABILITY-INVALID"}};
-    try { safeLaunchAgentPath(plist); const plistText=fs.readFileSync(plist,"utf8"); if(!plistText.includes(`<string>${capability.helper_path}</string>`) || !plistText.includes("ORCHESTRATOR_MACOS_NATIVE_HELPER") || !plistText.includes("ORCHESTRATOR_MACOS_NATIVE_PROCESS_IDENTITY")) return {status:"ERROR",error_id:"MACOS-PLIST-NATIVE-PATH-MISMATCH",mutations_performed:false,action,details:"Persisted LaunchAgent native helper path is not bound to this installation."}; }
+    try { safeLaunchAgentPath(plist); const plistText=fs.readFileSync(plist,"utf8"); const helperElement=`<key>ORCHESTRATOR_MACOS_NATIVE_HELPER</key><string>${xmlEscape(capability.helper_path)}</string>`; const identityElement=`<key>ORCHESTRATOR_MACOS_NATIVE_PROCESS_IDENTITY</key><string>1</string>`; if(!plistText.includes(helperElement) || !plistText.includes(identityElement)) return {status:"ERROR",error_id:"MACOS-PLIST-NATIVE-PATH-MISMATCH",mutations_performed:false,action,details:"Persisted LaunchAgent native helper path is not bound to this installation."}; }
     catch(error) { return {status:"ERROR",error_id:"MACOS-PLIST-UNSAFE",mutations_performed:false,action,details:String(error.message||error)}; }
   }
   if(action==="install"||action==="repair") {

@@ -13,6 +13,13 @@ function toolchain(home) {
   return sdk;
 }
 
+const preflightOnlyCommandRunner = (sdk, calls = []) => (command, args) => {
+  calls.push({ command, args });
+  if (command === "xcrun" && args.length === 2 && args[0] === "--find" && args[1] === "clang") return { ok: true, status: 0, stdout: "/usr/bin/clang\n" };
+  if (command === "xcrun" && args.length === 3 && args[0] === "--sdk" && args[1] === "macosx" && args[2] === "--show-sdk-path") return { ok: true, status: 0, stdout: `${sdk}\n` };
+  throw new Error("test fixture compile invocation");
+};
+
 test("macOS native preflight is read-only and reports reviewed source digest", () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "orch-native-preflight-"));
   const sdk = toolchain(home); const before = fs.readdirSync(home);
@@ -91,4 +98,40 @@ test("helper-only resume requires the exact journal and returns the canonical re
   fs.unlinkSync(paths.receiptPath); journal.installation_id = "foreign"; fs.writeFileSync(paths.journalPath, JSON.stringify(journal), { mode: 0o600 });
   const foreign = prepareMacosNativeHelper({ state, home, platform: "darwin", commandRunner: () => { throw new Error("foreign artifact rebuilt unexpectedly"); }, identityReader });
   assert.equal(foreign.status, "ERROR"); assert.equal(foreign.recovery_status, "MANUAL_RECOVERY_REQUIRED"); assert.equal(fs.existsSync(paths.helperPath), true);
+});
+
+test("concurrent native writer claims fail closed without replacing the first journal", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "orch-native-claim-"));
+  const sdk = toolchain(home);
+  const calls = [];
+  const state = { installation_id: "claim-1", macos_setup_approved: true, macos_native_writer_id: "writer-b" };
+  const { instanceRoot, journalPath, helperPath } = macosNativeHelperPaths({ home, installationId: state.installation_id });
+  fs.mkdirSync(instanceRoot, { recursive: true, mode: 0o700 }); fs.chmodSync(instanceRoot, 0o700);
+  const lockPath = path.join(instanceRoot, ".macos-native-helper-install.lock");
+  const journal = "first-writer journal sentinel\n";
+  fs.writeFileSync(journalPath, journal, { mode: 0o600 });
+  fs.writeFileSync(lockPath, JSON.stringify({ schema_version: 1, owner_id: "writer-a", pid: process.pid, installation_id: state.installation_id, instance_path: instanceRoot }), { mode: 0o600 });
+  const result = prepareMacosNativeHelper({ state, home, platform: "darwin", commandRunner: preflightOnlyCommandRunner(sdk, calls) });
+  assert.equal(result.status, "ERROR"); assert.equal(result.error_id, "MACOS-NATIVE-INSTALL-BUSY");
+  assert.equal(calls.filter(({ args }) => args.includes("-o")).length, 0);
+  assert.equal(fs.readFileSync(journalPath, "utf8"), journal);
+  assert.equal(fs.existsSync(helperPath), false);
+  assert.deepEqual(JSON.parse(fs.readFileSync(lockPath, "utf8")).owner_id, "writer-a");
+});
+
+test("ambiguous native writer claim is not reclaimed", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "orch-native-unknown-"));
+  const sdk = toolchain(home);
+  const state = { installation_id: "unknown-1", macos_setup_approved: true, macos_native_writer_id: "writer-b" };
+  const { instanceRoot, journalPath, helperPath } = macosNativeHelperPaths({ home, installationId: state.installation_id });
+  fs.mkdirSync(instanceRoot, { recursive: true, mode: 0o700 }); fs.chmodSync(instanceRoot, 0o700);
+  const lockPath = path.join(instanceRoot, ".macos-native-helper-install.lock");
+  const journal = "ambiguous-writer journal sentinel\n";
+  fs.writeFileSync(journalPath, journal, { mode: 0o600 });
+  fs.writeFileSync(lockPath, JSON.stringify({ schema_version: 1, owner_id: "writer-a", pid: 99999999, installation_id: state.installation_id, instance_path: instanceRoot }), { mode: 0o600 });
+  const result = prepareMacosNativeHelper({ state, home, platform: "darwin", commandRunner: preflightOnlyCommandRunner(sdk) });
+  assert.equal(result.status, "ERROR"); assert.equal(result.error_id, "MACOS-NATIVE-INSTALL-OWNERSHIP-UNKNOWN");
+  assert.equal(fs.readFileSync(journalPath, "utf8"), journal);
+  assert.equal(fs.existsSync(helperPath), false);
+  assert.deepEqual(JSON.parse(fs.readFileSync(lockPath, "utf8")).owner_id, "writer-a");
 });

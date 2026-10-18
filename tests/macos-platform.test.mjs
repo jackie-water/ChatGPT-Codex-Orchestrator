@@ -101,3 +101,19 @@ test("runtime start verifies the same helper and persisted plist before bootstra
     launches=[]; fs.writeFileSync(plist,"<string>/foreign/helper</string>",{mode:0o600}); const mismatch=macosRuntimeAction("start",{state,home,platform:"darwin",commandRunner,capabilityVerifier:()=>capability}); assert.equal(mismatch.status,"ERROR"); assert.equal(mismatch.error_id,"MACOS-PLIST-NATIVE-PATH-MISMATCH"); assert.equal(launches.some(args=>args[0]==="bootstrap"),false);
   } finally { if(previousHome===undefined) delete process.env.HOME; else process.env.HOME=previousHome; }
 });
+
+test("runtime start accepts the renderer's XML-escaped helper path and rejects raw or injected variants",()=>{
+  const home=fs.mkdtempSync(path.join(os.tmpdir(),"orch-macos-ampersand-&lt;-home-")); const previousHome=process.env.HOME; process.env.HOME=home;
+  const instance=path.join(home,"instance & < > \" '"); const runner=path.join(instance,"runner"); const helper=path.join(instance,"runtime","native","macos","process-identity"); const plistDir=path.join(home,"Library","LaunchAgents"); const plist=path.join(plistDir,"com.chatgpt.codex.runner.plist");
+  fs.mkdirSync(path.dirname(helper),{recursive:true,mode:0o700}); fs.mkdirSync(plistDir,{recursive:true,mode:0o700}); fs.writeFileSync(runner,"runner\n",{mode:0o700}); fs.writeFileSync(helper,"helper\n",{mode:0o700});
+  const state={sandbox_only:true,target_environment_ready:false,instance_id:"instance-xml",installation_id:"install-xml",runner_owner:"install-xml",runner_label:"runner-xml",launch_agent_label:"com.chatgpt.codex.runner",runner_path:runner,instance_root:instance,macos_setup_approved:true,macos_action_approval:"start"};
+  const capability={status:"PASS",installation_id:state.installation_id,instance_path:instance,helper_path:helper,receipt_path:path.join(instance,"macos-native-helper-capability.json")}; let bootstraps=0;
+  const commandRunner=(command,args)=>{ if(command==="launchctl"&&args[0]==="list") return {ok:true,output:""}; if(args[0]==="bootstrap") { bootstraps++; return {ok:true,output:"started"}; } if(args[0]==="print") return {ok:true,output:"verified"}; return {ok:false,output:"unexpected"}; };
+  try {
+    fs.writeFileSync(plist,renderLaunchAgent({label:state.launch_agent_label,runnerPath:runner,instanceRoot:instance,nativeHelperPath:helper,nativeProcessIdentity:true}),{mode:0o600});
+    const accepted=macosRuntimeAction("start",{state,home,platform:"darwin",commandRunner,capabilityVerifier:()=>capability}); assert.equal(accepted.status,"PASS"); assert.equal(bootstraps,1);
+    bootstraps=0;
+    fs.writeFileSync(plist,`<key>ORCHESTRATOR_MACOS_NATIVE_HELPER</key><string>${helper}</string><key>ORCHESTRATOR_MACOS_NATIVE_PROCESS_IDENTITY</key><string>1</string>`,{mode:0o600});
+    const rejected=macosRuntimeAction("start",{state,home,platform:"darwin",commandRunner,capabilityVerifier:()=>capability}); assert.equal(rejected.error_id,"MACOS-PLIST-NATIVE-PATH-MISMATCH"); assert.equal(bootstraps,0);
+  } finally { if(previousHome===undefined) delete process.env.HOME; else process.env.HOME=previousHome; }
+});

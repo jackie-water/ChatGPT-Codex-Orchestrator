@@ -46,13 +46,19 @@ const diagnosticText=value=>String(value??"")
   .replace(/https?:\/\/[^\s"'`<>]+/gi,"[redacted-url]")
   .replace(/\b(?:bearer|token|secret|password|credential|authorization|cookie)\b\s*[:=]\s*[^\s,;}]+/gi,"[redacted-credential]")
   .slice(0,200);
+const proofDiagnostic=proof=>{
+  if(!proof||typeof proof!=="object") return "proof unavailable";
+  const observation=value=>value&&typeof value==="object"?Object.fromEntries(["status","native_status","exit_code","error_code","errno"].map(key=>[key,diagnosticText(value[key]??null).slice(0,80)])):"unavailable";
+  const side=value=>Array.isArray(value)?value.slice(0,2).map(observation):observation(value);
+  return diagnosticText(JSON.stringify({self:side(proof.self),parent:side(proof.parent)}));
+};
 const resumeActionId=(result,label)=>{
   let parsed={};
   try { parsed=JSON.parse(result.stdout||"{}"); } catch {}
   if(parsed.action_id!=="sandbox_verification"){
     const details=typeof parsed.details==="string"?diagnosticText(parsed.details):
       parsed.details&&typeof parsed.details==="object"?diagnosticText(JSON.stringify(Object.keys(parsed.details).filter(key=>!/(token|secret|password|credential|authorization|cookie|url|path)/i.test(key)).slice(0,12))):"";
-    assert.fail(`${label} unexpected action_id: ${JSON.stringify({exit_code:result.status,status:parsed.status,error_id:parsed.error_id,action_id:parsed.action_id,details,stderr:diagnosticText(result.stderr)})}`);
+    assert.fail(`${label} unexpected action_id: ${JSON.stringify({exit_code:result.status,status:parsed.status,error_id:parsed.error_id,action_id:parsed.action_id,details,proof:proofDiagnostic(parsed.capability?.proof),stderr:diagnosticText(result.stderr)})}`);
   }
 };
 
