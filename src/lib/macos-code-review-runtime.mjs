@@ -111,9 +111,17 @@ function remoteHead(repo, branch) {
   return sha.toLowerCase();
 }
 function objectExists(repo, object) {
-  const result = spawnSync("git", ["-C", repo, "-c", "core.hooksPath=/dev/null", "cat-file", "-e", object], { encoding: "utf8", timeout: 30000 });
-  if (result.error || ![0, 1].includes(result.status)) fail("GIT_OBJECT_PROBE_UNCERTAIN");
-  return result.status === 0;
+  const match = /^([0-9a-f]{40}):(.+)$/.exec(String(object));
+  const objectPath = match?.[2];
+  if (!match || !objectPath || objectPath.startsWith("/") || objectPath.endsWith("/") || objectPath.split("/").some(part => !/^[A-Za-z0-9._-]+$/.test(part))) fail("GIT_OBJECT_PROBE_UNCERTAIN");
+  const result = spawnSync("git", ["-C", repo, "-c", "core.hooksPath=/dev/null", "ls-tree", "-z", "--full-tree", match[1], "--", objectPath], { encoding: "buffer", timeout: 30000, maxBuffer: 64 * 1024 });
+  if (result.error || result.status !== 0) fail("GIT_OBJECT_PROBE_UNCERTAIN");
+  const records = result.stdout.toString("utf8").split("\0").filter(Boolean);
+  if (records.length === 0) return false;
+  if (records.length !== 1) fail("GIT_OBJECT_PROBE_UNCERTAIN");
+  const entry = /^(\d{6}) (blob|tree|commit) ([0-9a-f]{40})\t([^\0]+)$/.exec(records[0]);
+  if (!entry || entry[2] !== "blob" || entry[4] !== objectPath) fail("GIT_OBJECT_PROBE_UNCERTAIN");
+  return true;
 }
 function isAncestor(repo, ancestor, descendant) {
   if (!SHA.test(ancestor || "") || !SHA.test(descendant || "")) fail("PUBLICATION_EVIDENCE_MISMATCH");
