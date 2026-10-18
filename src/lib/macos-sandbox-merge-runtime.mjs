@@ -183,6 +183,11 @@ function validateProjects(controlRoot, instance, request) {
   return project;
 }
 
+function validateProjectSource(project, request) {
+  if (request.source_branch === project.default_branch || request.source_branch === project.checkpoint_branch ||
+      project.protected_branches?.includes?.(request.source_branch)) fail("PROTECTED_SOURCE_BRANCH");
+}
+
 function parseReview(content, request, project) {
   const text = content.toString("utf8");
   if (!text.startsWith(`${MARKER}\n`) || text.split(MARKER).length !== 2) fail("REVIEW_EVIDENCE_INVALID");
@@ -211,6 +216,7 @@ export function preflightMacosSandboxMerge({ event, controlRoot, controlReposito
   const root = privatePath(controlRoot, { leaf: true });
   const instance = validateInstance(readControl(root, "instance.json"), controlRepository, trustedGithubUsername);
   const project = validateProjects(root, instance, request);
+  validateProjectSource(project, request);
   const route = validateRoute(home, instance.instance_id, request.project, request.review_route);
   const instanceRoot = path.join(home, ".chatgpt-codex-orchestrator", "instances", instance.instance_id);
   const automation = privatePath(path.join(instanceRoot, "automation", project.local_path_key), { leaf: true });
@@ -223,7 +229,6 @@ export function preflightMacosSandboxMerge({ event, controlRoot, controlReposito
   const sourceHead = pinned[request.source_branch];
   const checkpoint = pinned[project.checkpoint_branch];
   if (sourceHead !== request.approved_commit.toLowerCase()) fail("APPROVED_SHA_STALE");
-  if (request.source_branch === project.default_branch || project.protected_branches?.includes?.(request.source_branch)) fail("PROTECTED_SOURCE_BRANCH");
   if (!ancestor(automation, defaultHead, request.approved_commit, "DEFAULT_ANCESTRY_FAILED")) fail("NON_FAST_FORWARD_SOURCE");
   const reviewFile = reviewBytes(automation, checkpoint, request, project);
   const diffCheck = spawnSync(gitExecutable(), ["-C", automation, "-c", "core.hooksPath=/dev/null", "diff", "--check", `${defaultHead}..${request.approved_commit}`], { encoding: "utf8", timeout: 30000 });

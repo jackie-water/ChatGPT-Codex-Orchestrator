@@ -46,6 +46,13 @@ test("accepts an independently forked checkpoint with exact review evidence", t 
   assert.equal(f.refs(), before);
 });
 
+test("rejects the checkpoint branch as a source before any Git preflight", t => {
+  const f = fixture(t);
+  const before = f.refs();
+  assert.throws(() => call(f, f.event({ source_branch: "codex/checkpoints", approved_commit: f.checkpoint })), /PROTECTED_SOURCE_BRANCH/);
+  assert.equal(f.refs(), before);
+});
+
 test("fetches newly advanced remote objects from a stale automation clone", t => {
   const f = fixture(t);
   const publisher = path.join(f.root, "publisher");
