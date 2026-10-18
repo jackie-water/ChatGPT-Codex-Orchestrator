@@ -32,7 +32,10 @@ jobs:
     runs-on: [self-hosted, macOS, {{RUNNER_ARCH}}, {{RUNNER_LABEL}}]
     steps:
       - uses: actions/checkout@v4
-      - run: node scripts/macos-code-review.mjs
+      - name: Execute native exact-SHA Code Review
+        env:
+          CODEX_EVENT_PATH: ${{ github.event_path }}
+        run: node scripts/macos-code-review.mjs --event-path "$CODEX_EVENT_PATH" --control-root "$GITHUB_WORKSPACE" --control-repository "${{ github.repository }}" --trusted-github-username "{{TRUSTED_GITHUB_USERNAME}}"
   merge-approved:
     if: startsWith(github.event.issue.title, '[MERGE-APPROVE]')
     runs-on: [self-hosted, macOS, {{RUNNER_ARCH}}, {{RUNNER_LABEL}}]

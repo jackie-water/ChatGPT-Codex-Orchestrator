@@ -39,6 +39,7 @@ const LIBRARY_NAMES = Object.freeze([
   "macos-codex-execution.mjs",
   "macos-codex-run-contract.mjs",
   "macos-postexecution-wrapper.mjs",
+  "macos-code-review-runtime.mjs",
   "run-failure-state.mjs"
 ]);
 const MANIFEST = Object.freeze([
