@@ -193,14 +193,14 @@ const findComposerExpression = `(() => {
           b.getAttribute('data-testid') || '',
           (b.innerText || b.textContent || '').trim()
         ].join(' ').trim();
-        if (label) localButtons.push(label);
+        if (label) localButtons.push({label, disabled:!!b.disabled});
       }
       if (localButtons.length > 30) break;
     }
 
-    const localButtonText = localButtons.join(' | ');
+    const localButtonText = localButtons.map(x => x.label).join(' | ');
     if (/Undo last edit|Redo last edit|Open editor|Add to Space/i.test(localButtonText)) score -= 1000;
-    const busy = localButtons.some(x => /(^|\\s)(stop|cancel)(\\s|$)|stop generating|cancel generation/i.test(x));
+    const busy = localButtons.some(x => !x.disabled && /(^|\\s)(stop|cancel)(\\s|$)|stop generating|cancel generation/i.test(x.label));
 
     candidates.push({
       el,
@@ -211,7 +211,7 @@ const findComposerExpression = `(() => {
       width: Math.round(r.width),
       height: Math.round(r.height),
       attrs,
-      localButtons: localButtons.slice(0,12)
+      localButtons: localButtons.slice(0,12).map(x => x.label)
     });
   }
 
@@ -243,7 +243,7 @@ const findComposerExpression = `(() => {
     width:chosen.width,
     height:chosen.height,
     attrs:chosen.attrs,
-    localButtons:chosen.localButtons
+    localButtons:chosen.localButtons.map(x => x.label)
   };
 })()`;
 
@@ -298,7 +298,7 @@ async function insertText(send, text) {
     "const text=" + JSON.stringify(text) + ";" +
     "if(current===text) return {ok:true,reused:true,text:current};" +
     "const canInsert=" + canInsertCallbackDraft.toString() + ";" +
-    "const busy=[...(el.closest('form')?.querySelectorAll('button')||[])].some(b=>/(^|\\s)(stop|cancel)(\\s|$)|stop generating|cancel generation/i.test([b.getAttribute('aria-label')||'',b.getAttribute('title')||'',b.innerText||b.textContent||''].join(' ')));" +
+    "const busy=[...(el.closest('form')?.querySelectorAll('button')||[])].some(b=>!b.disabled && /(^|\\s)(stop|cancel)(\\s|$)|stop generating|cancel generation/i.test([b.getAttribute('aria-label')||'',b.getAttribute('title')||'',b.innerText||b.textContent||''].join(' ')));" +
     "const guard=canInsert({destination:location.origin+location.pathname,expectedDestination:" + JSON.stringify(normalizeConversationUrl(expected)) + ",draft:current,message:text,busy});" +
     "if(!guard.ok) return {ok:false,reason:guard.reason,text:current};" +
     "el.focus();" +
@@ -380,6 +380,12 @@ async function sendMessage(send) {
   // Wait for ChatGPT to become idle and expose a real Send button.
   // Never submit a form or synthesize Enter while a Stop/generating control is active.
   for (let i = 0; i < 120 && remainingMs() > 0; i++) {
+    try {
+      assertWakeTime();
+    } catch (error) {
+      error.preClickProven = true;
+      throw error;
+    }
     let clicked;
     try {
       clicked = await evaluate(send, `(() => {
@@ -445,7 +451,12 @@ async function sendMessage(send) {
     }
 
     if (i === 0 || i % 20 === 0) console.log("CHAT_SEND_WAIT:", JSON.stringify(clicked));
-    await sleep(500);
+    try {
+      await sleep(500);
+    } catch (error) {
+      if (error.code === "WAKE_DEADLINE_EXCEEDED") error.preClickProven = true;
+      throw error;
+    }
   }
 
   const error = new Error("ChatGPT did not expose a usable Send control within 60 seconds; callback will be retried later");

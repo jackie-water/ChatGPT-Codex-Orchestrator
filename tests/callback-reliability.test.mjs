@@ -111,6 +111,8 @@ test("send selection is scoped to a genuine composer control and busy detection 
     assert.equal(isBusyComposerControl(button), true);
     assert.equal(selectSafeSendButton({destination, expectedDestination:destination, draft:message, message, buttons:[button, {aria:"Send"}]}), -1);
   }
+  assert.equal(selectSafeSendButton({destination, expectedDestination:destination, draft:message, message, buttons:[{aria:"Stop generating", disabled:true}, {aria:"Send", disabled:false}]}), 1);
+  assert.equal(selectSafeSendButton({destination, expectedDestination:destination, draft:message, message, buttons:[{aria:"Cancel generation", disabled:true}, {testid:"composer-send-button"}]}), 1);
   assert.deepEqual(canInsertCallbackDraft({destination, expectedDestination:destination, draft:"", message, busy:true}), {ok:false, reason:"chat-busy-generating"});
   assert.equal(canInsertCallbackDraft({destination, expectedDestination:destination, draft:"unrelated", message, busy:false}).ok, false);
 });
@@ -130,6 +132,7 @@ test("browser-serialized send selector stays self-contained and fail-closed", ()
 
   assert.equal(run([{testid:"send-feedback"}, {aria:"Send"}]), 1);
   assert.equal(run([{aria:"STOP GENERATING"}, {aria:"Send"}]), -1);
+  assert.equal(run([{aria:"STOP GENERATING", disabled:true}, {aria:"Send"}]), 1);
   assert.equal(run([{aria:"Send", disabled:true}]), -1);
   assert.equal(run([{aria:"Send"}], {destination:"https://chatgpt.com/c/other"}), -1);
   assert.equal(run([{aria:"Send"}], {draft:"changed"}), -1);
@@ -190,6 +193,26 @@ test("a missing Send click remains retry-eligible", async () => {
   assert.deepEqual(result,{action:"not-sent",state:"PENDING",result:{clicked:false,reason:"send-control-not-ready"}});
   assert.equal(state,"PENDING");
   assert.deepEqual(updates,["DRAFT_INSERTED","PENDING"]);
+});
+
+test("a proven pre-click wake deadline returns the drafted callback to PENDING and permits retry", async () => {
+  let state="PENDING", sends=0, updates=[];
+  const deadline=Object.assign(new Error("deadline while waiting for Send"), {code:"WAKE_DEADLINE_EXCEEDED", preClickProven:true});
+  await assert.rejects(()=>deliverCallback({read:()=>({delivery_state:state}),hasReceipt:async()=>false,update:next=>{state=next;updates.push(next);},beforeSend:async()=>{},send:async()=>{sends++;throw deadline;}}), /deadline/);
+  assert.equal(state,"PENDING");
+  const retry=await deliverCallback({read:()=>({delivery_state:state}),hasReceipt:async()=>false,update:next=>{state=next;updates.push(next);},beforeSend:async()=>{},send:async()=>{sends++;return {clicked:true};}});
+  assert.equal(retry.action,"sent");
+  assert.equal(sends,2);
+  assert.deepEqual(updates,["DRAFT_INSERTED","PENDING","DRAFT_INSERTED","SUBMISSION_ATTEMPTED"]);
+});
+
+test("an ambiguous Runtime.evaluate deadline remains SUBMISSION_ATTEMPTED and never resends", async () => {
+  let state="PENDING", sends=0;
+  const ambiguous=Object.assign(new Error("Runtime.evaluate timed out"), {code:"WAKE_DEADLINE_EXCEEDED", submissionAttempted:true});
+  await assert.rejects(()=>deliverCallback({read:()=>({delivery_state:state}),hasReceipt:async()=>false,update:next=>{state=next;},beforeSend:async()=>{},send:async()=>{sends++;throw ambiguous;}}), /timed out/);
+  assert.equal(state,"SUBMISSION_ATTEMPTED");
+  assert.equal((await deliverCallback({read:()=>({delivery_state:state}),hasReceipt:async()=>false,update:()=>{},send:async()=>{sends++;}})).action,"reconcile");
+  assert.equal(sends,1);
 });
 
 test("an ambiguous submit becomes reconcile-only and is never resent", async () => {

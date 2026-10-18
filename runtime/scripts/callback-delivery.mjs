@@ -55,6 +55,7 @@ export function canInsertCallbackDraft({destination, expectedDestination, draft,
 }
 
 export function isBusyComposerControl(button = {}) {
+  if (button.disabled) return false;
   const values = [button.aria, button.title, button.text, button.testid]
     .map(value => String(value || "").trim().toLowerCase())
     .filter(Boolean);
@@ -71,6 +72,7 @@ export function selectSafeSendButton({destination, expectedDestination, draft, m
   const safeSendAria = new Set(["send", "send message", "send prompt"]);
   const safeSendTestids = new Set(["composer-send-button", "send-message-button"]);
   const isBusy = (button = {}) => {
+    if (button.disabled) return false;
     const values = [button.aria, button.title, button.text, button.testid]
       .map(value => String(value || "").trim().toLowerCase())
       .filter(Boolean);
@@ -137,8 +139,9 @@ export async function deliverCallback({read, hasReceipt, send, update, beforeSen
     update(nextDeliveryState("DRAFT_INSERTED", "SUBMISSION_ATTEMPTED"));
     return {action:"sent", result};
   } catch (error) {
-    if (error.code === "PRE_SEND_NOT_READY" || error.code === "NO_SEND_CLICK") update("PENDING");
-    else if (error.code === "SUBMISSION_AMBIGUOUS" || error.submissionAttempted === true) update("SUBMISSION_ATTEMPTED");
+    if (error.code === "PRE_SEND_NOT_READY" || error.code === "NO_SEND_CLICK" ||
+        (error.code === "WAKE_DEADLINE_EXCEEDED" && error.preClickProven === true)) update("PENDING");
+    else if (error.code === "SUBMISSION_AMBIGUOUS" || error.submissionAttempted === true || error.code === "WAKE_DEADLINE_EXCEEDED") update("SUBMISSION_ATTEMPTED");
     throw error;
   }
 }
