@@ -51,7 +51,7 @@ export function nextDeliveryState(state, next) {
   if (!states.has(state) || !states.has(next)) throw new Error("Invalid callback delivery state");
   const allowed = {
     PENDING: new Set(["PENDING", "DRAFT_INSERTED"]),
-    DRAFT_INSERTED: new Set(["DRAFT_INSERTED", "SUBMISSION_ATTEMPTED"]),
+    DRAFT_INSERTED: new Set(["PENDING", "DRAFT_INSERTED", "SUBMISSION_ATTEMPTED"]),
     SUBMISSION_ATTEMPTED: new Set(["SUBMISSION_ATTEMPTED", "DELIVERED"]),
     DELIVERED: new Set(["DELIVERED"])
   };
@@ -85,12 +85,17 @@ export async function deliverCallback({read, hasReceipt, send, update, beforeSen
   if (stored.delivery_state !== "PENDING" || !allowSend) return {action:"reconcile", state:stored.delivery_state};
   await beforeSend();
   update(nextDeliveryState("PENDING", "DRAFT_INSERTED"));
-  update(nextDeliveryState("DRAFT_INSERTED", "SUBMISSION_ATTEMPTED"));
   try {
     const result = await send();
+    if (result && result.clicked === false) {
+      update("PENDING");
+      return {action:"not-sent", state:"PENDING", result};
+    }
+    update(nextDeliveryState("DRAFT_INSERTED", "SUBMISSION_ATTEMPTED"));
     return {action:"sent", result};
   } catch (error) {
-    if (error.code === "PRE_SEND_NOT_READY") update("PENDING");
+    if (error.code === "PRE_SEND_NOT_READY" || error.code === "NO_SEND_CLICK") update("PENDING");
+    else if (error.code === "SUBMISSION_AMBIGUOUS" || error.submissionAttempted === true) update("SUBMISSION_ATTEMPTED");
     throw error;
   }
 }

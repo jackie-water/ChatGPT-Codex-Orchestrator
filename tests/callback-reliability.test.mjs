@@ -128,6 +128,23 @@ test("production callback state store fails closed on disappearance, conflicts, 
   fs.unlinkSync(file); assert.throws(()=>store.read(),/Callback state disappeared/); assert.throws(()=>store.update("DRAFT_INSERTED"),/Callback state disappeared/); assert.equal(fs.existsSync(file),false); write(); const fp=make().update("DRAFT_INSERTED"); assert.equal(fp,crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex"));
 });
 
+test("a missing Send click remains retry-eligible", async () => {
+  let state="PENDING", updates=[];
+  const result=await deliverCallback({read:()=>({delivery_state:state}),hasReceipt:async()=>false,update:next=>{state=next;updates.push(next);},beforeSend:async()=>{},send:async()=>({clicked:false,reason:"send-control-not-ready"})});
+  assert.deepEqual(result,{action:"not-sent",state:"PENDING",result:{clicked:false,reason:"send-control-not-ready"}});
+  assert.equal(state,"PENDING");
+  assert.deepEqual(updates,["DRAFT_INSERTED","PENDING"]);
+});
+
+test("an ambiguous submit becomes reconcile-only and is never resent", async () => {
+  let state="PENDING", sends=0;
+  const ambiguous=Object.assign(new Error("CDP lost after click"),{code:"SUBMISSION_AMBIGUOUS",submissionAttempted:true});
+  await assert.rejects(()=>deliverCallback({read:()=>({delivery_state:state}),hasReceipt:async()=>false,update:next=>{state=next;},beforeSend:async()=>{},send:async()=>{sends++;throw ambiguous;}}));
+  assert.equal(state,"SUBMISSION_ATTEMPTED");
+  assert.equal((await deliverCallback({read:()=>({delivery_state:state}),hasReceipt:async()=>false,update:()=>{},send:async()=>{sends++;}})).action,"reconcile");
+  assert.equal(sends,1);
+});
+
 test("production delivery helper retries without blind resend and counts only irreversible submission", async () => {
   let state="PENDING", submissions=0, updates=[]; const read=()=>({delivery_state:state}); const update=next=>{state=next; updates.push(next);};
   await assert.rejects(()=>deliverCallback({read,hasReceipt:async()=>false,update,beforeSend:async()=>{},send:async()=>{const e=new Error("not ready"); e.code="PRE_SEND_NOT_READY"; throw e;}}),/not ready/); assert.equal(state,"PENDING"); assert.equal(submissions,0);

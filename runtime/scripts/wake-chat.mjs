@@ -14,6 +14,11 @@ const expected = process.env.ORCHESTRATOR_CHAT_URL || "";
 const callbackId = process.env.CODEX_CALLBACK_ID || "";
 const callbackStateFile = process.env.CODEX_CALLBACK_STATE_FILE || "";
 const reconcileOnly = process.env.CODEX_RECONCILE_ONLY === "1";
+const wakeBudgetMs = Number(process.env.CODEX_WAKE_DEADLINE_MS || 130000);
+const wakeDeadlineAt = Date.now() + (Number.isFinite(wakeBudgetMs) && wakeBudgetMs > 0 ? wakeBudgetMs : 130000);
+function remainingMs() { return Math.max(0, wakeDeadlineAt - Date.now()); }
+function boundedMs(requested) { return Math.min(requested, remainingMs()); }
+function assertWakeTime() { if (remainingMs() <= 0) { const error = new Error("Callback wake deadline exceeded"); error.code = "WAKE_DEADLINE_EXCEEDED"; throw error; } }
 let expectedFingerprint = process.env.CODEX_CALLBACK_EXPECTED_FINGERPRINT || "";
 if (!isValidCallbackId(callbackId)) {
   console.error("WAKE_CHAT_FAILED: valid CODEX_CALLBACK_ID is required (1-160 ASCII letters, digits, '.', '_', or '-')");
@@ -37,7 +42,7 @@ async function connect(wsUrl) {
   const pending = new Map();
 
   await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("CDP connection timeout")), 5000);
+    const timer = setTimeout(() => reject(new Error("CDP connection timeout")), boundedMs(5000));
     ws.onopen = () => { clearTimeout(timer); resolve(); };
     ws.onerror = () => reject(new Error("CDP websocket error"));
   });
@@ -138,10 +143,12 @@ const findComposerExpression = `(() => {
 
     const localButtonText = localButtons.join(' | ');
     if (/Undo last edit|Redo last edit|Open editor|Add to Space/i.test(localButtonText)) score -= 1000;
+    const busy = localButtons.some(x => /(^|\\s)(stop|cancel)(\\s|$)|stop generating|cancel generation/i.test(x));
 
     candidates.push({
       el,
       score,
+      busy,
       top: Math.round(r.top),
       bottom: Math.round(r.bottom),
       width: Math.round(r.width),
@@ -160,7 +167,7 @@ const findComposerExpression = `(() => {
       href:location.href,
       viewport:{w:innerWidth,h:innerHeight},
       candidates:candidates.slice(0,10).map(x => ({
-        score:x.score,top:x.top,bottom:x.bottom,width:x.width,height:x.height,attrs:x.attrs,localButtons:x.localButtons
+        score:x.score,busy:x.busy,top:x.top,bottom:x.bottom,width:x.width,height:x.height,attrs:x.attrs,localButtons:x.localButtons
       }))
     };
   }
@@ -171,6 +178,7 @@ const findComposerExpression = `(() => {
 
   return {
     ok:true,
+    busy:chosen.busy,
     href:location.href,
     score:chosen.score,
     top:chosen.top,
@@ -184,11 +192,13 @@ const findComposerExpression = `(() => {
 
 async function waitForComposer(send, timeoutMs = 20000) {
   const start = Date.now();
+  const phaseDeadline = start + Math.min(timeoutMs, remainingMs());
   let last = null;
 
-  while (Date.now() - start < timeoutMs) {
+  while (Date.now() < phaseDeadline) {
+    assertWakeTime();
     last = await evaluate(send, findComposerExpression);
-    if (last?.ok) return last;
+    if (last?.ok && !last.busy) return last;
     await new Promise(r => setTimeout(r, 500));
   }
 
@@ -285,8 +295,10 @@ async function hasReceipt(send, callbackId, payload) {
 
 async function confirmSubmission(send, callbackId, text, timeoutMs = 15000) {
   const start = Date.now();
+  const phaseDeadline = start + Math.min(timeoutMs, remainingMs());
 
-  while (Date.now() - start < timeoutMs) {
+  while (Date.now() < phaseDeadline) {
+    assertWakeTime();
     if (await hasReceipt(send, callbackId, text)) {
       return {ok:true, verifiedBy:"committed-user-turn"};
     }
@@ -300,15 +312,17 @@ async function confirmSubmission(send, callbackId, text, timeoutMs = 15000) {
   const state = await userMessageState(send);
   throw new Error("Send action was issued but ChatGPT did not confirm a new user message. State: " + JSON.stringify({
     userRoleCount:state?.count || 0,
-    userRoleTexts:state?.texts || []
+    userRoleLengths:(state?.texts || []).map(text => String(text).length)
   }));
 }
 
 async function sendMessage(send) {
   // Wait for ChatGPT to become idle and expose a real Send button.
   // Never submit a form or synthesize Enter while a Stop/generating control is active.
-  for (let i = 0; i < 120; i++) {
-    const clicked = await evaluate(send, `(() => {
+  for (let i = 0; i < 120 && remainingMs() > 0; i++) {
+    let clicked;
+    try {
+      clicked = await evaluate(send, `(() => {
       if ((location.origin + location.pathname) !== ${JSON.stringify(normalizeConversationUrl(expected))}) return {ok:false, reason:'destination-changed'};
       const composer = document.querySelector('[data-orchestrator-composer="true"]');
       if (!composer) return {ok:false, reason:'composer missing'};
@@ -342,25 +356,20 @@ async function sendMessage(send) {
 
       const label = b => [b.aria,b.testid,b.title,b.text].join(' ').toLowerCase();
       const busy = buttons.some(b => !b.disabled && /(^|\\s)(stop|cancel)(\\s|$)|stop generating|cancel generation/.test(label(b)));
-      const sendButton = buttons.find(b => !b.disabled && /send/.test(label(b)));
+      const sendButton = buttons.find(b => {
+        if (b.disabled) return false;
+        const accessible = [b.aria,b.title,b.text].map(x => x.trim()).filter(Boolean);
+        return accessible.some(x => /^(send|send prompt|send message)$/i.test(x)) || /(?:^|[-_])send(?:[-_]|$)/i.test(b.testid);
+      });
 
       if (busy) return {ok:false, reason:'chat-busy-generating'};
       if (sendButton) {
         sendButton.el.click();
         return {
           ok:true,
+          clicked:true,
           method:'button-click',
           button:{aria:sendButton.aria,testid:sendButton.testid,title:sendButton.title,type:sendButton.type,text:sendButton.text}
-        };
-      }
-
-      const submitButton = buttons.find(b => !b.disabled && b.type === 'submit' && !/(stop|cancel)/.test(label(b)));
-      if (submitButton) {
-        submitButton.el.click();
-        return {
-          ok:true,
-          method:'submit-button-click',
-          button:{aria:submitButton.aria,testid:submitButton.testid,title:submitButton.title,type:submitButton.type,text:submitButton.text}
         };
       }
 
@@ -369,7 +378,12 @@ async function sendMessage(send) {
         reason:'send-control-not-ready',
         buttons:buttons.map(({aria,testid,title,type,text,disabled})=>({aria,testid,title,type,text,disabled}))
       };
-    })()`);
+      })()`);
+    } catch (error) {
+      error.code = "SUBMISSION_AMBIGUOUS";
+      error.submissionAttempted = true;
+      throw error;
+    }
 
     if (clicked?.ok) {
       console.log("CHAT_SEND_METHOD:", JSON.stringify(clicked));
