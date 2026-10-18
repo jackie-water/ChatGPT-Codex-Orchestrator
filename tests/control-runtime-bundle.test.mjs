@@ -6,6 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { assertSafeRuntimePath, prepareControlRuntimeFiles, writeControlRuntimeFiles } from "../src/lib/control-runtime-bundle.mjs";
+import { renderWorkflow } from "../src/lib/control-render.mjs";
 
 const sourceRoot = fs.realpathSync(fileURLToPath(new URL("../", import.meta.url)));
 function temporary(t) {
