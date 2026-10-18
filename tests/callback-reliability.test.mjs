@@ -8,6 +8,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const extract = root => vm.runInNewContext(`(${receiptDomSource()})`, {}).call(null, root);
 class Element {
@@ -111,6 +113,41 @@ test("send selection is scoped to a genuine composer control and busy detection 
   }
   assert.deepEqual(canInsertCallbackDraft({destination, expectedDestination:destination, draft:"", message, busy:true}), {ok:false, reason:"chat-busy-generating"});
   assert.equal(canInsertCallbackDraft({destination, expectedDestination:destination, draft:"unrelated", message, busy:false}).ok, false);
+});
+
+test("browser-serialized send selector stays self-contained and fail-closed", () => {
+  const browserSelect = vm.runInNewContext(`(${selectSafeSendButton.toString()})`, {});
+  const destination = "https://chatgpt.com/c/chat-303";
+  const message = "[CODEX-AUTO callback_id=x] payload";
+  const run = (buttons, overrides = {}) => browserSelect({
+    destination,
+    expectedDestination: destination,
+    draft: message,
+    message,
+    buttons,
+    ...overrides
+  });
+
+  assert.equal(run([{testid:"send-feedback"}, {aria:"Send"}]), 1);
+  assert.equal(run([{aria:"STOP GENERATING"}, {aria:"Send"}]), -1);
+  assert.equal(run([{aria:"Send", disabled:true}]), -1);
+  assert.equal(run([{aria:"Send"}], {destination:"https://chatgpt.com/c/other"}), -1);
+  assert.equal(run([{aria:"Send"}], {draft:"changed"}), -1);
+});
+
+test("wake-chat identifies its real CLI path when spaces and Unicode are present", async () => {
+  const sourceDir = path.dirname(fileURLToPath(new URL("../runtime/scripts/wake-chat.mjs", import.meta.url)));
+  const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "wake chat fixture é-λ-"));
+  for (const name of ["wake-chat.mjs", "callback-delivery.mjs", "callback-receipt.mjs"]) {
+    fs.copyFileSync(path.join(sourceDir, name), path.join(fixtureDir, name));
+  }
+  const fixture = path.join(fixtureDir, "wake-chat.mjs");
+  const result = spawnSync(process.execPath, [fixture], {encoding:"utf8"});
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /WAKE_CHAT_FAILED: missing message/);
+
+  const imported = await import(`${pathToFileURL(fixture).href}?library-test=1`);
+  assert.equal(typeof imported.wakeDestinationMatches, "function");
 });
 
 test("shipped sender helpers keep mutation and send gates fail closed", () => {

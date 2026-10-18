@@ -1,10 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
 import { callbackReceiptMatches, normalizeReceiptText, receiptMatcherSource, receiptDomSource } from "./callback-receipt.mjs";
 import { createCallbackStateStore, assertSafeMutation, canInsertCallbackDraft, selectSafeSendButton, isBusyComposerControl, deliverCallback, nextDeliveryState, reconcileReceipt, isValidCallbackId } from "./callback-delivery.mjs";
 const message = process.argv.slice(2).join(" ");
-const isMain = Boolean(process.argv[1] && path.resolve(process.argv[1]) === path.resolve(new URL(import.meta.url).pathname));
+const isMain = Boolean(process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url)));
 if (isMain && !message.trim()) {
   console.error("WAKE_CHAT_FAILED: missing message");
   process.exit(2);

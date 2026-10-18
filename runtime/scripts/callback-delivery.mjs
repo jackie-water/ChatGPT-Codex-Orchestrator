@@ -54,12 +54,6 @@ export function canInsertCallbackDraft({destination, expectedDestination, draft,
   return {ok:true};
 }
 
-const SAFE_SEND_ARIA = new Set(["send", "send message", "send prompt"]);
-const SAFE_SEND_TESTIDS = new Set(["composer-send-button", "send-message-button"]);
-function isExcludedSendControl(button = {}) {
-  return /(?:feedback|submit)/i.test(String(button.testid || ""));
-}
-
 export function isBusyComposerControl(button = {}) {
   const values = [button.aria, button.title, button.text, button.testid]
     .map(value => String(value || "").trim().toLowerCase())
@@ -72,12 +66,27 @@ export function isBusyComposerControl(button = {}) {
 }
 
 export function selectSafeSendButton({destination, expectedDestination, draft, message, busy = false, buttons = []}) {
-  if (destination !== expectedDestination || busy || draft !== message || buttons.some(isBusyComposerControl)) return -1;
-  const candidates = buttons.filter(button => !button.disabled && !isBusyComposerControl(button) && !isExcludedSendControl(button));
-  const accessible = candidates.findIndex(button => SAFE_SEND_ARIA.has(String(button.aria || "").trim().toLowerCase()));
+  // Keep this function self-contained: wake-chat serializes it into the
+  // isolated browser Runtime.evaluate VM with Function#toString().
+  const safeSendAria = new Set(["send", "send message", "send prompt"]);
+  const safeSendTestids = new Set(["composer-send-button", "send-message-button"]);
+  const isBusy = (button = {}) => {
+    const values = [button.aria, button.title, button.text, button.testid]
+      .map(value => String(value || "").trim().toLowerCase())
+      .filter(Boolean);
+    return values.some(value =>
+      /(?:^|[\s_-])stop(?:[\s_-]|$)/i.test(value) ||
+      /stop[\s_-]*generating/i.test(value) ||
+      /cancel[\s_-]*generation/i.test(value)
+    );
+  };
+  const isExcluded = (button = {}) => /(?:feedback|submit)/i.test(String(button.testid || ""));
+  if (destination !== expectedDestination || busy || draft !== message || buttons.some(isBusy)) return -1;
+  const candidates = buttons.filter(button => !button.disabled && !isBusy(button) && !isExcluded(button));
+  const accessible = candidates.findIndex(button => safeSendAria.has(String(button.aria || "").trim().toLowerCase()));
   if (accessible >= 0) return buttons.indexOf(candidates[accessible]);
-  return candidates.findIndex(button => SAFE_SEND_TESTIDS.has(String(button.testid || "").trim().toLowerCase())) >= 0
-    ? buttons.indexOf(candidates.find(button => SAFE_SEND_TESTIDS.has(String(button.testid || "").trim().toLowerCase())))
+  return candidates.findIndex(button => safeSendTestids.has(String(button.testid || "").trim().toLowerCase())) >= 0
+    ? buttons.indexOf(candidates.find(button => safeSendTestids.has(String(button.testid || "").trim().toLowerCase())))
     : -1;
 }
 
