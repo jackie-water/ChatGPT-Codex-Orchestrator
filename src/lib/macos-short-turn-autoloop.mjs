@@ -61,8 +61,8 @@ function instancePaths(instanceId){
 }
 function privateLayout(p,files=[],code="UNTRUSTED_ROUTE_REGISTRY",includePending=false){
   // Validate the expected HOME-relative path component-by-component before any read.
-  for(const dir of [p.root,p.instances,p.base,...(includePending?[p.pending]:[])]){try{privateDir(dir);}catch(e){if(e.code==="ENOENT")fail(code);throw e;}}
-  for(const file of files){try{privateFile(file);}catch(e){if(e.code==="ENOENT")fail(code);throw e;}}
+  for(const dir of [p.root,p.instances,p.base,...(includePending?[p.pending]:[])]){try{privateDir(dir);}catch(e){if(["UNTRUSTED_SCOPE_AUTHORITY","ENOENT","ENOTDIR","EACCES","EPERM"].includes(e.code))fail(code);throw e;}}
+  for(const file of files){try{privateFile(file);}catch(e){if(["UNTRUSTED_SCOPE_AUTHORITY","ENOENT","ENOTDIR","EACCES","EPERM"].includes(e.code))fail(code);throw e;}}
   return p;
 }
 function privateJson(file,code){
