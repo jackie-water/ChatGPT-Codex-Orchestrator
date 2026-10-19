@@ -37,6 +37,43 @@ test("protected actions require the verified issuer capability and exact descrip
 
 test("verified issuer records authorize each protected action kind and survive reload",()=>{const root=fixture();try{for(const kind of ["CODEX_RUN","VALIDATE","CODE_REVIEW"]){const taskId=`allowed-${kind}`,s=setup(root,{authorityScope:{allowedActionKinds:[kind]}},taskId),descriptor={project:"orchestrator-dev",route:"chat-333",chatUrl:url,taskId,sourceBranch,sourceSha,maxIterations:5},accepted=casRegisterNextAction({stateDir:root,taskId,expectedVersion:s.versionNumber,nextAction:{kind,logicalIteration:1,descriptor}});assert.equal(statusTask({stateDir:root,taskId}).nextAction.kind,kind);assert.equal(accepted.nextAction.capability,s.actionCapability);}}finally{cleanup(root);}});
 
+test("explicit logical iterations stay strict while omission alone defaults",()=>{
+  const invalid=[0,null,NaN,undefined,false,"",-1,1.5];
+  for(const kind of ["CHAT_CONTINUE","CODEX_RUN","VALIDATE","CODE_REVIEW"]){
+    for(const [index,value] of invalid.entries()){
+      const root=fixture(),taskId=`iteration-${kind}-${index}`;
+      const extra=kind==="CHAT_CONTINUE"?{}:{authorityScope:{allowedActionKinds:[kind]}};
+      try{
+        const initial=setup(root,extra,taskId),taskDir=path.join(root,"tasks",taskId);
+        const stateFile=path.join(taskDir,"state.json"),journal=path.join(taskDir,"journal.jsonl");
+        const beforeState=fs.readFileSync(stateFile),beforeJournal=fs.readFileSync(journal);
+        const descriptor=kind==="CHAT_CONTINUE"?null:{project:"orchestrator-dev",route:"chat-333",chatUrl:url,taskId,sourceBranch,sourceSha,maxIterations:5};
+        assert.throws(()=>casRegisterNextAction({stateDir:root,taskId,expectedVersion:initial.versionNumber,nextAction:{kind,logicalIteration:value,descriptor}}),/INVALID_ITERATION/);
+        assert.deepEqual(fs.readFileSync(stateFile),beforeState);
+        assert.deepEqual(fs.readFileSync(journal),beforeJournal);
+        assert.deepEqual(dispatchIntent({stateDir:root,taskId}).intents,[]);
+      }finally{cleanup(root);}
+    }
+    const validRoot=fixture(),validTask=`iteration-valid-${kind}`;
+    try{
+      const extra=kind==="CHAT_CONTINUE"?{}:{authorityScope:{allowedActionKinds:[kind]}};
+      const initial=setup(validRoot,extra,validTask);
+      const descriptor=kind==="CHAT_CONTINUE"?null:{project:"orchestrator-dev",route:"chat-333",chatUrl:url,taskId:validTask,sourceBranch,sourceSha,maxIterations:5};
+      const accepted=casRegisterNextAction({stateDir:validRoot,taskId:validTask,expectedVersion:initial.versionNumber,nextAction:{kind,logicalIteration:1,descriptor}});
+      assert.equal(accepted.nextAction.logicalIteration,1);
+      assert.equal(dispatchIntent({stateDir:validRoot,taskId:validTask}).intents.length,1);
+    }finally{cleanup(validRoot);}
+    const omittedRoot=fixture(),omittedTask=`iteration-omitted-${kind}`;
+    try{
+      const extra=kind==="CHAT_CONTINUE"?{}:{authorityScope:{allowedActionKinds:[kind]}};
+      const initial=setup(omittedRoot,extra,omittedTask);
+      const descriptor=kind==="CHAT_CONTINUE"?null:{project:"orchestrator-dev",route:"chat-333",chatUrl:url,taskId:omittedTask,sourceBranch,sourceSha,maxIterations:5};
+      const accepted=casRegisterNextAction({stateDir:omittedRoot,taskId:omittedTask,expectedVersion:initial.versionNumber,nextAction:{kind,descriptor}});
+      assert.equal(accepted.nextAction.logicalIteration,initial.identity.logicalIteration);
+    }finally{cleanup(omittedRoot);}
+  }
+});
+
 test("pending-wake receipts require a committed user proof and exact delivery identity",()=>{const root=fixture();try{for(const verified_by of ["submission-confirmed","draft","click","assistant echo",undefined]){const taskId=`receipt-negative-${verified_by===undefined?"missing":verified_by.replace(/[^A-Za-z0-9._:-]/g,"-")}`;let s=setup(root,{},taskId);s=casRegisterNextAction({stateDir:root,taskId,expectedVersion:s.versionNumber,nextAction:action()});dispatchIntent({stateDir:root,taskId});const instance=path.join(process.env.HOME,".chatgpt-codex-orchestrator","instances","instance-a"),dir=path.join(instance,"pending-wakes");fs.mkdirSync(dir,{recursive:true});const receipt={routing_version:"explicit-route-v1",callback_id:s.nextAction.callbackId,chat_url:url,message:s.nextAction.callbackMessage,delivery_state:"DELIVERED"};if(verified_by!==undefined)receipt.verified_by=verified_by;privateWrite(path.join(dir,`${s.nextAction.callbackId}.json`),JSON.stringify(receipt));assert.throws(()=>claimCallbackReceipt({stateDir:root,taskId,callbackId:s.nextAction.callbackId,message:s.nextAction.callbackMessage}),/WAITING_SERVICE/);}}finally{cleanup(root);}});
 
 test("actual route schema may omit slug metadata but conflicting optional slug is rejected",()=>{const root=fixture();try{const projectUrl="https://chatgpt.com/g/g-p-orchestrator-dev/c/6ad4ae62-c46c-83ec-8a82-604101ec2394",instance=path.join(process.env.HOME,".chatgpt-codex-orchestrator","instances","instance-a");privateInstance(instance);const route={projectKey:"orchestrator-dev",route:"chat-333",chat_url:projectUrl,status:"active",registration_issue:333};privateWrite(path.join(instance,"chat-routes.json"),JSON.stringify({routes:[route]}));assert.equal(registerTask({stateDir:root,identity:{...ident(),chatUrl:projectUrl}}).identity.chatUrl,projectUrl);privateWrite(path.join(instance,"chat-routes.json"),JSON.stringify({routes:[{...route,project_slug:"g-p-conflict"}]}));assert.throws(()=>registerTask({stateDir:root,identity:{...ident(),taskId:"conflicting-slug",chatUrl:projectUrl}}),/PINNED_ROUTE_MISMATCH/);}finally{cleanup(root);}});
