@@ -6,12 +6,14 @@ import path from "node:path";
 import {spawnSync} from "node:child_process";
 
 test("dry-run reports the installation plan without enabling the real project",()=>{
-  const home=fs.mkdtempSync(path.join(os.tmpdir(),"orchestrator-dry-run-"));
+  const tempBase=process.platform==="darwin"?fs.realpathSync(os.tmpdir()):os.tmpdir();
+  const home=fs.mkdtempSync(path.join(tempBase,"orchestrator-dry-run-"));
+  fs.chmodSync(home,0o700);
   try{
     const r=spawnSync(process.execPath,["src/cli.mjs","dry-run","--json","--language","en"],{
       cwd:process.cwd(),
       encoding:"utf8",
-      env:{...process.env,CHATGPT_CODEX_ORCHESTRATOR_HOME:home}
+      env:{...process.env,CHATGPT_CODEX_ORCHESTRATOR_HOME:home,HOME:home}
     });
     assert.equal(r.status,0);
     const payload=JSON.parse(r.stdout);
