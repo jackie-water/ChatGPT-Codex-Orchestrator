@@ -95,11 +95,19 @@ function action(state, actionId, messageKey, extra = {}) {
 function macosStateBound(state, recovery) {
   const identity = recovery?.instances?.length === 1 ? recovery.instances[0]?.identity : null;
   const route = state?.sandbox_review_route || state?.review_route;
+  const routeBinding = recovery?.instances?.length === 1
+    ? recovery.instances[0]?.route_bindings?.find(item => item?.route === route)
+    : null;
   if (!state?.installation_id || !state?.instance_id || !state?.instance_root || !state?.control_repository || !state?.sandbox_repository
     || recovery?.status !== "NEEDS_VERIFICATION" || recovery.instance_ids?.length !== 1
     || recovery.missing_verification_gates?.length || !identity
     || !identity.instance_id || !identity.installation_id || !identity.control_repository || !identity.sandbox_repository
-    || !route || !recovery.instances[0]?.route_names?.includes(route)) return false;
+    || !route || !routeBinding || routeBinding.status !== "active"
+    || routeBinding.project !== state.sandbox_project_key
+    || routeBinding.installation_id !== state.installation_id
+    || (routeBinding.instance_id !== undefined && routeBinding.instance_id !== state.instance_id)
+    || (routeBinding.control_repository !== undefined && routeBinding.control_repository !== state.control_repository)
+    || (routeBinding.sandbox_repository !== undefined && routeBinding.sandbox_repository !== state.sandbox_repository)) return false;
   const instanceId = recovery.instance_ids[0];
   const expectedRoot = path.join(path.resolve(os.homedir()), ".chatgpt-codex-orchestrator", "instances", instanceId);
   return canonicalInstallationId(state.installation_id) === instanceId

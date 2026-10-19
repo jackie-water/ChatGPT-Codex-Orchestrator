@@ -30,9 +30,8 @@ function safeTreeBasename(value) {
   return typeof value === "string"
     && value.length > 0
     && value.length <= MAX_TREE_BASENAME_LENGTH
-    && value !== "."
-    && value !== ".."
-    && /^[A-Za-z0-9._-]+$/.test(value);
+    && (value === ".macos-native-helper-install.lock"
+      || (!value.startsWith(".") && /^[A-Za-z0-9._ -]+$/.test(value)));
 }
 
 function lstat(fsImpl, file) {
@@ -122,6 +121,21 @@ function routeNames(value) {
   return routes.map(item => item?.route).filter(safeName).sort();
 }
 
+function routeBindings(value) {
+  const routes = Array.isArray(value?.routes) ? value.routes : value?.routes && typeof value.routes === "object" ? Object.entries(value.routes).map(([route, item]) => ({ route, ...item })) : [];
+  const identity = declaredIdentity(value);
+  return routes
+    .filter(item => safeName(item?.route))
+    .map(item => ({
+      route: item.route,
+      status: item.status,
+      project: item.project,
+      ...Object.fromEntries(IDENTITY_FIELDS
+        .filter(key => Object.hasOwn(item, key) || Object.hasOwn(identity, key))
+        .map(key => [key, Object.hasOwn(item, key) ? item[key] : identity[key]]))
+    }));
+}
+
 const IDENTITY_FIELDS = ["instance_id", "installation_id", "control_repository", "sandbox_repository"];
 
 function declaredIdentity(value) {
@@ -190,7 +204,7 @@ function candidate(fsImpl, instancesRoot, id) {
   if (mismatched) reasons.push("matching_instance_identifier");
   const conflict = (routeFile.present && !routeFile.valid) || snapshots.some(name => name.endsWith(":INVALID")) || (instanceMetadata.present && !instanceMetadata.valid) || mismatched || routeIdentityMismatch;
   const identity = { instance_id: instanceIds[0] || null, installation_id: installationIds[0] || null, control_repository: controlRepositories[0] || null, sandbox_repository: sandboxRepositories[0] || null };
-  return { instance_id: id, status: conflict ? "CONFLICT" : "NEEDS_VERIFICATION", metadata: { chat_routes: routeFile.present, migration_snapshots: snapshots.length > 0, instance: instanceMetadata.present }, identity, route_names: routeNamesFound, missing_verification_gates: [...new Set(reasons)].sort(), ...(conflict ? {} : { clues_unverified: true }) };
+  return { instance_id: id, status: conflict ? "CONFLICT" : "NEEDS_VERIFICATION", metadata: { chat_routes: routeFile.present, migration_snapshots: snapshots.length > 0, instance: instanceMetadata.present }, identity, route_names: routeNamesFound, route_bindings: routeFile.valid ? routeBindings(routeFile.value) : [], missing_verification_gates: [...new Set(reasons)].sort(), ...(conflict ? {} : { clues_unverified: true }) };
 }
 
 export function inspectMacosExistingInstanceRecovery({ home = os.homedir(), fsImpl = fs } = {}) {

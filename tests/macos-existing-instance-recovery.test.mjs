@@ -77,6 +77,29 @@ test("nested external browser-profile symlink fails closed", t => {
   assert.ok(result.missing_verification_gates.includes("safe_instance_tree"));
 });
 
+test("Chromium browser-profile names with ASCII spaces remain safe tree evidence", t => {
+  const f = fixture(t);
+  const instance = path.join(f.instances, "spaced");
+  fs.mkdirSync(path.join(instance, "Local Storage", "leveldb"), { recursive: true, mode: 0o700 });
+  fs.mkdirSync(path.join(instance, "Session Storage"), { mode: 0o700 });
+  fs.mkdirSync(path.join(instance, "Code Cache"), { mode: 0o700 });
+  fs.writeFileSync(path.join(instance, "Local Storage", "leveldb", "000003.log"), "x", { mode: 0o600 });
+  fs.chmodSync(path.join(instance, "Local Storage", "leveldb", "000003.log"), 0o600);
+  const result = inspectMacosExistingInstanceRecovery({ home: f.home });
+  assert.equal(result.status, "NEEDS_VERIFICATION");
+  assert.equal(result.missing_verification_gates.includes("safe_instance_tree"), false);
+});
+
+test("control-character browser-profile names fail closed", t => {
+  const f = fixture(t);
+  const instance = path.join(f.instances, "control-name");
+  fs.mkdirSync(instance, { mode: 0o700 });
+  fs.mkdirSync(path.join(instance, "Local\nStorage"), { mode: 0o700 });
+  const result = inspectMacosExistingInstanceRecovery({ home: f.home });
+  assert.equal(result.status, "CONFLICT");
+  assert.ok(result.missing_verification_gates.includes("safe_instance_tree"));
+});
+
 test("private dot-named native-helper lock remains safe instance evidence", t => {
   const f = fixture(t);
   const instance = path.join(f.instances, "locked");
@@ -131,6 +154,15 @@ test("distinct control and sandbox repositories are accepted when each role is c
   const result = inspectMacosExistingInstanceRecovery({ home: f.home });
   assert.equal(result.status, "NEEDS_VERIFICATION");
   assert.deepEqual(result.missing_verification_gates, []);
+  assert.deepEqual(result.instances[0].route_bindings, [{
+    route: "chat-expected",
+    status: "active",
+    project: "sandbox-expected",
+    instance_id: "expected",
+    installation_id: "install-a",
+    control_repository: "org/control-a",
+    sandbox_repository: "org/sandbox-a"
+  }]);
 });
 
 test("same-role repository contradictions fail closed", t => {
@@ -232,5 +264,38 @@ test("Darwin setup rejects a fully populated state bound to another existing ins
     assert.equal(fs.readFileSync(path.join(stateRoot, "install-state.json"), "utf8"), before);
     assert.equal(fs.existsSync(marker), false);
   }
+});
+
+test("Darwin dry-run rejects the requested inactive route even when another route is active", { skip: process.platform !== "darwin" }, t => {
+  const f = fixture(t);
+  const instance = path.join(f.instances, "route-state");
+  const identity = { instance_id: "route-state", installation_id: "install-route-state", control_repository: "owner/control", sandbox_repository: "owner/sandbox" };
+  fs.mkdirSync(instance, { mode: 0o700 });
+  writeJson(path.join(instance, "instance.json"), identity);
+  writeJson(path.join(instance, "chat-routes.json"), {
+    ...identity,
+    routes: [
+      { route: "chat-active", project: "sandbox-route-state", status: "active", installation_id: identity.installation_id },
+      { route: "chat-inactive", project: "sandbox-route-state", status: "inactive", installation_id: identity.installation_id }
+    ]
+  });
+  const stateRoot = path.join(f.home, "dev-state");
+  writeJson(path.join(stateRoot, "install-state.json"), {
+    installation_id: identity.installation_id,
+    instance_id: identity.instance_id,
+    instance_root: instance,
+    control_repository: identity.control_repository,
+    sandbox_repository: identity.sandbox_repository,
+    sandbox_project_key: "sandbox-route-state",
+    sandbox_review_route: "chat-inactive"
+  });
+  const result = spawnSync(process.execPath, [path.join(process.cwd(), "src/cli.mjs"), "dry-run", "--json"], {
+    encoding: "utf8",
+    env: { ...process.env, HOME: f.home, CHATGPT_CODEX_ORCHESTRATOR_HOME: stateRoot }
+  });
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.error_id, "MACOS-EXISTING-INSTANCE-REVIEW");
+  assert.equal(payload.mutations_performed, false);
+  assert.deepEqual(payload.plan, []);
 });
 
