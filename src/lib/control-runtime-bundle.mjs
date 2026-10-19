@@ -15,6 +15,7 @@ const SCRIPT_NAMES = Object.freeze([
   "macos-finalize-codex.mjs",
   "macos-merge-approved.mjs",
   "macos-run-codex.mjs",
+  "macos-short-turn-controller.mjs",
   "merge-approved.ps1",
   "navigate-reviewer-chat.mjs",
   "normalize-control-event.mjs",
@@ -40,7 +41,8 @@ const LIBRARY_NAMES = Object.freeze([
   "macos-codex-run-contract.mjs",
   "macos-postexecution-wrapper.mjs",
   "macos-code-review-runtime.mjs",
-  "run-failure-state.mjs"
+  "run-failure-state.mjs",
+  "macos-short-turn-autoloop.mjs"
 ]);
 const MANIFEST = Object.freeze([
   ...SCRIPT_NAMES.map(name => Object.freeze({ source: `runtime/scripts/${name}`, path: `scripts/${name}` })),

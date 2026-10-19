@@ -37,12 +37,17 @@ function generate(t) {
   fixture.files = prepareControlRuntimeFiles({ sourceRoot, controlRoot: fixture.controlRoot });
   writeControlRuntimeFiles({ controlRoot: fixture.controlRoot, files: fixture.files });
   fixture.home = path.join(fixture.root, "home");
-  fs.mkdirSync(fixture.home);
+  fs.mkdirSync(fixture.home, { mode: 0o700 });
+  fs.chmodSync(fixture.home, 0o700);
   return fixture;
 }
 
 test("runtime payload contains only the explicit scripts and native dependency closure", t => {
   const { root, controlRoot } = temporary(t);
+  const sourceBytes = new Map([
+    ["runtime/scripts/macos-short-turn-controller.mjs", fs.readFileSync(path.join(sourceRoot, "runtime/scripts/macos-short-turn-controller.mjs"))],
+    ["src/lib/macos-short-turn-autoloop.mjs", fs.readFileSync(path.join(sourceRoot, "src/lib/macos-short-turn-autoloop.mjs"))]
+  ]);
   const fixtureSource = sourceFixture(root, controlRoot);
   for (const relative of ["config.ps1", "credentials.json", "sessions/private.json", "src/lib/unrelated.mjs", "runtime/scripts/private-token.json", "runtime/scripts/local-extra.mjs"]) {
     const target = path.join(fixtureSource, ...relative.split("/"));
@@ -50,8 +55,8 @@ test("runtime payload contains only the explicit scripts and native dependency c
     fs.writeFileSync(target, "must not be packaged\n");
   }
   const files = prepareControlRuntimeFiles({ sourceRoot: fixtureSource, controlRoot });
-  assert.equal(files.length, 35);
-  assert.equal(files.filter(file => file.path.startsWith("src/lib/")).length, 6);
+  assert.equal(files.length, 37);
+  assert.equal(files.filter(file => file.path.startsWith("src/lib/")).length, 7);
   assert.ok(files.every(file => Buffer.isBuffer(file.content) && !file.content.includes("must not be packaged")));
   assert.deepEqual(fs.readdirSync(controlRoot), []);
   writeControlRuntimeFiles({ controlRoot, files });
@@ -59,8 +64,34 @@ test("runtime payload contains only the explicit scripts and native dependency c
   const dispatch = fs.readFileSync(path.join(controlRoot, "scripts", "macos-dispatch.mjs"), "utf8");
   assert.match(dispatch, /from "\.\.\/src\/lib\/macos-codex-run-contract\.mjs"/);
   assert.doesNotMatch(dispatch, /\.\.\/\.\.\/src\/lib\//);
+  assert.match(fs.readFileSync(path.join(controlRoot, "scripts", "macos-short-turn-controller.mjs"), "utf8"), /from "\.\.\/src\/lib\/macos-short-turn-autoloop\.mjs"/);
   assert.match(fs.readFileSync(path.join(controlRoot, "src", "lib", "macos-postexecution-wrapper.mjs"), "utf8"), /from "\.\.\/\.\.\/scripts\/callback-delivery\.mjs"/);
+  for (const [relative, bytes] of sourceBytes) assert.deepEqual(fs.readFileSync(path.join(sourceRoot, relative)), bytes);
   assert.equal(fs.existsSync(path.join(root, "src")), false);
+});
+
+test("staged short-turn controller registers only unsigned Chat tasks and rejects caller scope or invalid budgets", t => {
+  const { controlRoot, home } = generate(t);
+  const stateDir = path.join(home, "ledger");
+  const instance = path.join(home, ".chatgpt-codex-orchestrator", "instances", "instance-a");
+  const routeFile = path.join(instance, "chat-routes.json");
+  fs.mkdirSync(instance, { recursive: true, mode: 0o700 });
+  fs.chmodSync(path.join(home, ".chatgpt-codex-orchestrator"), 0o700);
+  fs.chmodSync(path.join(home, ".chatgpt-codex-orchestrator", "instances"), 0o700);
+  fs.writeFileSync(routeFile, JSON.stringify({ routes: [{ projectKey: "orchestrator-dev", route: "chat-333", chat_url: "https://chatgpt.com/c/chat-333", status: "active" }] }), { mode: 0o600 });
+  const controller = path.join(controlRoot, "scripts", "macos-short-turn-controller.mjs");
+  const args = [controller, "register", "--state-dir", stateDir, "--instance-id", "instance-a", "--project", "orchestrator-dev", "--route", "chat-333", "--chat-url", "https://chatgpt.com/c/chat-333", "--task-id", "task-cli", "--iteration", "1"];
+  const run = extra => spawnSync(process.execPath, [...args, ...extra], { cwd: home, env: childEnvironment(home), encoding: "utf8", timeout: 10000 });
+  const accepted = run([]);
+  assert.equal(accepted.status, 0, accepted.stderr);
+  assert.equal(JSON.parse(accepted.stdout).acceptedScope, undefined);
+  for (const extra of [["--trusted-scope", "{}"], ["--max-iterations", "0"], ["--max-iterations", "1.5"], ["--max-iterations", "NaN"], ["--max-iterations"]]) {
+    const rejected = run(extra);
+    assert.notEqual(rejected.status, 0, extra.join(" "));
+    assert.match(rejected.stderr, extra[0] === "--trusted-scope" ? /UNTRUSTED_SCOPE_INPUT/ : /INVALID_BUDGET|MISSING_MAX_ITERATIONS/);
+  }
+  assert.equal(fs.existsSync(path.join(stateDir, "tasks", "task-cli", "state.json")), true);
+  assert.equal(fs.existsSync(path.join(stateDir, "tasks", "task-cli", "journal.jsonl")), true);
 });
 
 test("generated native libraries import using only the isolated Control tree", t => {
