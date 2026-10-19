@@ -15,6 +15,7 @@ import { ensureInstallerChatRegistration, normalizeChatUrl } from "./lib/chat-re
 import { pendingCallbackCount, doctorHealth, repairHealth } from "./lib/runtime-health.mjs";
 import { macosPrerequisites, migrationPreflight, macosRuntimeAction, prepareMigrationIntent } from "./lib/macos-platform.mjs";
 import { macosNativeHelperPreflight, prepareMacosNativeHelper, verifyMacosNativeCapability } from "./lib/macos-native-helper-install.mjs";
+import { inspectMacosExistingInstanceRecovery } from "./lib/macos-existing-instance-recovery.mjs";
 import {
   sandboxSmokeStatus,
   startSandboxSmoke,
@@ -90,10 +91,27 @@ function action(state, actionId, messageKey, extra = {}) {
   };
 }
 
+function macosStateBound(state) {
+  return Boolean(state?.installation_id && state?.instance_id && state?.instance_root);
+}
+
+function macosRecoveryReport() {
+  return inspectMacosExistingInstanceRecovery({ home: os.homedir() });
+}
+
 
 function dryRun() {
-  const state=loadState({create:false});
+  let state;
+  try { state=loadState({create:false}); }
+  catch {
+    const existingInstanceRecovery=process.platform==="darwin"?macosRecoveryReport():null;
+    return emit({status:"ERROR",error_id:"MACOS-EXISTING-INSTANCE-REVIEW",preferred_language:"en",message:"macOS installer state is unreadable; dry-run stopped before any external setup action.",dry_run:true,existing_instance_recovery:existingInstanceRecovery,mutations_performed:false},1);
+  }
   const lang=ensureStateLanguage(state);
+  const existingInstanceRecovery=process.platform==="darwin"?macosRecoveryReport():null;
+  if(existingInstanceRecovery && existingInstanceRecovery.status!=="ABSENT" && (!macosStateBound(state) || existingInstanceRecovery.status==="CONFLICT")) {
+    return emit({status:existingInstanceRecovery.status==="CONFLICT"?"NEEDS_USER_ACTION":"PASS",preferred_language:lang,message:"macOS existing-instance recovery requires a separate reviewed action; dry-run performed no mutation.",dry_run:true,mutations_performed:false,existing_instance_recovery:existingInstanceRecovery,plan:[]});
+  }
   const git=commandExists("git");
   const node=commandExists("node");
   const gh=commandExists("gh");
@@ -168,6 +186,7 @@ function dryRun() {
     message:lang==="zh-CN"?"安装预演完成，没有修改任何 GitHub repository、runner 或项目。":"Installation dry-run complete. No GitHub repository, runner or project was modified.",
     dry_run:true,
     mutations_performed:false,
+    existing_instance_recovery:existingInstanceRecovery,
     migration_preflight:process.platform==="darwin"?migrationPreflight({state}):null,
     macos_native_helper:process.platform==="darwin"?macosNativeHelperPreflight({state,installationId:state.installation_id}):null,
     plan
@@ -256,9 +275,16 @@ function answer() {
 }
 
 function runSetup() {
-  const state = loadState();
+  let state;
+  try { state = loadState({create:process.platform!=="darwin"}); }
+  catch(error) {
+    if(process.platform!=="darwin") throw error;
+    return emit({status:"ERROR",error_id:"MACOS-EXISTING-INSTANCE-REVIEW",recoverable:false,preferred_language:"en",message:"macOS installer state is unreadable; existing-instance review is required before setup can continue.",details:"Malformed or unreadable installer state",mutations_performed:false},1);
+  }
   const lang = ensureStateLanguage(state);
   if(process.platform==="darwin") {
+    const existingInstanceRecovery=macosRecoveryReport();
+    if(existingInstanceRecovery.status!=="ABSENT" && (!macosStateBound(state) || existingInstanceRecovery.status==="CONFLICT")) return emit({status:existingInstanceRecovery.status==="CONFLICT"?"ERROR":"NEEDS_USER_ACTION",error_id:"MACOS-EXISTING-INSTANCE-REVIEW",recoverable:existingInstanceRecovery.status!=="CONFLICT",preferred_language:lang,message:"An existing macOS instance was found without authoritative binding evidence. Setup/resume stopped before installer state, migration intent, Control, Sandbox, runner, or helper changes.",existing_instance_recovery:existingInstanceRecovery,mutations_performed:false},1);
     const prerequisites=macosPrerequisites();
     const migration=migrationPreflight({state});
     const ready=prerequisites.node&&prerequisites.git&&prerequisites.gh&&prerequisites.codex&&prerequisites.session_auth&&prerequisites.native_helper?.status==="PASS"&&migration.status==="READY";
@@ -922,6 +948,16 @@ function refreshRuntime() {
   }
 }
 
+function recoveryPreflight() {
+  if (process.platform !== "darwin") return emit({status:"PASS",preferred_language:"en",mutations_performed:false,existing_instance_recovery:{status:"UNSUPPORTED",platform:process.platform}});
+  let state;
+  let stateInvalid=false;
+  try { state=loadState({create:false}); } catch { state={}; stateInvalid=true; }
+  const report=macosRecoveryReport();
+  const blocked=stateInvalid || (report.status!=="ABSENT" && (!macosStateBound(state) || report.status==="CONFLICT"));
+  emit({status:blocked?(report.status==="CONFLICT"?"ERROR":"NEEDS_USER_ACTION"):"PASS",error_id:blocked?"MACOS-EXISTING-INSTANCE-REVIEW":undefined,preferred_language:"en",message:blocked?"Existing macOS instance evidence requires separate human review; no activation or adoption was performed.":"macOS existing-instance recovery preflight completed without mutation.",existing_instance_recovery:report,mutations_performed:false},blocked?1:0);
+}
+
 function reportProblem() {
   const state=loadState();
   const lang=ensureStateLanguage(state);
@@ -973,7 +1009,8 @@ else if (command==="migration-preflight") {
   const state=loadState({create:false}); const lang=ensureStateLanguage(state);
   emit({status:"PASS",preferred_language:lang,mutations_performed:false,migration:migrationPreflight({state})});
 }
+else if (command==="recovery-preflight") recoveryPreflight();
 else if (command==="submit-report") submitReport();
 else if (command==="answer") answer();
 else if (command==="errors") emit({status:"PASS",errors:ERROR_CATALOG});
-else emit({status:"PASS",message:"Commands: dry-run, setup, resume, refresh-runtime, answer, github-login, codex-login, codex-open, smoke-status, smoke-review, smoke-approve, doctor, status, repair, report-problem, submit-report, errors"});
+else emit({status:"PASS",message:"Commands: dry-run, setup, resume, recovery-preflight, refresh-runtime, answer, github-login, codex-login, codex-open, smoke-status, smoke-review, smoke-approve, doctor, status, repair, report-problem, submit-report, errors"});
