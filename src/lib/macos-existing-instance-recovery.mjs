@@ -5,6 +5,9 @@ import os from "node:os";
 const ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const PRIVATE_MODES = new Set([0o600, 0o700]);
 const INSTANCE_ROOT_NAME = ".chatgpt-codex-orchestrator";
+const MAX_TREE_ENTRIES = 4096;
+const MAX_TREE_DEPTH = 64;
+const MAX_TREE_BASENAME_LENGTH = 255;
 
 function uidAllowed(stat) {
   return typeof process.getuid !== "function" || stat.uid === process.getuid() || stat.uid === 0;
@@ -21,6 +24,15 @@ function ancestorModeAllowed(stat) {
 
 function safeName(value) {
   return typeof value === "string" && ID.test(value) && value !== "." && value !== "..";
+}
+
+function safeTreeBasename(value) {
+  return typeof value === "string"
+    && value.length > 0
+    && value.length <= MAX_TREE_BASENAME_LENGTH
+    && value !== "."
+    && value !== ".."
+    && /^[A-Za-z0-9._-]+$/.test(value);
 }
 
 function lstat(fsImpl, file) {
@@ -63,6 +75,39 @@ function safeFile(fsImpl, file) {
   return { ok: true };
 }
 
+function safeInstanceTree(fsImpl, root) {
+  const pending = [{ file: path.resolve(root), depth: 0 }];
+  let visited = 0;
+  while (pending.length) {
+    const { file, depth } = pending.pop();
+    const relative = path.relative(path.resolve(root), file);
+    if (relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return { ok: false, reason: "traversal" };
+    const result = lstat(fsImpl, file);
+    if (!result.ok) return { ok: false, reason: result.missing ? "traversal" : "unreadable" };
+    const stat = result.stat;
+    if (stat.isSymbolicLink()) return { ok: false, reason: "symlink" };
+    if (!uidAllowed(stat)) return { ok: false, reason: "unsafe-owner" };
+    if (stat.isDirectory()) {
+      if (!privateMode(stat, true)) return { ok: false, reason: "odd-directory-mode" };
+      if (depth >= MAX_TREE_DEPTH) return { ok: false, reason: "tree-bound" };
+      let entries;
+      try { entries = fsImpl.readdirSync(file, { withFileTypes: true }); }
+      catch { return { ok: false, reason: "traversal" }; }
+      visited += entries.length;
+      if (visited > MAX_TREE_ENTRIES) return { ok: false, reason: "tree-bound" };
+      for (const entry of entries) {
+        const child = path.join(file, entry.name);
+        const childRelative = path.relative(path.resolve(root), child);
+        if (!safeTreeBasename(entry.name) || childRelative.startsWith(`..${path.sep}`) || path.isAbsolute(childRelative)) return { ok: false, reason: "traversal" };
+        pending.push({ file: child, depth: depth + 1 });
+      }
+    } else if (!stat.isFile() || stat.nlink !== 1 || !privateMode(stat, false)) {
+      return { ok: false, reason: stat.isSymbolicLink() ? "symlink" : "unsafe-leaf" };
+    }
+  }
+  return { ok: true };
+}
+
 function readJson(fsImpl, file) {
   const safe = safeFile(fsImpl, file);
   if (!safe.ok) return safe.missing ? { present: false } : { present: true, valid: false, reason: safe.reason };
@@ -75,6 +120,14 @@ function readJson(fsImpl, file) {
 function routeNames(value) {
   const routes = Array.isArray(value?.routes) ? value.routes : value?.routes && typeof value.routes === "object" ? Object.entries(value.routes).map(([route, item]) => ({ route, ...item })) : [];
   return routes.map(item => item?.route).filter(safeName).sort();
+}
+
+const IDENTITY_FIELDS = ["instance_id", "installation_id", "control_repository", "sandbox_repository"];
+
+function declaredIdentity(value) {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? Object.fromEntries(IDENTITY_FIELDS.filter(key => Object.hasOwn(value, key)).map(key => [key, value[key]]))
+    : {};
 }
 
 function snapshotNames(fsImpl, instanceRoot, entries) {
@@ -92,23 +145,26 @@ function snapshotNames(fsImpl, instanceRoot, entries) {
 
 function candidate(fsImpl, instancesRoot, id) {
   const root = path.join(instancesRoot, id);
-  const entries = fsImpl.readdirSync(root, { withFileTypes: true }).map(entry => entry.name).sort();
-  for (const name of entries) {
-    const file = path.join(root, name);
-    const check = fsImpl.lstatSync(file).isDirectory() ? safeDirectory(fsImpl, file, { privateDirectory: true }) : safeFile(fsImpl, file);
-    if (!check.ok) return { instance_id: id, status: "CONFLICT", missing_verification_gates: ["safe_instance_leaves"] };
-  }
+  let entries;
+  try { entries = fsImpl.readdirSync(root, { withFileTypes: true }).map(entry => entry.name).sort(); }
+  catch { return { instance_id: id, status: "CONFLICT", missing_verification_gates: ["enumerable_instance"] }; }
+  const tree = safeInstanceTree(fsImpl, root);
+  if (!tree.ok) return { instance_id: id, status: "CONFLICT", missing_verification_gates: ["safe_instance_tree"] };
   const routeFile = readJson(fsImpl, path.join(root, "chat-routes.json"));
   const routeNamesFound = routeFile.valid ? routeNames(routeFile.value) : [];
+  const routeRecords = routeFile.valid ? (Array.isArray(routeFile.value.routes) ? routeFile.value.routes : Object.entries(routeFile.value.routes || {}).map(([route, item]) => ({ route, ...item }))) : [];
   const snapshots = snapshotNames(fsImpl, root, entries);
   const reasons = [];
   if (routeFile.present && !routeFile.valid) reasons.push("valid_chat_routes_json");
   if (snapshots.some(name => name.endsWith(":INVALID"))) reasons.push("valid_migration_snapshot");
   if (!routeFile.present) reasons.push("chat_routes_metadata");
   if (!snapshots.length) reasons.push("migration_snapshot_metadata");
+  if (!routeRecords.some(route => safeName(route?.route) && route?.status === "active" && safeName(route?.project))) reasons.push("registered_route_evidence");
   const instanceMetadata = readJson(fsImpl, path.join(root, "instance.json"));
   if (instanceMetadata.present && !instanceMetadata.valid) reasons.push("valid_instance_metadata");
-  const identityRecords = [instanceMetadata.valid ? instanceMetadata.value : null, routeFile.valid ? routeFile.value : null].filter(Boolean);
+  const identityRecords = [instanceMetadata.valid ? instanceMetadata.value : null].filter(Boolean);
+  const routeIdentity = routeFile.valid ? declaredIdentity(routeFile.value) : {};
+  if (Object.keys(routeIdentity).length) identityRecords.push(routeIdentity);
   for (const name of entries.filter(item => item.startsWith("control-routing-migration-") && !item.endsWith(":INVALID"))) {
     const snapshot = readJson(fsImpl, path.join(root, name, "instance.json"));
     if (snapshot.valid) identityRecords.push(snapshot.value);
@@ -117,14 +173,24 @@ function candidate(fsImpl, instancesRoot, id) {
   const installationIds = identityRecords.map(value => value.installation_id).filter(value => value !== undefined);
   const controlRepositories = identityRecords.map(value => value.control_repository).filter(value => value !== undefined);
   const sandboxRepositories = identityRecords.map(value => value.sandbox_repository).filter(value => value !== undefined);
+  const requiredIdentity = IDENTITY_FIELDS;
+  if (!instanceMetadata.valid || identityRecords.some(value => requiredIdentity.some(key => typeof value[key] !== "string" || !value[key]))) reasons.push("verified_role_identities");
+  const activeRoutes = routeRecords.filter(route => route?.status === "active");
+  const validActiveRoutes = activeRoutes.filter(route => safeName(route?.route) && safeName(route?.project) && typeof route?.installation_id === "string");
+  if (!validActiveRoutes.length || validActiveRoutes.length !== activeRoutes.length || new Set(validActiveRoutes.map(route => route.route)).size !== validActiveRoutes.length) reasons.push("registered_route_identity");
+  const routeIdentityMismatch = routeRecords.some(route => IDENTITY_FIELDS.some(key => Object.hasOwn(route || {}, key) && (typeof route[key] !== "string" || !identityRecords.every(value => value[key] === undefined || value[key] === route[key]))));
+  if (routeIdentityMismatch || validActiveRoutes.some(route => route.installation_id !== installationIds[0])) reasons.push("matching_route_identity");
   const mismatched = (instanceMetadata.valid && instanceMetadata.value.instance_id !== undefined && instanceMetadata.value.instance_id !== id)
     || instanceIds.some(value => value !== id || value !== instanceIds[0])
     || new Set(installationIds).size > 1
     || new Set(controlRepositories).size > 1
-    || new Set(sandboxRepositories).size > 1;
+    || new Set(sandboxRepositories).size > 1
+    || new Set(instanceIds).size > 1
+    || new Set(installationIds).size > 1;
   if (mismatched) reasons.push("matching_instance_identifier");
-  const conflict = (routeFile.present && !routeFile.valid) || snapshots.some(name => name.endsWith(":INVALID")) || (instanceMetadata.present && !instanceMetadata.valid) || mismatched;
-  return { instance_id: id, status: conflict ? "CONFLICT" : "NEEDS_VERIFICATION", metadata: { chat_routes: routeFile.present, migration_snapshots: snapshots.length > 0, instance: instanceMetadata.present }, route_names: routeNamesFound, missing_verification_gates: reasons, ...(conflict ? {} : { clues_unverified: true }) };
+  const conflict = (routeFile.present && !routeFile.valid) || snapshots.some(name => name.endsWith(":INVALID")) || (instanceMetadata.present && !instanceMetadata.valid) || mismatched || routeIdentityMismatch;
+  const identity = { instance_id: instanceIds[0] || null, installation_id: installationIds[0] || null, control_repository: controlRepositories[0] || null, sandbox_repository: sandboxRepositories[0] || null };
+  return { instance_id: id, status: conflict ? "CONFLICT" : "NEEDS_VERIFICATION", metadata: { chat_routes: routeFile.present, migration_snapshots: snapshots.length > 0, instance: instanceMetadata.present }, identity, route_names: routeNamesFound, missing_verification_gates: [...new Set(reasons)].sort(), ...(conflict ? {} : { clues_unverified: true }) };
 }
 
 export function inspectMacosExistingInstanceRecovery({ home = os.homedir(), fsImpl = fs } = {}) {

@@ -93,12 +93,22 @@ function action(state, actionId, messageKey, extra = {}) {
 }
 
 function macosStateBound(state, recovery) {
-  if (!state?.installation_id || !state?.instance_id || !state?.instance_root || recovery?.status !== "NEEDS_VERIFICATION" || recovery.instance_ids?.length !== 1) return false;
+  const identity = recovery?.instances?.length === 1 ? recovery.instances[0]?.identity : null;
+  const route = state?.sandbox_review_route || state?.review_route;
+  if (!state?.installation_id || !state?.instance_id || !state?.instance_root || !state?.control_repository || !state?.sandbox_repository
+    || recovery?.status !== "NEEDS_VERIFICATION" || recovery.instance_ids?.length !== 1
+    || recovery.missing_verification_gates?.length || !identity
+    || !identity.instance_id || !identity.installation_id || !identity.control_repository || !identity.sandbox_repository
+    || !route || !recovery.instances[0]?.route_names?.includes(route)) return false;
   const instanceId = recovery.instance_ids[0];
   const expectedRoot = path.join(path.resolve(os.homedir()), ".chatgpt-codex-orchestrator", "instances", instanceId);
   return canonicalInstallationId(state.installation_id) === instanceId
     && state.instance_id === instanceId
-    && state.instance_root === expectedRoot;
+    && state.instance_root === expectedRoot
+    && identity.instance_id === state.instance_id
+    && identity.installation_id === state.installation_id
+    && identity.control_repository === state.control_repository
+    && identity.sandbox_repository === state.sandbox_repository;
 }
 
 function macosRecoveryReport() {
@@ -111,12 +121,12 @@ function dryRun() {
   try { state=loadState({create:false}); }
   catch {
     const existingInstanceRecovery=process.platform==="darwin"?macosRecoveryReport():null;
-    return emit({status:"ERROR",error_id:"MACOS-EXISTING-INSTANCE-REVIEW",preferred_language:"en",message:"macOS installer state is unreadable; dry-run stopped before any external setup action.",dry_run:true,existing_instance_recovery:existingInstanceRecovery,mutations_performed:false},1);
+    return emit({status:"ERROR",error_id:"MACOS-EXISTING-INSTANCE-REVIEW",preferred_language:"en",message:"macOS installer state is unreadable; dry-run stopped before any external setup action.",dry_run:true,existing_instance_recovery:existingInstanceRecovery,mutations_performed:false,plan:[]},1);
   }
   const lang=ensureStateLanguage(state);
   const existingInstanceRecovery=process.platform==="darwin"?macosRecoveryReport():null;
   if(existingInstanceRecovery && existingInstanceRecovery.status!=="ABSENT" && (!macosStateBound(state, existingInstanceRecovery) || existingInstanceRecovery.status==="CONFLICT")) {
-    return emit({status:existingInstanceRecovery.status==="CONFLICT"?"NEEDS_USER_ACTION":"PASS",preferred_language:lang,message:"macOS existing-instance recovery requires a separate reviewed action; dry-run performed no mutation.",dry_run:true,mutations_performed:false,existing_instance_recovery:existingInstanceRecovery,plan:[]});
+    return emit({status:existingInstanceRecovery.status==="CONFLICT"?"ERROR":"NEEDS_USER_ACTION",error_id:"MACOS-EXISTING-INSTANCE-REVIEW",preferred_language:lang,message:"macOS existing-instance recovery requires a separate reviewed action; dry-run stopped before any external command.",dry_run:true,mutations_performed:false,existing_instance_recovery:existingInstanceRecovery,plan:[]},1);
   }
   const git=commandExists("git");
   const node=commandExists("node");

@@ -64,15 +64,73 @@ test("symlinked candidate and odd private modes fail closed", t => {
   assert.equal(result.status, "CONFLICT");
 });
 
+test("nested external browser-profile symlink fails closed", t => {
+  const f = fixture(t);
+  const instance = path.join(f.instances, "nested");
+  const outside = path.join(f.home, "outside-profile");
+  fs.mkdirSync(path.join(instance, "browser-profile"), { recursive: true, mode: 0o700 });
+  fs.mkdirSync(outside, { mode: 0o700 });
+  try { fs.symlinkSync(outside, path.join(instance, "browser-profile", "Preferences")); }
+  catch (error) { if (["EPERM", "EACCES"].includes(error.code)) return t.skip("symlinks unavailable"); throw error; }
+  const result = inspectMacosExistingInstanceRecovery({ home: f.home });
+  assert.equal(result.status, "CONFLICT");
+  assert.ok(result.missing_verification_gates.includes("safe_instance_tree"));
+});
+
+test("private dot-named native-helper lock remains safe instance evidence", t => {
+  const f = fixture(t);
+  const instance = path.join(f.instances, "locked");
+  fs.mkdirSync(instance, { mode: 0o700 });
+  const lock = path.join(instance, ".macos-native-helper-install.lock");
+  fs.writeFileSync(lock, "{}", { mode: 0o600 });
+  fs.chmodSync(lock, 0o600);
+  const result = inspectMacosExistingInstanceRecovery({ home: f.home });
+  assert.equal(result.status, "NEEDS_VERIFICATION");
+  assert.deepEqual(result.instances[0].missing_verification_gates.includes("safe_instance_tree"), false);
+});
+
+test("missing route and migration evidence never becomes an admissible recovery", t => {
+  const f = fixture(t);
+  const instance = path.join(f.instances, "evidence");
+  fs.mkdirSync(path.join(instance, "browser-profile", "nested"), { recursive: true, mode: 0o700 });
+  writeJson(path.join(instance, "instance.json"), {
+    instance_id: "evidence",
+    installation_id: "install-evidence",
+    control_repository: "org/control-evidence",
+    sandbox_repository: "org/sandbox-evidence"
+  });
+  const result = inspectMacosExistingInstanceRecovery({ home: f.home });
+  assert.equal(result.status, "NEEDS_VERIFICATION");
+  assert.ok(result.missing_verification_gates.includes("chat_routes_metadata"));
+  assert.ok(result.missing_verification_gates.includes("migration_snapshot_metadata"));
+  assert.ok(result.missing_verification_gates.includes("registered_route_evidence"));
+});
+
+test("migration snapshots with contradictory Control or Sandbox roles fail closed", t => {
+  const f = fixture(t);
+  const instance = path.join(f.instances, "roles");
+  const snapshot = path.join(instance, "control-routing-migration-install-roles");
+  fs.mkdirSync(snapshot, { recursive: true, mode: 0o700 });
+  writeJson(path.join(instance, "instance.json"), { instance_id: "roles", installation_id: "install-roles", control_repository: "org/control-a", sandbox_repository: "org/sandbox-a" });
+  writeJson(path.join(instance, "chat-routes.json"), { routes: [{ route: "chat-roles", project: "sandbox-roles", status: "active", installation_id: "install-roles" }] });
+  writeJson(path.join(snapshot, "instance.json"), { instance_id: "roles", installation_id: "install-roles", control_repository: "org/control-b", sandbox_repository: "org/sandbox-a" });
+  const result = inspectMacosExistingInstanceRecovery({ home: f.home });
+  assert.equal(result.status, "CONFLICT");
+  assert.ok(result.missing_verification_gates.includes("matching_instance_identifier"));
+});
+
 test("distinct control and sandbox repositories are accepted when each role is consistent", t => {
   const f = fixture(t);
   const instance = path.join(f.instances, "expected");
-  fs.mkdirSync(instance, { mode: 0o700 });
+  const snapshot = path.join(instance, "control-routing-migration-install-a");
+  fs.mkdirSync(snapshot, { recursive: true, mode: 0o700 });
   const identity = { instance_id: "expected", installation_id: "install-a", control_repository: "org/control-a", sandbox_repository: "org/sandbox-a" };
   writeJson(path.join(instance, "instance.json"), identity);
-  writeJson(path.join(instance, "chat-routes.json"), identity);
+  writeJson(path.join(snapshot, "instance.json"), identity);
+  writeJson(path.join(instance, "chat-routes.json"), { ...identity, routes: [{ route: "chat-expected", project: "sandbox-expected", status: "active", ...identity }] });
   const result = inspectMacosExistingInstanceRecovery({ home: f.home });
   assert.equal(result.status, "NEEDS_VERIFICATION");
+  assert.deepEqual(result.missing_verification_gates, []);
 });
 
 test("same-role repository contradictions fail closed", t => {
@@ -86,6 +144,20 @@ test("same-role repository contradictions fail closed", t => {
   assert.ok(result.missing_verification_gates.includes("matching_instance_identifier"));
 });
 
+test("route Control or Sandbox role mismatch fails closed", t => {
+  const f = fixture(t);
+  const instance = path.join(f.instances, "route-roles");
+  const snapshot = path.join(instance, "control-routing-migration-install-route-roles");
+  const identity = { instance_id: "route-roles", installation_id: "install-route-roles", control_repository: "org/control-a", sandbox_repository: "org/sandbox-a" };
+  fs.mkdirSync(snapshot, { recursive: true, mode: 0o700 });
+  writeJson(path.join(instance, "instance.json"), identity);
+  writeJson(path.join(snapshot, "instance.json"), identity);
+  writeJson(path.join(instance, "chat-routes.json"), { ...identity, routes: [{ route: "chat-route-roles", project: "sandbox-route-roles", status: "active", ...identity, sandbox_repository: "org/sandbox-b" }] });
+  const result = inspectMacosExistingInstanceRecovery({ home: f.home });
+  assert.equal(result.status, "CONFLICT");
+  assert.ok(result.missing_verification_gates.includes("matching_route_identity"));
+});
+
 test("recovery-preflight is an exposed read-only CLI command", t => {
   const home = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "codex-cli-home-"));
   fs.chmodSync(home, 0o700);
@@ -93,6 +165,20 @@ test("recovery-preflight is an exposed read-only CLI command", t => {
   const result = spawnSync(process.execPath, [path.join(process.cwd(), "src/cli.mjs"), "recovery-preflight", "--json"], { encoding: "utf8", env: { ...process.env, HOME: home, CHATGPT_CODEX_ORCHESTRATOR_HOME: path.join(home, "codex-no-write-state") } });
   assert.match(result.stdout, /existing_instance_recovery|UNSUPPORTED/);
   assert.doesNotMatch(result.stdout, /chatgpt\.com\/c\//);
+});
+
+test("Darwin dry-run explicitly refuses unbound existing-instance evidence", { skip: process.platform !== "darwin" }, t => {
+  const f = fixture(t);
+  const instance = path.join(f.instances, "dry-run-unbound");
+  fs.mkdirSync(instance, { mode: 0o700 });
+  writeJson(path.join(instance, "chat-routes.json"), { routes: [{ route: "chat-dry-run", project: "sandbox-dry-run", status: "active" }] });
+  const stateRoot = path.join(f.home, "dry-run-state");
+  const result = spawnSync(process.execPath, [path.join(process.cwd(), "src/cli.mjs"), "dry-run", "--json"], { encoding: "utf8", env: { ...process.env, HOME: f.home, CHATGPT_CODEX_ORCHESTRATOR_HOME: stateRoot } });
+  const payload = JSON.parse(result.stdout);
+  assert.ok(["NEEDS_USER_ACTION", "ERROR"].includes(payload.status));
+  assert.equal(payload.error_id, "MACOS-EXISTING-INSTANCE-REVIEW");
+  assert.equal(payload.mutations_performed, false);
+  assert.deepEqual(payload.plan, []);
 });
 
 test("Darwin setup and resume stop before installer state or external commands for an unbound instance", { skip: process.platform !== "darwin" }, t => {

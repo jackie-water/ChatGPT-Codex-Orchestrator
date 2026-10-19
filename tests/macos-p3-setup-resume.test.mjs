@@ -105,8 +105,10 @@ test("Darwin resume uses isolated child-process evidence and remains idempotent"
     const identity={instance_id:instanceId,installation_id:state.installation_id,control_repository:state.control_repository,sandbox_repository:state.sandbox_repository};
     const migrationRoot=path.join(instanceRoot,`control-routing-migration-${state.installation_id}`);
     fs.mkdirSync(migrationRoot,{recursive:true,mode:0o700}); fs.chmodSync(migrationRoot,0o700);
+    fs.writeFileSync(path.join(instanceRoot,"instance.json"),JSON.stringify(identity),{mode:0o600}); fs.chmodSync(path.join(instanceRoot,"instance.json"),0o600);
     fs.writeFileSync(path.join(migrationRoot,"instance.json"),JSON.stringify(identity),{mode:0o600}); fs.chmodSync(path.join(migrationRoot,"instance.json"),0o600);
-    fs.copyFileSync(routeFile,path.join(instanceRoot,"chat-routes.json")); fs.chmodSync(path.join(instanceRoot,"chat-routes.json"),0o600);
+    const routeMetadata={version:1,instance_id:instanceId,installation_id:identity.installation_id,control_repository:identity.control_repository,sandbox_repository:identity.sandbox_repository,routes:[{route:"chat-232",project:sandboxProject,chat_url:chat,status:"active",installation_id:identity.installation_id,instance_id:instanceId,control_repository:identity.control_repository,sandbox_repository:identity.sandbox_repository}]};
+    fs.writeFileSync(path.join(instanceRoot,"chat-routes.json"),JSON.stringify(routeMetadata),{mode:0o600}); fs.chmodSync(path.join(instanceRoot,"chat-routes.json"),0o600);
     state.instance_id=instanceId; state.instance_root=fs.realpathSync(instanceRoot); save(state);
     const boundBase={...base,instance_id:state.instance_id,instance_root:state.instance_root};
     save({...state,sandbox_verified:true}); result=run(); state=read(); resumeActionId(result,"sandbox-verified resume"); assert.equal(state.target_environment_ready,false);
