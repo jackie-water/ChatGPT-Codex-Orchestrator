@@ -63,7 +63,7 @@ const resumeActionId=(result,label)=>{
 };
 
 test("Darwin resume uses isolated child-process evidence and remains idempotent",{skip:process.platform!=="darwin"},()=>{
-  const root=fs.mkdtempSync(path.join(os.tmpdir(),"codex-macos-p3-") );
+  const root=fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()),"codex-macos-p3-") );
   const home=path.join(root,"home"), bin=path.join(root,"bin"), stateDir=path.join(root,"state");
   fs.mkdirSync(home,{recursive:true,mode:0o700}); fs.mkdirSync(bin,{recursive:true,mode:0o700}); fs.mkdirSync(stateDir,{recursive:true,mode:0o700});
   const audit=path.join(root,"audit.log"), mode=path.join(root,"smoke-mode"); fs.writeFileSync(mode,"incomplete\n");
