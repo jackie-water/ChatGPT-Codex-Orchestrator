@@ -88,6 +88,33 @@ test("iteration budgets are validated independently of issuer records",()=>{cons
 
 test("raw caller scope inputs are rejected and unverified tasks remain chat-only",()=>{const root=fixture();try{assert.throws(()=>setup(root,{trustedScope:{sourceBranch}}),/UNTRUSTED_SCOPE_INPUT/);const s=setup(root,{},"unverified");assert.throws(()=>casRegisterNextAction({stateDir:root,taskId:"unverified",expectedVersion:s.versionNumber,nextAction:{kind:"CODEX_RUN",logicalIteration:1,descriptor:{}}}),/TRUSTED_SCOPE_REQUIRED/);assert.equal(casRegisterNextAction({stateDir:root,taskId:"unverified",expectedVersion:s.versionNumber,nextAction:action()}).nextAction.kind,"CHAT_CONTINUE");}finally{cleanup(root);}});
 
+test("signed authorization requires an exact budget before any task persistence",()=>{
+  for(const [signed,requested] of [[5,5],[5,10],[10,5]]){
+    const root=fixture(),taskId=`budget-match-${signed}-${requested}`;
+    try{
+      setup(root,{authorityScope:{maxIterations:signed},maxIterations:requested},taskId);
+      if(signed===requested){
+        const taskDir=path.join(root,"tasks",taskId);
+        assert.equal(statusTask({stateDir:root,taskId}).acceptedScope.maxIterations,signed);
+        assert.equal(registerTask({stateDir:root,identity:ident(1,taskId),maxIterations:requested}).budget.maxIterations,requested);
+        assert.ok(fs.existsSync(path.join(taskDir,"state.json")));
+        assert.ok(fs.existsSync(path.join(taskDir,"journal.jsonl")));
+      }
+    }catch(e){
+      if(signed===requested)throw e;
+      assert.match(e.message,/SCOPE_BUDGET_MISMATCH/);
+      assert.throws(()=>registerTask({stateDir:root,identity:ident(1,taskId),maxIterations:requested}),/SCOPE_BUDGET_MISMATCH/);
+      const taskDir=path.join(root,"tasks",taskId);
+      assert.equal(fs.existsSync(taskDir),false);
+      assert.equal(fs.existsSync(path.join(root,"tasks")),false);
+      assert.equal(fs.existsSync(path.join(taskDir,"state.json")),false);
+      assert.equal(fs.existsSync(path.join(taskDir,"journal.jsonl")),false);
+      assert.equal(fs.existsSync(path.join(taskDir,"outbox.json")),false);
+      assert.equal(fs.existsSync(path.join(taskDir,"result-outbox.json")),false);
+    }finally{cleanup(root);}
+  }
+});
+
 test("all terminal outcomes create one immutable durable result event without source SHA",()=>{for(const kind of ["SUCCESS","FAILURE","TIMEOUT","VALIDATION_FAILURE","UNKNOWN"]){const root=fixture();try{const s=setup(root),n=ingestEvidence({stateDir:root,taskId:"task-a",expectedVersion:s.versionNumber,evidence:{kind,source:"independent-functional-review"}});assert.equal(n.resultOutbox.state,"PENDING");assert.equal(n.resultOutbox.immutable,true);assert.equal(n.resultOutbox.evidence.sourceSha,null);assert.equal(JSON.parse(fs.readFileSync(path.join(root,"tasks","task-a","result-outbox.json"))).resultId,n.resultOutbox.resultId);assert.throws(()=>ingestEvidence({stateDir:root,taskId:"task-a",expectedVersion:n.versionNumber,evidence:{kind:"SUCCESS",source:"late"}}),/TERMINAL_EVIDENCE_IMMUTABLE/);}finally{cleanup(root);}}});
 
 test("terminal evidence revokes every stale Chat action before and after dispatch",()=>{for(const kind of ["SUCCESS","FAILURE","VALIDATION_FAILURE","TIMEOUT","UNKNOWN"]){for(const dispatched of [false,true]){const root=fixture();try{let s=setup(root);s=casRegisterNextAction({stateDir:root,taskId:"task-a",expectedVersion:s.versionNumber,nextAction:action()});if(dispatched)dispatchIntent({stateDir:root,taskId:"task-a"});const before=s= statusTask({stateDir:root,taskId:"task-a"});assert.throws(()=>ingestEvidence({stateDir:root,taskId:"task-a",expectedVersion:before.versionNumber-1,evidence:{kind,source:"cas-conflict"}}),/STALE_CAS/);const n=ingestEvidence({stateDir:root,taskId:"task-a",expectedVersion:before.versionNumber,evidence:{kind,source:"terminal-safety"}});assert.equal(n.nextAction,null);assert.equal(n.outbox,null);assert.equal(n.resultOutbox.state,"PENDING");assert.equal(n.archivedActions.at(-1).callbackId,before.nextAction.callbackId);if(dispatched)assert.equal(n.archivedOutboxes.at(-1).intentId,before.nextAction.callbackId);assert.deepEqual(dispatchIntent({stateDir:root,taskId:"task-a"}).intents,[]);assert.equal(statusTask({stateDir:root,taskId:"task-a"}).resultOutbox.resultId,n.resultOutbox.resultId);assert.throws(()=>casRegisterNextAction({stateDir:root,taskId:"task-a",expectedVersion:n.versionNumber,nextAction:action()}),/TERMINAL_ACTION_GATE/);assert.throws(()=>ingestEvidence({stateDir:root,taskId:"task-a",expectedVersion:n.versionNumber,evidence:{kind,source:"duplicate"}}),/TERMINAL_EVIDENCE_IMMUTABLE/);}finally{cleanup(root);}}}});
