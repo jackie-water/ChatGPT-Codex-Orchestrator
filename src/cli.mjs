@@ -16,6 +16,7 @@ import { pendingCallbackCount, doctorHealth, repairHealth } from "./lib/runtime-
 import { macosPrerequisites, migrationPreflight, macosRuntimeAction, prepareMigrationIntent } from "./lib/macos-platform.mjs";
 import { macosNativeHelperPreflight, prepareMacosNativeHelper, verifyMacosNativeCapability } from "./lib/macos-native-helper-install.mjs";
 import { inspectMacosExistingInstanceRecovery } from "./lib/macos-existing-instance-recovery.mjs";
+import { canonicalInstallationId } from "./lib/control-render.mjs";
 import {
   sandboxSmokeStatus,
   startSandboxSmoke,
@@ -91,8 +92,13 @@ function action(state, actionId, messageKey, extra = {}) {
   };
 }
 
-function macosStateBound(state) {
-  return Boolean(state?.installation_id && state?.instance_id && state?.instance_root);
+function macosStateBound(state, recovery) {
+  if (!state?.installation_id || !state?.instance_id || !state?.instance_root || recovery?.status !== "NEEDS_VERIFICATION" || recovery.instance_ids?.length !== 1) return false;
+  const instanceId = recovery.instance_ids[0];
+  const expectedRoot = path.join(path.resolve(os.homedir()), ".chatgpt-codex-orchestrator", "instances", instanceId);
+  return canonicalInstallationId(state.installation_id) === instanceId
+    && state.instance_id === instanceId
+    && state.instance_root === expectedRoot;
 }
 
 function macosRecoveryReport() {
@@ -109,7 +115,7 @@ function dryRun() {
   }
   const lang=ensureStateLanguage(state);
   const existingInstanceRecovery=process.platform==="darwin"?macosRecoveryReport():null;
-  if(existingInstanceRecovery && existingInstanceRecovery.status!=="ABSENT" && (!macosStateBound(state) || existingInstanceRecovery.status==="CONFLICT")) {
+  if(existingInstanceRecovery && existingInstanceRecovery.status!=="ABSENT" && (!macosStateBound(state, existingInstanceRecovery) || existingInstanceRecovery.status==="CONFLICT")) {
     return emit({status:existingInstanceRecovery.status==="CONFLICT"?"NEEDS_USER_ACTION":"PASS",preferred_language:lang,message:"macOS existing-instance recovery requires a separate reviewed action; dry-run performed no mutation.",dry_run:true,mutations_performed:false,existing_instance_recovery:existingInstanceRecovery,plan:[]});
   }
   const git=commandExists("git");
@@ -284,7 +290,7 @@ function runSetup() {
   const lang = ensureStateLanguage(state);
   if(process.platform==="darwin") {
     const existingInstanceRecovery=macosRecoveryReport();
-    if(existingInstanceRecovery.status!=="ABSENT" && (!macosStateBound(state) || existingInstanceRecovery.status==="CONFLICT")) return emit({status:existingInstanceRecovery.status==="CONFLICT"?"ERROR":"NEEDS_USER_ACTION",error_id:"MACOS-EXISTING-INSTANCE-REVIEW",recoverable:existingInstanceRecovery.status!=="CONFLICT",preferred_language:lang,message:"An existing macOS instance was found without authoritative binding evidence. Setup/resume stopped before installer state, migration intent, Control, Sandbox, runner, or helper changes.",existing_instance_recovery:existingInstanceRecovery,mutations_performed:false},1);
+    if(existingInstanceRecovery.status!=="ABSENT" && (!macosStateBound(state, existingInstanceRecovery) || existingInstanceRecovery.status==="CONFLICT")) return emit({status:existingInstanceRecovery.status==="CONFLICT"?"ERROR":"NEEDS_USER_ACTION",error_id:"MACOS-EXISTING-INSTANCE-REVIEW",recoverable:existingInstanceRecovery.status!=="CONFLICT",preferred_language:lang,message:"An existing macOS instance was found without authoritative binding evidence. Setup/resume stopped before installer state, migration intent, Control, Sandbox, runner, or helper changes.",existing_instance_recovery:existingInstanceRecovery,mutations_performed:false},1);
     const prerequisites=macosPrerequisites();
     const migration=migrationPreflight({state});
     const ready=prerequisites.node&&prerequisites.git&&prerequisites.gh&&prerequisites.codex&&prerequisites.session_auth&&prerequisites.native_helper?.status==="PASS"&&migration.status==="READY";
@@ -954,7 +960,7 @@ function recoveryPreflight() {
   let stateInvalid=false;
   try { state=loadState({create:false}); } catch { state={}; stateInvalid=true; }
   const report=macosRecoveryReport();
-  const blocked=stateInvalid || (report.status!=="ABSENT" && (!macosStateBound(state) || report.status==="CONFLICT"));
+  const blocked=stateInvalid || (report.status!=="ABSENT" && (!macosStateBound(state, report) || report.status==="CONFLICT"));
   emit({status:blocked?(report.status==="CONFLICT"?"ERROR":"NEEDS_USER_ACTION"):"PASS",error_id:blocked?"MACOS-EXISTING-INSTANCE-REVIEW":undefined,preferred_language:"en",message:blocked?"Existing macOS instance evidence requires separate human review; no activation or adoption was performed.":"macOS existing-instance recovery preflight completed without mutation.",existing_instance_recovery:report,mutations_performed:false},blocked?1:0);
 }
 

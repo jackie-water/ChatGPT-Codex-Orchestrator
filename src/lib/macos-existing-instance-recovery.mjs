@@ -115,11 +115,13 @@ function candidate(fsImpl, instancesRoot, id) {
   }
   const instanceIds = identityRecords.map(value => value.instance_id).filter(value => value !== undefined);
   const installationIds = identityRecords.map(value => value.installation_id).filter(value => value !== undefined);
-  const repositories = identityRecords.flatMap(value => [value.control_repository, value.sandbox_repository]).filter(value => value !== undefined);
+  const controlRepositories = identityRecords.map(value => value.control_repository).filter(value => value !== undefined);
+  const sandboxRepositories = identityRecords.map(value => value.sandbox_repository).filter(value => value !== undefined);
   const mismatched = (instanceMetadata.valid && instanceMetadata.value.instance_id !== undefined && instanceMetadata.value.instance_id !== id)
     || instanceIds.some(value => value !== id || value !== instanceIds[0])
     || new Set(installationIds).size > 1
-    || new Set(repositories).size > 1;
+    || new Set(controlRepositories).size > 1
+    || new Set(sandboxRepositories).size > 1;
   if (mismatched) reasons.push("matching_instance_identifier");
   const conflict = (routeFile.present && !routeFile.valid) || snapshots.some(name => name.endsWith(":INVALID")) || (instanceMetadata.present && !instanceMetadata.valid) || mismatched;
   return { instance_id: id, status: conflict ? "CONFLICT" : "NEEDS_VERIFICATION", metadata: { chat_routes: routeFile.present, migration_snapshots: snapshots.length > 0, instance: instanceMetadata.present }, route_names: routeNamesFound, missing_verification_gates: reasons, ...(conflict ? {} : { clues_unverified: true }) };
