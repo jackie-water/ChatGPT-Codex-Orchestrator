@@ -112,6 +112,44 @@ test("private dot-named native-helper lock remains safe instance evidence", t =>
   assert.deepEqual(result.instances[0].missing_verification_gates.includes("safe_instance_tree"), false);
 });
 
+test("private hidden instance descendants remain safe tree evidence", t => {
+  const f = fixture(t);
+  const instance = path.join(f.instances, "hidden-descendants");
+  fs.mkdirSync(path.join(instance, ".git", "objects"), { recursive: true, mode: 0o700 });
+  fs.mkdirSync(path.join(instance, ".orchestrator-sandbox", "state"), { recursive: true, mode: 0o700 });
+  const result = inspectMacosExistingInstanceRecovery({ home: f.home });
+  assert.equal(result.status, "NEEDS_VERIFICATION");
+  assert.equal(result.missing_verification_gates.includes("safe_instance_tree"), false);
+});
+
+test("symlinked hidden instance descendant fails closed", t => {
+  const f = fixture(t);
+  const instance = path.join(f.instances, "hidden-symlink");
+  const outside = path.join(f.home, "outside-hidden");
+  fs.mkdirSync(instance, { mode: 0o700 });
+  fs.mkdirSync(outside, { mode: 0o700 });
+  try { fs.symlinkSync(outside, path.join(instance, ".git")); }
+  catch (error) { if (["EPERM", "EACCES"].includes(error.code)) return t.skip("symlinks unavailable"); throw error; }
+  const result = inspectMacosExistingInstanceRecovery({ home: f.home });
+  assert.equal(result.status, "CONFLICT");
+  assert.ok(result.missing_verification_gates.includes("safe_instance_tree"));
+});
+
+test("duplicate active and inactive route identifiers fail closed", t => {
+  const f = fixture(t);
+  const instance = path.join(f.instances, "duplicate-route");
+  fs.mkdirSync(instance, { mode: 0o700 });
+  writeJson(path.join(instance, "chat-routes.json"), {
+    routes: [
+      { route: "chat-duplicate", project: "sandbox-duplicate", status: "active", installation_id: "install-duplicate" },
+      { route: "chat-duplicate", project: "sandbox-duplicate", status: "inactive", installation_id: "install-duplicate" }
+    ]
+  });
+  const result = inspectMacosExistingInstanceRecovery({ home: f.home });
+  assert.equal(result.status, "CONFLICT");
+  assert.ok(result.missing_verification_gates.includes("unique_route_identifiers"));
+});
+
 test("missing route and migration evidence never becomes an admissible recovery", t => {
   const f = fixture(t);
   const instance = path.join(f.instances, "evidence");

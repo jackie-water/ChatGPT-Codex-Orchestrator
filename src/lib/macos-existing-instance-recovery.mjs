@@ -30,8 +30,11 @@ function safeTreeBasename(value) {
   return typeof value === "string"
     && value.length > 0
     && value.length <= MAX_TREE_BASENAME_LENGTH
-    && (value === ".macos-native-helper-install.lock"
-      || (!value.startsWith(".") && /^[A-Za-z0-9._ -]+$/.test(value)));
+    && value !== "."
+    && value !== ".."
+    && !value.includes("/")
+    && !value.includes("\\")
+    && /^[A-Za-z0-9._ -]+$/.test(value);
 }
 
 function lstat(fsImpl, file) {
@@ -192,6 +195,9 @@ function candidate(fsImpl, instancesRoot, id) {
   const activeRoutes = routeRecords.filter(route => route?.status === "active");
   const validActiveRoutes = activeRoutes.filter(route => safeName(route?.route) && safeName(route?.project) && typeof route?.installation_id === "string");
   if (!validActiveRoutes.length || validActiveRoutes.length !== activeRoutes.length || new Set(validActiveRoutes.map(route => route.route)).size !== validActiveRoutes.length) reasons.push("registered_route_identity");
+  const routeIdentifiers = routeRecords.map(route => route?.route).filter(safeName);
+  const duplicateRouteIdentifiers = new Set(routeIdentifiers).size !== routeIdentifiers.length;
+  if (duplicateRouteIdentifiers) reasons.push("unique_route_identifiers");
   const routeIdentityMismatch = routeRecords.some(route => IDENTITY_FIELDS.some(key => Object.hasOwn(route || {}, key) && (typeof route[key] !== "string" || !identityRecords.every(value => value[key] === undefined || value[key] === route[key]))));
   if (routeIdentityMismatch || validActiveRoutes.some(route => route.installation_id !== installationIds[0])) reasons.push("matching_route_identity");
   const mismatched = (instanceMetadata.valid && instanceMetadata.value.instance_id !== undefined && instanceMetadata.value.instance_id !== id)
@@ -202,7 +208,7 @@ function candidate(fsImpl, instancesRoot, id) {
     || new Set(instanceIds).size > 1
     || new Set(installationIds).size > 1;
   if (mismatched) reasons.push("matching_instance_identifier");
-  const conflict = (routeFile.present && !routeFile.valid) || snapshots.some(name => name.endsWith(":INVALID")) || (instanceMetadata.present && !instanceMetadata.valid) || mismatched || routeIdentityMismatch;
+  const conflict = (routeFile.present && !routeFile.valid) || snapshots.some(name => name.endsWith(":INVALID")) || (instanceMetadata.present && !instanceMetadata.valid) || mismatched || routeIdentityMismatch || duplicateRouteIdentifiers;
   const identity = { instance_id: instanceIds[0] || null, installation_id: installationIds[0] || null, control_repository: controlRepositories[0] || null, sandbox_repository: sandboxRepositories[0] || null };
   return { instance_id: id, status: conflict ? "CONFLICT" : "NEEDS_VERIFICATION", metadata: { chat_routes: routeFile.present, migration_snapshots: snapshots.length > 0, instance: instanceMetadata.present }, identity, route_names: routeNamesFound, route_bindings: routeFile.valid ? routeBindings(routeFile.value) : [], missing_verification_gates: [...new Set(reasons)].sort(), ...(conflict ? {} : { clues_unverified: true }) };
 }
