@@ -98,8 +98,19 @@ test("Darwin resume uses isolated child-process evidence and remains idempotent"
   const read=()=>JSON.parse(fs.readFileSync(stateFile,"utf8"));
   try {
     save(base); let result=run(), state=read(); resumeActionId(result,"first resume"); assert.equal(state.target_environment_ready,false); assert.equal(state.sandbox_smoke_started,true); assert.equal(state.sandbox_smoke_issue,"https://github.com/owner/control/issues/247");
+    const instanceId="fixture2";
+    const instanceRoot=path.join(home,".chatgpt-codex-orchestrator","instances",instanceId);
+    assert.equal(state.instance_root,instanceRoot);
+    assert.equal(fs.realpathSync(state.instance_root),fs.realpathSync(instanceRoot));
+    const identity={instance_id:instanceId,installation_id:state.installation_id,control_repository:state.control_repository,sandbox_repository:state.sandbox_repository};
+    const migrationRoot=path.join(instanceRoot,`control-routing-migration-${state.installation_id}`);
+    fs.mkdirSync(migrationRoot,{recursive:true,mode:0o700}); fs.chmodSync(migrationRoot,0o700);
+    fs.writeFileSync(path.join(migrationRoot,"instance.json"),JSON.stringify(identity),{mode:0o600}); fs.chmodSync(path.join(migrationRoot,"instance.json"),0o600);
+    fs.copyFileSync(routeFile,path.join(instanceRoot,"chat-routes.json")); fs.chmodSync(path.join(instanceRoot,"chat-routes.json"),0o600);
+    state.instance_id=instanceId; state.instance_root=fs.realpathSync(instanceRoot); save(state);
+    const boundBase={...base,instance_id:state.instance_id,instance_root:state.instance_root};
     save({...state,sandbox_verified:true}); result=run(); state=read(); resumeActionId(result,"sandbox-verified resume"); assert.equal(state.target_environment_ready,false);
-    fs.writeFileSync(mode,"complete\n"); save({...base,sandbox_verified:false,sandbox_smoke_started:true,sandbox_smoke_issue:"https://github.com/owner/control/issues/247"}); result=run(); state=read(); resumeActionId(result,"completion resume"); assert.equal(state.macos_native_setup,"SANDBOX_READY"); assert.equal(state.target_environment_ready,false);
+    fs.writeFileSync(mode,"complete\n"); save({...boundBase,sandbox_verified:false,sandbox_smoke_started:true,sandbox_smoke_issue:"https://github.com/owner/control/issues/247"}); result=run(); state=read(); resumeActionId(result,"completion resume"); assert.equal(state.macos_native_setup,"SANDBOX_READY"); assert.equal(state.target_environment_ready,false);
     const waitingAt=state.last_error?.at; result=run(); state=read(); resumeActionId(result,"idempotent resume"); assert.equal(state.macos_native_setup,"SANDBOX_READY"); assert.equal(state.last_error?.at,waitingAt); assert.equal(state.target_environment_ready,false);
     const log=fs.readFileSync(audit,"utf8"); const commands=log.split(/\r?\n/).filter(Boolean); assert.ok(log.includes("git show origin/main:src/status.mjs")); assert.ok(log.includes("ready-evidence")); assert.equal(commands.filter(line=>/(?:^|\/)gh(?:\s|$).*\bissue\s+create\b/.test(line)).length,1); assert.equal(commands.some(line=>/(?:^|\/)git\s+(?:commit|push)(?:\s|$)/.test(line)),false); assert.equal(commands.some(line=>/(?:^|\/)launchctl(?:\s|$).*(?:\bbootstrap\b|\bbootout\b)/.test(line)),false); assert.equal(commands.some(line=>/(?:^|\/)powershell(?:\.exe)?(?:\s|$)/i.test(line)),false);
   } finally { fs.rmSync(root,{recursive:true,force:true}); }
