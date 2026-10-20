@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
+import { defaultLocalPaths } from "./control-render.mjs";
 
 export const TRUSTED_RECOVERY_EVIDENCE_VERSION = 1;
 const ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -148,6 +149,22 @@ function routeRecords(value) {
   return routes.filter(record => safeId(record?.route));
 }
 
+function canonicalLocalPaths({ state, home, instanceRoot }) {
+  const expectedControl = path.resolve(defaultLocalPaths({
+    home,
+    installationId: state.installation_id,
+    projectKey: typeof state.sandbox_project_key === "string" && state.sandbox_project_key.length > 0
+      ? state.sandbox_project_key
+      : "__unbound-project__"
+  }).control);
+  const expectedRoute = path.resolve(instanceRoot, "chat-routes.json");
+  const declaredControl = state.control_clone_path === undefined ? expectedControl : path.resolve(String(state.control_clone_path));
+  const declaredRoute = state.chat_route_file === undefined ? expectedRoute : path.resolve(String(state.chat_route_file));
+  if (declaredControl !== expectedControl) return { ok: false, reason: "canonical_control_clone_path" };
+  if (declaredRoute !== expectedRoute) return { ok: false, reason: "canonical_chat_route_path" };
+  return { ok: true, control: expectedControl, route: expectedRoute };
+}
+
 function localProof({ state, home, fsImpl }) {
   const installationId = String(state?.installation_id || "");
   const instanceId = String(state?.instance_id || "");
@@ -155,10 +172,12 @@ function localProof({ state, home, fsImpl }) {
   const instanceRoot = path.resolve(state.instance_root || path.join(home, ".chatgpt-codex-orchestrator", "instances", instanceId));
   const expectedRoot = path.resolve(home, ".chatgpt-codex-orchestrator", "instances", instanceId);
   if (instanceRoot !== expectedRoot) return { status: "CONFLICT", gates: ["canonical_instance_root"] };
-  const control = readJson(fsImpl, path.join(state.control_clone_path || "", "instance.json"), home);
+  const paths = canonicalLocalPaths({ state, home, instanceRoot });
+  if (!paths.ok) return { status: "CONFLICT", gates: [paths.reason] };
+  const control = readJson(fsImpl, path.join(paths.control, "instance.json"), home);
   const intent = readJson(fsImpl, path.join(instanceRoot, "migration-intent.json"), home);
   const receipt = readJson(fsImpl, path.join(instanceRoot, "trusted-recovery-evidence-v1.json"), home, { allowMissing: true });
-  const routeFile = readJson(fsImpl, state.chat_route_file || path.join(instanceRoot, "chat-routes.json"), home, { allowMissing: true, privateFile: false });
+  const routeFile = readJson(fsImpl, paths.route, home, { allowMissing: true, privateFile: false });
   if (receipt.present && !receipt.ok) return { status: "CONFLICT", gates: ["trusted_manifest_integrity"] };
   if (!receipt.present) return { status: "ABSENT", gates: ["trusted_manifest"] , control, intent, routeFile, instanceRoot };
   return { status: "PRESENT", control, intent, receipt, routeFile, instanceRoot };
@@ -258,8 +277,14 @@ export function issueTrustedRecoveryEvidence({ state = {}, home = os.homedir(), 
   if (state.macos_setup_approved !== true || state.github_plugin_authorization_verified !== true || state.target_environment_ready === true) throw new Error("official installer approval and independent GitHub authorization are required");
   if (!state.instance_id || !state.installation_id || !state.control_repository || !state.sandbox_repository || !state.sandbox_review_route) throw new Error("complete installer identity is required");
   const instanceRoot = path.resolve(state.instance_root || path.join(home, ".chatgpt-codex-orchestrator", "instances", state.instance_id));
+  const paths = canonicalLocalPaths({ state, home, instanceRoot });
+  if (!paths.ok) throw new Error(`local trust path is not canonical: ${paths.reason}`);
   const file = path.join(instanceRoot, "trusted-recovery-evidence-v1.json");
-  const routeFile = readJson(fsImpl, state.chat_route_file || path.join(instanceRoot, "chat-routes.json"), home, { privateFile: false });
+  const local = localProof({ state, home, fsImpl });
+  if (local.status === "CONFLICT") throw new Error("local trust evidence is contradictory");
+  const localGates = verifyLocalIdentity({ ...local, receipt: local.receipt || { present: false } }, state).filter(gate => gate !== "trusted_manifest_version");
+  if (localGates.length) throw new Error(`local trust evidence is incomplete: ${localGates.join(", ")}`);
+  const routeFile = local.routeFile;
   const routes = routeRecords(routeFile.value);
   const selected = routes.filter(item => item.route === state.sandbox_review_route && item.project === state.sandbox_project_key && item.status === "active");
   if (!routeFile.ok || selected.length !== 1 || routes.filter(item => item.route === state.sandbox_review_route).length !== 1 || routes.filter(item => item.project === state.sandbox_project_key && item.status === "active").length !== 1) throw new Error("actual active route receipt is missing or ambiguous");

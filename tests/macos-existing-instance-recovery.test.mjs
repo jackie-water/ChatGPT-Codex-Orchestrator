@@ -298,7 +298,10 @@ test("Darwin setup rejects a fully populated state bound to another existing ins
       encoding: "utf8",
       env: { ...process.env, HOME: f.home, PATH: sentinels, CHATGPT_CODEX_ORCHESTRATOR_HOME: stateRoot }
     });
-    assert.match(result.stdout, /MACOS-EXISTING-INSTANCE-REVIEW/);
+    assert.equal(result.stderr, "");
+    const payload = JSON.parse(result.stdout);
+    assert.equal(payload.error_id, "MACOS-EXISTING-INSTANCE-REVIEW");
+    assert.equal(payload.mutations_performed, false);
     assert.equal(fs.readFileSync(path.join(stateRoot, "install-state.json"), "utf8"), before);
     assert.equal(fs.existsSync(marker), false);
   }

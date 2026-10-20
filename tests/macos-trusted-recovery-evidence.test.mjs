@@ -4,12 +4,13 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { issueTrustedRecoveryEvidence, verifyTrustedRecoveryEvidence } from "../src/lib/macos-trusted-recovery-evidence.mjs";
+import { defaultLocalPaths } from "../src/lib/control-render.mjs";
 
 function fixture() {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "trusted-recovery-v1-"));
   fs.chmodSync(home, 0o700);
   const instance = path.join(home, ".chatgpt-codex-orchestrator", "instances", "install-a");
-  const control = path.join(instance, "automation", "control");
+  const control = defaultLocalPaths({ home, installationId: "install-a", projectKey: "sandbox-a" }).control;
   fs.mkdirSync(control, { recursive: true, mode: 0o700 });
   fs.mkdirSync(instance, { recursive: true, mode: 0o700 });
   const state = { schema_version: 1, macos_setup_approved: true, github_plugin_authorization_verified: true, installation_id: "install-a", instance_id: "install-a", instance_root: instance, control_clone_path: control, control_repository: "owner/control-a", sandbox_repository: "owner/sandbox-a", sandbox_project_key: "sandbox-a", sandbox_review_route: "chat-369", reviewer_chat_url: "https://chatgpt.com/c/chat-369", chat_route_file: path.join(instance, "chat-routes.json"), sandbox_verified: false, target_environment_ready: false };
@@ -101,4 +102,24 @@ test("offline, wrong private repository, issue, route, symlink, and tamper fail 
     assert.equal(verifyTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi }).status, "CONFLICT");
     fs.writeFileSync(path.join(f.instance, "logs.txt"), "passive 0644\n", { mode: 0o644 });
   } finally { fs.rmSync(f.home, { recursive: true, force: true }); }
+});
+
+test("foreign or alternate owned trust paths are rejected without receipt writes", () => {
+  for (const alternate of ["foreign-control", "other-instance-control", "alternate-route"]) {
+    const f = fixture();
+    try {
+      const before = fs.readdirSync(f.instance);
+      if (alternate === "alternate-route") {
+        f.state.chat_route_file = path.join(f.home, "routes.json");
+        fs.writeFileSync(f.state.chat_route_file, fs.readFileSync(path.join(f.instance, "chat-routes.json")), { mode: 0o600 });
+      } else {
+        f.state.control_clone_path = path.join(f.home, alternate);
+        fs.mkdirSync(f.state.control_clone_path, { recursive: true, mode: 0o700 });
+        fs.writeFileSync(path.join(f.state.control_clone_path, "instance.json"), fs.readFileSync(path.join(f.control, "instance.json")), { mode: 0o600 });
+      }
+      assert.equal(verifyTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi, requireReceipt: false }).status, "CONFLICT");
+      assert.throws(() => issueTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi }), /canonical/);
+      assert.deepEqual(fs.readdirSync(f.instance), before);
+    } finally { fs.rmSync(f.home, { recursive: true, force: true }); }
+  }
 });
