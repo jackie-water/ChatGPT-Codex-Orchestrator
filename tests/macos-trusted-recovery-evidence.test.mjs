@@ -17,8 +17,9 @@ function fixture() {
   fs.writeFileSync(path.join(control, "instance.json"), JSON.stringify({ schema_version: 1, instance_id: state.instance_id, installation_id: state.installation_id, control_repository: state.control_repository, sandbox_repository: state.sandbox_repository, role: "control" }) + "\n", { mode: 0o600 });
   fs.writeFileSync(path.join(instance, "migration-intent.json"), JSON.stringify({ schema_version: 1, phase: "PREPARED", installation_id: state.installation_id, generated_repositories: { control: state.control_repository, sandbox: state.sandbox_repository } }) + "\n", { mode: 0o600 });
   fs.writeFileSync(state.chat_route_file, JSON.stringify({ version: 1, routes: [{ route: state.sandbox_review_route, project: state.sandbox_project_key, status: "active", chat_url: state.reviewer_chat_url, registration_issue: 51 }] }) + "\n", { mode: 0o600 });
-  const githubApi = { getRepository: repository => repository === state.control_repository ? { id: 101, name: "control-a", full_name: repository, visibility: "PRIVATE", owner: { login: "owner" } } : { id: 202, name: "sandbox-a", full_name: repository, visibility: "PRIVATE", owner: { login: "owner" } }, getIssue: () => ({ number: 51, user: { login: "owner" }, body: JSON.stringify({ project: state.sandbox_project_key, chat_url: state.reviewer_chat_url, installation_id: state.installation_id }) }) };
-  return { home, instance, control, state, githubApi };
+  const githubCalls = [];
+  const githubApi = { getRepository: repository => { githubCalls.push(["repository", repository]); return repository === state.control_repository ? { id: 101, name: "control-a", full_name: repository, visibility: "PRIVATE", owner: { login: "owner" } } : { id: 202, name: "sandbox-a", full_name: repository, visibility: "PRIVATE", owner: { login: "owner" } }; }, getIssue: () => { githubCalls.push(["issue"]); return { number: 51, user: { login: "owner" }, body: JSON.stringify({ project: state.sandbox_project_key, chat_url: state.reviewer_chat_url, installation_id: state.installation_id }) }; } };
+  return { home, instance, control, state, githubApi, githubCalls };
 }
 
 test("first install issues an exact receipt and idempotent resume verifies it", () => {
@@ -26,6 +27,8 @@ test("first install issues an exact receipt and idempotent resume verifies it", 
   try {
     const issued = issueTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi });
     assert.equal(issued.status, "VERIFIED");
+    assert.equal(issued.manifest.status, "VERIFIED");
+    assert.equal(new Date(issued.manifest.issued_at).toISOString(), issued.manifest.issued_at);
     const verified = verifyTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi });
     assert.equal(verified.status, "VERIFIED");
     const receipt = path.join(f.instance, "trusted-recovery-evidence-v1.json");
@@ -34,6 +37,78 @@ test("first install issues an exact receipt and idempotent resume verifies it", 
     assert.equal(issuedAgain.idempotent, true);
     assert.deepEqual(fs.readFileSync(receipt), before);
     assert.equal(issuedAgain.manifest.issued_at, issued.manifest.issued_at);
+  } finally { fs.rmSync(f.home, { recursive: true, force: true }); }
+});
+
+test("mutated receipt status fails closed without external verification", () => {
+  const f = fixture();
+  try {
+    issueTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi });
+    const receipt = path.join(f.instance, "trusted-recovery-evidence-v1.json");
+    const beforeReceipt = fs.readFileSync(receipt);
+    const beforeState = JSON.stringify(f.state);
+    const manifest = JSON.parse(beforeReceipt);
+    manifest.status = "INVALID";
+    fs.writeFileSync(receipt, JSON.stringify(manifest, null, 2) + "\n", { mode: 0o600 });
+    const tamperedReceipt = fs.readFileSync(receipt);
+    const githubCallsBeforeVerify = f.githubCalls.length;
+    const result = verifyTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi, requireReceipt: false });
+    assert.equal(result.status, "CONFLICT");
+    assert.deepEqual(result.missing_verification_gates, ["trusted_manifest_status"]);
+    assert.notEqual(result.status, "VERIFIED");
+    assert.equal(result.mutations_performed, false);
+    assert.deepEqual(fs.readFileSync(receipt), tamperedReceipt);
+    assert.notDeepEqual(tamperedReceipt, beforeReceipt);
+    assert.equal(JSON.stringify(f.state), beforeState);
+    assert.equal(f.githubCalls.length, githubCallsBeforeVerify);
+  } finally { fs.rmSync(f.home, { recursive: true, force: true }); }
+});
+
+test("deleted receipt issued_at fails closed without external verification", () => {
+  const f = fixture();
+  try {
+    issueTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi });
+    const receipt = path.join(f.instance, "trusted-recovery-evidence-v1.json");
+    const beforeReceipt = fs.readFileSync(receipt);
+    const beforeState = JSON.stringify(f.state);
+    const manifest = JSON.parse(beforeReceipt);
+    delete manifest.issued_at;
+    fs.writeFileSync(receipt, JSON.stringify(manifest, null, 2) + "\n", { mode: 0o600 });
+    const tamperedReceipt = fs.readFileSync(receipt);
+    const githubCallsBeforeVerify = f.githubCalls.length;
+    const result = verifyTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi, requireReceipt: false });
+    assert.equal(result.status, "CONFLICT");
+    assert.deepEqual(result.missing_verification_gates, ["trusted_manifest_issued_at"]);
+    assert.notEqual(result.status, "VERIFIED");
+    assert.equal(result.mutations_performed, false);
+    assert.deepEqual(fs.readFileSync(receipt), tamperedReceipt);
+    assert.notDeepEqual(tamperedReceipt, beforeReceipt);
+    assert.equal(JSON.stringify(f.state), beforeState);
+    assert.equal(f.githubCalls.length, githubCallsBeforeVerify);
+  } finally { fs.rmSync(f.home, { recursive: true, force: true }); }
+});
+
+test("bogus receipt issued_at fails closed without external verification", () => {
+  const f = fixture();
+  try {
+    issueTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi });
+    const receipt = path.join(f.instance, "trusted-recovery-evidence-v1.json");
+    const beforeReceipt = fs.readFileSync(receipt);
+    const beforeState = JSON.stringify(f.state);
+    const manifest = JSON.parse(beforeReceipt);
+    manifest.issued_at = "not-a-timestamp";
+    fs.writeFileSync(receipt, JSON.stringify(manifest, null, 2) + "\n", { mode: 0o600 });
+    const tamperedReceipt = fs.readFileSync(receipt);
+    const githubCallsBeforeVerify = f.githubCalls.length;
+    const result = verifyTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi, requireReceipt: false });
+    assert.equal(result.status, "CONFLICT");
+    assert.deepEqual(result.missing_verification_gates, ["trusted_manifest_issued_at"]);
+    assert.notEqual(result.status, "VERIFIED");
+    assert.equal(result.mutations_performed, false);
+    assert.deepEqual(fs.readFileSync(receipt), tamperedReceipt);
+    assert.notDeepEqual(tamperedReceipt, beforeReceipt);
+    assert.equal(JSON.stringify(f.state), beforeState);
+    assert.equal(f.githubCalls.length, githubCallsBeforeVerify);
   } finally { fs.rmSync(f.home, { recursive: true, force: true }); }
 });
 

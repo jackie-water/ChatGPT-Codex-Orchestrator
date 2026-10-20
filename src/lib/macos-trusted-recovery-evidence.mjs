@@ -191,6 +191,11 @@ function verifyLocalIdentity(local, state) {
   if (!local.control?.ok || !control) gates.push("control_clone_identity");
   if (!local.intent?.ok || !intent) gates.push("migration_intent");
   if (!receipt || receipt.schema_version !== TRUSTED_RECOVERY_EVIDENCE_VERSION) gates.push("trusted_manifest_version");
+  if (receipt && receipt.status !== "VERIFIED") gates.push("trusted_manifest_status");
+  if (receipt && (typeof receipt.issued_at !== "string" || !receipt.issued_at ||
+      !Number.isFinite(Date.parse(receipt.issued_at)) || new Date(receipt.issued_at).toISOString() !== receipt.issued_at)) {
+    gates.push("trusted_manifest_issued_at");
+  }
   const expected = { instance_id: state.instance_id, installation_id: state.installation_id, control_repository: state.control_repository, sandbox_repository: state.sandbox_repository };
   if (control && Object.entries(expected).some(([key, value]) => value && control[key] !== value)) gates.push("control_identity_match");
   if (intent && (intent.installation_id !== state.installation_id || intent.generated_repositories?.control !== state.control_repository || intent.generated_repositories?.sandbox !== state.sandbox_repository)) gates.push("migration_identity_match");
