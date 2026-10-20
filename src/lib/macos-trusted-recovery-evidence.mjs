@@ -164,8 +164,25 @@ function repositoryOriginMatches(value, expected) {
 }
 
 function routeRecords(value) {
-  const routes = Array.isArray(value?.routes) ? value.routes : value?.routes && typeof value.routes === "object" ? Object.entries(value.routes).map(([route, record]) => ({ route, ...record })) : [];
-  return routes.filter(record => safeId(record?.route));
+  if (!value || typeof value !== "object" || !Object.prototype.hasOwnProperty.call(value, "routes")) throw new Error("route registry payload is unusable");
+  if (Array.isArray(value.routes)) {
+    return value.routes.map(record => {
+      if (!record || typeof record !== "object" || Array.isArray(record) || !safeId(record.route)) throw new Error("route registry contains a malformed record");
+      return record;
+    });
+  }
+  if (!value.routes || typeof value.routes !== "object") throw new Error("route registry payload is unusable");
+  return Object.entries(value.routes).map(([route, record]) => {
+    if (!safeId(route) || !record || typeof record !== "object" || Array.isArray(record) ||
+        (record.route !== undefined && record.route !== route)) throw new Error("route registry contains a malformed object-map record");
+    return { route, ...record };
+  });
+}
+
+function validatedRouteRecords(routeFile) {
+  if (!routeFile?.present) return { records: null };
+  if (!routeFile.ok) return { error: new Error("route registry file is malformed") };
+  try { return { records: routeRecords(routeFile.value) }; } catch (error) { return { error }; }
 }
 
 function canonicalLocalPaths({ state, home, instanceRoot }) {
@@ -271,6 +288,8 @@ export function verifyTrustedRecoveryEvidence({ state = {}, home = os.homedir(),
   const local = localProof({ state, home, fsImpl });
   if (local.status === "ABSENT" && !state?.control_environment_ready && !state?.instance_root) return diagnostic("ABSENT", local.gates);
   if (local.status === "CONFLICT") return diagnostic("CONFLICT", local.gates);
+  const routeValidation = validatedRouteRecords(local.routeFile);
+  if (routeValidation.error) return diagnostic("CONFLICT", ["chat_route_registry_integrity"]);
   if (local.status === "ABSENT" && !requireReceipt) {
     const prepared = verifyNewInstallPrepared({ local, state, githubApi });
     if (prepared) return prepared;
@@ -294,7 +313,7 @@ export function verifyTrustedRecoveryEvidence({ state = {}, home = os.homedir(),
   const reviewerUrl = canonicalUrl(state.reviewer_chat_url);
   if (!issueUrl || !reviewerUrl || String(author || "") !== String(expectedAuthor || "") || body?.project !== state.sandbox_project_key || issueUrl !== reviewerUrl || body?.installation_id !== state.installation_id || Number(issue?.number) !== Number(manifest.registration_issue_id)) return diagnostic("CONFLICT", ["registration_issue_identity"]);
   const routeFile = local.routeFile?.value;
-  const routes = routeRecords(routeFile);
+  const routes = routeValidation.records;
   const selected = routes.filter(item => item.route === state.sandbox_review_route && item.project === state.sandbox_project_key && item.status === "active");
   if (selected.length !== 1 || routes.filter(item => item.route === state.sandbox_review_route).length !== 1 || routes.filter(item => item.project === state.sandbox_project_key && item.status === "active").length !== 1) return diagnostic("CONFLICT", ["active_unique_route"]);
   if (registrationIssueIdFromState({ ...state, sandbox_chat_registration_issue: selected[0].registration_issue }, local.routeFile) !== Number(manifest.registration_issue_id)) return diagnostic("CONFLICT", ["route_registration_binding"]);
@@ -315,7 +334,9 @@ export function issueTrustedRecoveryEvidence({ state = {}, home = os.homedir(), 
   const localGates = verifyLocalIdentity({ ...local, receipt: local.receipt || { present: false } }, state).filter(gate => gate !== "trusted_manifest_version");
   if (localGates.length) throw new Error(`local trust evidence is incomplete: ${localGates.join(", ")}`);
   const routeFile = local.routeFile;
-  const routes = routeRecords(routeFile.value);
+  const routeValidation = validatedRouteRecords(routeFile);
+  if (routeValidation.error) throw routeValidation.error;
+  const routes = routeValidation.records || [];
   const selected = routes.filter(item => item.route === state.sandbox_review_route && item.project === state.sandbox_project_key && item.status === "active");
   if (!routeFile.ok || selected.length !== 1 || routes.filter(item => item.route === state.sandbox_review_route).length !== 1 || routes.filter(item => item.project === state.sandbox_project_key && item.status === "active").length !== 1) throw new Error("actual active route receipt is missing or ambiguous");
   const verified = independentlyVerifiedProvenance({ state, githubApi, routeFile, issueId: issueId || selected[0].registration_issue });

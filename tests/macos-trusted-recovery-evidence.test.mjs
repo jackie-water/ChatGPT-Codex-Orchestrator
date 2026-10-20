@@ -40,6 +40,66 @@ test("first install issues an exact receipt and idempotent resume verifies it", 
   } finally { fs.rmSync(f.home, { recursive: true, force: true }); }
 });
 
+test("valid object-map route registries issue and verify", () => {
+  const f = fixture();
+  try {
+    const route = JSON.parse(fs.readFileSync(f.state.chat_route_file, "utf8")).routes[0];
+    fs.writeFileSync(f.state.chat_route_file, JSON.stringify({ version: 1, routes: { [route.route]: { ...route, route: undefined } } }) + "\n", { mode: 0o600 });
+    assert.equal(issueTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi }).status, "VERIFIED");
+    assert.equal(verifyTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi }).status, "VERIFIED");
+  } finally { fs.rmSync(f.home, { recursive: true, force: true }); }
+});
+
+test("unsafe extra array route is rejected before issuance or GitHub queries", () => {
+  const f = fixture();
+  try {
+    const routeFile = JSON.parse(fs.readFileSync(f.state.chat_route_file, "utf8"));
+    routeFile.routes.push({ route: "../foreign", project: f.state.sandbox_project_key, status: "active", chat_url: f.state.reviewer_chat_url });
+    fs.writeFileSync(f.state.chat_route_file, JSON.stringify(routeFile) + "\n", { mode: 0o600 });
+    const callsBefore = f.githubCalls.length;
+    assert.throws(() => issueTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi }), /malformed record/);
+    assert.equal(f.githubCalls.length, callsBefore);
+    assert.equal(fs.existsSync(path.join(f.instance, "trusted-recovery-evidence-v1.json")), false);
+  } finally { fs.rmSync(f.home, { recursive: true, force: true }); }
+});
+
+test("missing-route extra record is rejected after issuance without receipt or GitHub mutation", () => {
+  const f = fixture();
+  try {
+    issueTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi });
+    const receipt = path.join(f.instance, "trusted-recovery-evidence-v1.json");
+    const beforeReceipt = fs.readFileSync(receipt);
+    const routeFile = JSON.parse(fs.readFileSync(f.state.chat_route_file, "utf8"));
+    routeFile.routes.push({ project: f.state.sandbox_project_key, status: "active", chat_url: f.state.reviewer_chat_url });
+    fs.writeFileSync(f.state.chat_route_file, JSON.stringify(routeFile) + "\n", { mode: 0o600 });
+    const callsBefore = f.githubCalls.length;
+    const result = verifyTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi });
+    assert.equal(result.status, "CONFLICT");
+    assert.deepEqual(result.missing_verification_gates, ["chat_route_registry_integrity"]);
+    assert.equal(result.mutations_performed, false);
+    assert.equal(f.githubCalls.length, callsBefore);
+    assert.deepEqual(fs.readFileSync(receipt), beforeReceipt);
+  } finally { fs.rmSync(f.home, { recursive: true, force: true }); }
+});
+
+test("malformed object-map route records are rejected before GitHub queries", () => {
+  for (const routes of [
+    { "../foreign": { project: "sandbox-a", status: "active" } },
+    { "chat-369": { route: "other-route", project: "sandbox-a", status: "active" } }
+  ]) {
+    const f = fixture();
+    try {
+      fs.writeFileSync(f.state.chat_route_file, JSON.stringify({ version: 1, routes }) + "\n", { mode: 0o600 });
+      const callsBefore = f.githubCalls.length;
+      const result = verifyTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi, requireReceipt: false });
+      assert.equal(result.status, "CONFLICT");
+      assert.deepEqual(result.missing_verification_gates, ["chat_route_registry_integrity"]);
+      assert.equal(f.githubCalls.length, callsBefore);
+      assert.equal(fs.existsSync(path.join(f.instance, "trusted-recovery-evidence-v1.json")), false);
+    } finally { fs.rmSync(f.home, { recursive: true, force: true }); }
+  }
+});
+
 test("receipt mode must remain exactly 0600 for verification and idempotent issuance", () => {
   const f = fixture();
   try {
