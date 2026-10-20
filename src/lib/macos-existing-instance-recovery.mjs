@@ -89,8 +89,10 @@ function safeInstanceTree(fsImpl, root) {
     const stat = result.stat;
     if (stat.isSymbolicLink()) return { ok: false, reason: "symlink" };
     if (!uidAllowed(stat)) return { ok: false, reason: "unsafe-owner" };
+    const passive = relative === "" || relative === ".git" || relative.startsWith(`.git${path.sep}`) || relative === "browser-profile" || relative.startsWith(`browser-profile${path.sep}`) || relative === "automation" || relative.startsWith(`automation${path.sep}`) || relative === "logs" || relative.startsWith(`logs${path.sep}`);
     if (stat.isDirectory()) {
-      if (!privateMode(stat, true)) return { ok: false, reason: "odd-directory-mode" };
+      if (!passive && !privateMode(stat, true)) return { ok: false, reason: "odd-directory-mode" };
+      if (passive && !ancestorModeAllowed(stat)) return { ok: false, reason: "unsafe-passive-directory" };
       if (depth >= MAX_TREE_DEPTH) return { ok: false, reason: "tree-bound" };
       let entries;
       try { entries = fsImpl.readdirSync(file, { withFileTypes: true }); }
@@ -103,7 +105,7 @@ function safeInstanceTree(fsImpl, root) {
         if (!safeTreeBasename(entry.name) || childRelative.startsWith(`..${path.sep}`) || path.isAbsolute(childRelative)) return { ok: false, reason: "traversal" };
         pending.push({ file: child, depth: depth + 1 });
       }
-    } else if (!stat.isFile() || stat.nlink !== 1 || !privateMode(stat, false)) {
+    } else if (!stat.isFile() || stat.nlink !== 1 || (!passive && !privateMode(stat, false)) || (passive && !ancestorModeAllowed(stat))) {
       return { ok: false, reason: stat.isSymbolicLink() ? "symlink" : "unsafe-leaf" };
     }
   }
