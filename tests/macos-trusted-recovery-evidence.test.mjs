@@ -40,6 +40,28 @@ test("first install issues an exact receipt and idempotent resume verifies it", 
   } finally { fs.rmSync(f.home, { recursive: true, force: true }); }
 });
 
+test("receipt mode must remain exactly 0600 for verification and idempotent issuance", () => {
+  const f = fixture();
+  try {
+    issueTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi });
+    const receipt = path.join(f.instance, "trusted-recovery-evidence-v1.json");
+    const beforeReceipt = fs.readFileSync(receipt);
+    const beforeState = JSON.stringify(f.state);
+    fs.chmodSync(receipt, 0o700);
+    const callsBeforeVerify = f.githubCalls.length;
+    const verified = verifyTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi });
+    assert.equal(verified.status, "CONFLICT");
+    assert.deepEqual(verified.missing_verification_gates, ["trusted_manifest_integrity"]);
+    assert.equal(verified.mutations_performed, false);
+    assert.equal(f.githubCalls.length, callsBeforeVerify);
+    assert.throws(() => issueTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi }), /local trust evidence is contradictory/);
+    assert.equal(JSON.stringify(f.state), beforeState);
+    assert.deepEqual(fs.readFileSync(receipt), beforeReceipt);
+    fs.chmodSync(receipt, 0o600);
+    assert.equal(verifyTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi }).status, "VERIFIED");
+  } finally { fs.rmSync(f.home, { recursive: true, force: true }); }
+});
+
 test("selected route Chat URL must match the independently registered Chat before and after issuance", () => {
   const f = fixture();
   try {

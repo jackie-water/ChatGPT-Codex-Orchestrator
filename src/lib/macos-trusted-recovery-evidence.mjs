@@ -44,12 +44,12 @@ function secureParent(fsImpl, file, home) {
   return cursor === base ? { ok: true } : { ok: false, reason: "outside-home" };
 }
 
-function secureFile(fsImpl, file, home, { allowMissing = false, privateFile = true } = {}) {
+function secureFile(fsImpl, file, home, { allowMissing = false, privateFile = true, requiredMode } = {}) {
   const parent = secureParent(fsImpl, file, home);
   if (!parent.ok) return parent;
   const result = lstat(fsImpl, file);
   if (result.missing) return allowMissing ? { ok: true, missing: true } : { ok: false, missing: true };
-  if (result.error || result.stat.isSymbolicLink() || !result.stat.isFile() || result.stat.nlink !== 1 || !own(result.stat) || (privateFile ? !OWNER_MODES.has(mode(result.stat)) : (mode(result.stat) & 0o022))) return { ok: false, reason: privateFile ? "unsafe-proof-file" : "unsafe-passive-file" };
+  if (result.error || result.stat.isSymbolicLink() || !result.stat.isFile() || result.stat.nlink !== 1 || !own(result.stat) || (requiredMode === undefined ? (privateFile ? !OWNER_MODES.has(mode(result.stat)) : (mode(result.stat) & 0o022)) : mode(result.stat) !== requiredMode)) return { ok: false, reason: privateFile ? "unsafe-proof-file" : "unsafe-passive-file" };
   return { ok: true };
 }
 
@@ -195,7 +195,7 @@ function localProof({ state, home, fsImpl }) {
   if (!paths.ok) return { status: "CONFLICT", gates: [paths.reason] };
   const control = readJson(fsImpl, path.join(paths.control, "instance.json"), home);
   const intent = readJson(fsImpl, path.join(instanceRoot, "migration-intent.json"), home);
-  const receipt = readJson(fsImpl, path.join(instanceRoot, "trusted-recovery-evidence-v1.json"), home, { allowMissing: true });
+  const receipt = readJson(fsImpl, path.join(instanceRoot, "trusted-recovery-evidence-v1.json"), home, { allowMissing: true, requiredMode: 0o600 });
   const routeFile = readJson(fsImpl, paths.route, home, { allowMissing: true, privateFile: false });
   if (receipt.present && !receipt.ok) return { status: "CONFLICT", gates: ["trusted_manifest_integrity"] };
   if (!receipt.present) return { status: "ABSENT", gates: ["trusted_manifest"] , control, intent, routeFile, instanceRoot };
