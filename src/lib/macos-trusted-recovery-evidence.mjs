@@ -99,10 +99,15 @@ function independentlyVerifiedProvenance({ state, githubApi, routeFile, issueId 
   const body = issueBody(issue);
   const issueChatUrl = canonicalUrl(body?.chat_url);
   const reviewerChatUrl = canonicalUrl(state.reviewer_chat_url);
+  const routes = routeRecords(routeFile?.value);
+  const selectedRoute = routes.filter(item => item.route === state.sandbox_review_route && item.project === state.sandbox_project_key && item.status === "active");
   const author = issue?.user?.login;
   if (!remoteControl?.id || !remoteSandbox?.id || !repositoryMatches(remoteControl, state.control_repository, "control", remoteControl.id) ||
       !repositoryMatches(remoteSandbox, state.sandbox_repository, "sandbox", remoteSandbox?.id) ||
       !issueChatUrl || !reviewerChatUrl || issueChatUrl !== reviewerChatUrl ||
+      selectedRoute.length !== 1 || routes.filter(item => item.route === state.sandbox_review_route).length !== 1 ||
+      routes.filter(item => item.project === state.sandbox_project_key && item.status === "active").length !== 1 ||
+      canonicalUrl(selectedRoute[0]?.chat_url) !== issueChatUrl ||
       body?.project !== state.sandbox_project_key || body?.installation_id !== state.installation_id ||
       !safeId(author) || Number(issue?.number) !== registrationIssueId) throw new Error("independent GitHub provenance is contradictory");
   return {

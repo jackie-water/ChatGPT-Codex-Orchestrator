@@ -270,7 +270,8 @@ function runtimeRefreshIdentity(state){
   assertSafeRuntimePath(metadataPath,{type:"file"});
   const metadata=JSON.parse(fs.readFileSync(metadataPath,"utf8"));
   if(metadata.schema_version!==1||metadata.instance_id!==state.instance_id||(platform==="darwin"&&metadata.installation_id!==state.installation_id)||metadata.platform!==platform||metadata.arch!==arch||
-    metadata.trusted_github_username!==state.github_login||metadata.runner_label!==state.runner_label||metadata.control_repository!==state.control_repository) throw new Error("Persisted Control instance identity does not match installation state for runtime refresh");
+    metadata.trusted_github_username!==state.github_login||metadata.runner_label!==state.runner_label||metadata.control_repository!==state.control_repository||
+    (platform==="darwin"&&(!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(String(state.sandbox_repository||""))||metadata.sandbox_repository!==state.sandbox_repository||metadata.role!=="control"))) throw new Error("Persisted Control instance identity does not match installation state for runtime refresh");
   if(platform==="darwin"&&(!/^com\.chatgpt\.codex\.[A-Za-z0-9-]+$/.test(String(state.launch_agent_label||""))||metadata.launch_agent_label!==state.launch_agent_label||typeof metadata.codex_executable!=="string"||!path.isAbsolute(metadata.codex_executable))) throw new Error("Existing macOS runtime identity is incomplete or mismatched for runtime refresh");
   if(platform==="win32"&&(metadata.launch_agent_label!==null||state.launch_agent_label!=null)) throw new Error("Persisted Windows instance has an ambiguous LaunchAgent identity");
   if(state.environment?.platform&&state.environment.platform!==platform) throw new Error("Persisted instance platform conflicts with installation environment");
@@ -298,7 +299,8 @@ function upgradeRuntimeIdentity({state,instanceId,commandRunner=run}){
   assertSafeRuntimePath(metadataPath,{type:"file"});
   const metadata=JSON.parse(fs.readFileSync(metadataPath,"utf8"));
   if(metadata.schema_version!==1||metadata.instance_id!==instanceId||(platform==="darwin"&&metadata.installation_id!==state.installation_id)||metadata.platform!==platform||metadata.arch!==arch||
-    metadata.trusted_github_username!==state.github_login||metadata.runner_label!==state.runner_label||metadata.control_repository!==state.control_repository){
+    metadata.trusted_github_username!==state.github_login||metadata.runner_label!==state.runner_label||metadata.control_repository!==state.control_repository||
+    (platform==="darwin"&&(!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(String(state.sandbox_repository||""))||metadata.sandbox_repository!==state.sandbox_repository||metadata.role!=="control"))){
     throw new Error("Persisted Control instance identity does not match installation state for upgrade");
   }
   if(platform==="win32"&&(metadata.launch_agent_label!==null||state.launch_agent_label!=null)) throw new Error("Persisted Windows instance has an ambiguous LaunchAgent identity");

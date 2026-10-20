@@ -40,6 +40,26 @@ test("first install issues an exact receipt and idempotent resume verifies it", 
   } finally { fs.rmSync(f.home, { recursive: true, force: true }); }
 });
 
+test("selected route Chat URL must match the independently registered Chat before and after issuance", () => {
+  const f = fixture();
+  try {
+    const routeFile = JSON.parse(fs.readFileSync(f.state.chat_route_file, "utf8"));
+    routeFile.routes[0].chat_url = "https://chatgpt.com/c/another-conversation";
+    fs.writeFileSync(f.state.chat_route_file, JSON.stringify(routeFile) + "\n", { mode: 0o600 });
+    assert.throws(() => issueTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi }), /provenance/);
+    assert.equal(verifyTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi, requireReceipt: false }).status, "NEEDS_HUMAN_LEGACY");
+
+    routeFile.routes[0].chat_url = f.state.reviewer_chat_url;
+    fs.writeFileSync(f.state.chat_route_file, JSON.stringify(routeFile) + "\n", { mode: 0o600 });
+    issueTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi });
+    routeFile.routes[0].chat_url = "https://chatgpt.com/c/another-conversation";
+    fs.writeFileSync(f.state.chat_route_file, JSON.stringify(routeFile) + "\n", { mode: 0o600 });
+    const result = verifyTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi });
+    assert.equal(result.status, "CONFLICT");
+    assert.deepEqual(result.missing_verification_gates, ["independent_github_provenance"]);
+  } finally { fs.rmSync(f.home, { recursive: true, force: true }); }
+});
+
 test("identical private repository identities refuse issuance and verification", () => {
   const f = fixture();
   try {

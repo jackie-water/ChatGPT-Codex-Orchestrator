@@ -6,7 +6,7 @@ import vm from "node:vm";
 import os from "node:os";
 import path from "node:path";
 import {fileURLToPath} from "node:url";
-import {normalizedGithubRepository,refreshControlRuntime} from "../src/lib/control-env.mjs";
+import {normalizedGithubRepository,refreshControlRuntime,upgradeControlEnvironment} from "../src/lib/control-env.mjs";
 import {renderWorkflow} from "../src/lib/control-render.mjs";
 
 const repositoryRoot=path.resolve(path.dirname(fileURLToPath(import.meta.url)),"..");
@@ -128,6 +128,7 @@ function fixture(t,{platform="darwin",arch=platform==="darwin"?"arm64":"x64",git
   }
   const state={
     control_environment_ready:true,control_repository:"owner/control",control_clone_path:control,
+    ...(platform==="darwin"?{sandbox_repository:"owner/sandbox"}:{}),
     runner_label:"codex-orchestrator-fixture",github_login:"Trusted-Owner",instance_id:"fixture01",
     instance_platform:platform,instance_arch:arch,
     ...(platform==="darwin"?{launch_agent_label:"com.chatgpt.codex.fixture01"}:{})
@@ -136,7 +137,7 @@ function fixture(t,{platform="darwin",arch=platform==="darwin"?"arm64":"x64",git
     schema_version:1,instance_id:state.instance_id,trusted_github_username:state.github_login,
     platform,arch,runner_label:state.runner_label,control_repository:state.control_repository,
     launch_agent_label:platform==="darwin"?state.launch_agent_label:null,
-    ...(platform==="darwin"?{codex_executable:fs.realpathSync(process.execPath)}: {})
+    ...(platform==="darwin"?{sandbox_repository:state.sandbox_repository,role:"control",codex_executable:fs.realpathSync(process.execPath)}: {})
   };
   const preserved={
     "instance.json":JSON.stringify(metadata,null,2)+"\n",
@@ -374,6 +375,33 @@ test("runtime refresh rejects the wrong clone path, Git root, branch and invalid
   });
   await t.test("different branch",t=>assertRejected(fixture(t,{git:{branch:"feature"}}),/main/));
   await t.test("invalid local HEAD",t=>assertRejected(fixture(t,{git:{localHead:"not-a-sha"}}),/HEAD/));
+});
+
+test("macOS runtime refresh rejects missing or changed Sandbox identity before mutation",async t=>{
+  await t.test("missing state Sandbox repository",t=>{
+    const f=fixture(t); delete f.state.sandbox_repository; assertRejected(f);
+  });
+  await t.test("changed persisted Sandbox repository",t=>{
+    const f=fixture(t); f.metadata.sandbox_repository="owner/other-sandbox"; f.writeMetadata(); assertRejected(f);
+  });
+  await t.test("missing persisted Sandbox repository",t=>{
+    const f=fixture(t); delete f.metadata.sandbox_repository; f.writeMetadata(); assertRejected(f);
+  });
+});
+
+test("macOS runtime upgrade rejects missing or changed Sandbox identity before mutation",async t=>{
+  const f=fixture(t);
+  Object.assign(f.state,{installation_id:"fixture01",runner_owner:"fixture01",runner_path:path.join(f.root,"runner"),browser_profile:"fixture-profile",browser_port:12345,project_key:"project",project_clone_path:path.join(f.root,"project"),sandbox_project_key:"sandbox",sandbox_clone_path:path.join(f.root,"sandbox")});
+  f.metadata.installation_id=f.state.installation_id;
+  f.writeMetadata();
+  const upgrade=()=>upgradeControlEnvironment({state:f.state,sourceRoot:f.sourceRoot,home:f.root,commandRunner:f.adapter.run});
+  await t.test("missing state Sandbox repository",t=>{
+    const before=snapshot(f.root); delete f.state.sandbox_repository; assert.throws(upgrade); assert.deepEqual(snapshot(f.root),before);
+  });
+  f.state.sandbox_repository="owner/sandbox";
+  await t.test("changed persisted Sandbox repository",t=>{
+    f.metadata.sandbox_repository="owner/other-sandbox"; f.writeMetadata(); const before=snapshot(f.root); assert.throws(upgrade); assert.deepEqual(snapshot(f.root),before);
+  });
 });
 
 test("runtime refresh rejects all symlinked destination paths before writing",async t=>{
