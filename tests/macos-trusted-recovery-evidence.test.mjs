@@ -40,6 +40,117 @@ test("first install issues an exact receipt and idempotent resume verifies it", 
   } finally { fs.rmSync(f.home, { recursive: true, force: true }); }
 });
 
+test("identical private repository identities refuse issuance and verification", () => {
+  const f = fixture();
+  try {
+    f.state.sandbox_repository = f.state.control_repository;
+    fs.writeFileSync(path.join(f.control, "instance.json"), JSON.stringify({ schema_version: 1, instance_id: f.state.instance_id, installation_id: f.state.installation_id, control_repository: f.state.control_repository, sandbox_repository: f.state.sandbox_repository, role: "control" }) + "\n", { mode: 0o600 });
+    const migrationIntentFile = path.join(f.instance, "migration-intent.json");
+    const migrationIntent = JSON.parse(fs.readFileSync(migrationIntentFile, "utf8"));
+    migrationIntent.generated_repositories.sandbox = f.state.sandbox_repository;
+    fs.writeFileSync(migrationIntentFile, JSON.stringify(migrationIntent) + "\n", { mode: 0o600 });
+    assert.equal(fs.statSync(migrationIntentFile).mode & 0o777, 0o600);
+    assert.equal(migrationIntent.installation_id, f.state.installation_id);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(f.control, "instance.json"), "utf8")).role, "control");
+    assert.throws(() => issueTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi }), /trust domains are not distinct/);
+    const result = verifyTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi, requireReceipt: false });
+    assert.equal(result.status, "NEEDS_HUMAN_LEGACY");
+    assert.equal(result.mutations_performed, false);
+    assert.equal(fs.existsSync(path.join(f.instance, "trusted-recovery-evidence-v1.json")), false);
+  } finally { fs.rmSync(f.home, { recursive: true, force: true }); }
+});
+
+test("distinct repository names with one immutable GitHub ID refuse issuance and verification", () => {
+  const f = fixture();
+  try {
+    f.githubApi.getRepository = repository => ({ id: 101, name: repository === f.state.control_repository ? "control-a" : "sandbox-a", full_name: repository, visibility: "PRIVATE", owner: { login: "owner" } });
+    assert.throws(() => issueTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi }), /trust domains are not distinct/);
+    const result = verifyTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi, requireReceipt: false });
+    assert.equal(result.status, "NEEDS_HUMAN_LEGACY");
+    assert.equal(result.mutations_performed, false);
+    assert.equal(fs.existsSync(path.join(f.instance, "trusted-recovery-evidence-v1.json")), false);
+  } finally { fs.rmSync(f.home, { recursive: true, force: true }); }
+});
+
+test("previously valid receipt rejects a post-issuance immutable GitHub ID collision without mutation", () => {
+  const f = fixture();
+  try {
+    issueTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi });
+    const receipt = path.join(f.instance, "trusted-recovery-evidence-v1.json");
+    const beforeReceipt = fs.readFileSync(receipt);
+    const beforeState = JSON.stringify(f.state);
+    const callsBeforeVerify = f.githubCalls.length;
+    f.githubApi.getRepository = repository => { f.githubCalls.push(["repository", repository]); return { id: 101, name: repository === f.state.control_repository ? "control-a" : "sandbox-a", full_name: repository, visibility: "PRIVATE", owner: { login: "owner" } }; };
+    const result = verifyTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi });
+    assert.equal(result.status, "CONFLICT");
+    assert.deepEqual(result.missing_verification_gates, ["independent_github_provenance"]);
+    assert.equal(result.mutations_performed, false);
+    assert.equal(JSON.stringify(f.state), beforeState);
+    assert.deepEqual(fs.readFileSync(receipt), beforeReceipt);
+    assert.deepEqual(f.githubCalls.slice(callsBeforeVerify), [
+      ["repository", f.state.control_repository],
+      ["repository", f.state.sandbox_repository]
+    ]);
+  } finally { fs.rmSync(f.home, { recursive: true, force: true }); }
+});
+
+test("persisted Control role tampering conflicts without receipt mutation", () => {
+  const f = fixture();
+  try {
+    issueTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi });
+    const receipt = path.join(f.instance, "trusted-recovery-evidence-v1.json");
+    const before = fs.readFileSync(receipt);
+    const controlFile = path.join(f.control, "instance.json");
+    const control = JSON.parse(fs.readFileSync(controlFile, "utf8"));
+    control.role = "sandbox";
+    fs.writeFileSync(controlFile, JSON.stringify(control) + "\n", { mode: 0o600 });
+    const result = verifyTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi });
+    assert.equal(result.status, "CONFLICT");
+    assert.deepEqual(result.missing_verification_gates, ["control_clone_role"]);
+    assert.equal(result.mutations_performed, false);
+    assert.deepEqual(fs.readFileSync(receipt), before);
+  } finally { fs.rmSync(f.home, { recursive: true, force: true }); }
+});
+
+for (const field of ["origin", "remote_origin"]) {
+  test(`tampered persisted Control ${field} conflicts without receipt mutation`, () => {
+    const f = fixture();
+    try {
+      issueTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi });
+      const receipt = path.join(f.instance, "trusted-recovery-evidence-v1.json");
+      const before = fs.readFileSync(receipt);
+      const controlFile = path.join(f.control, "instance.json");
+      const control = JSON.parse(fs.readFileSync(controlFile, "utf8"));
+      control[field] = "https://github.com/attacker/unrelated";
+      fs.writeFileSync(controlFile, JSON.stringify(control) + "\n", { mode: 0o600 });
+      const result = verifyTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi });
+      assert.equal(result.status, "CONFLICT");
+      assert.deepEqual(result.missing_verification_gates, [`control_clone_${field}`]);
+      assert.equal(result.mutations_performed, false);
+      assert.deepEqual(fs.readFileSync(receipt), before);
+    } finally { fs.rmSync(f.home, { recursive: true, force: true }); }
+  });
+}
+
+test("pre-issuance Control role and origins are required", () => {
+  for (const mutation of [
+    { role: "sandbox" },
+    { origin: "https://github.com/attacker/unrelated" },
+    { remote_origin: "https://github.com/attacker/unrelated" }
+  ]) {
+    const f = fixture();
+    try {
+      const controlFile = path.join(f.control, "instance.json");
+      const control = JSON.parse(fs.readFileSync(controlFile, "utf8"));
+      Object.assign(control, mutation);
+      fs.writeFileSync(controlFile, JSON.stringify(control) + "\n", { mode: 0o600 });
+      assert.throws(() => issueTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi }), /local trust evidence is incomplete/);
+      assert.equal(verifyTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi, requireReceipt: false }).status, "NEEDS_HUMAN_LEGACY");
+      assert.equal(fs.existsSync(path.join(f.instance, "trusted-recovery-evidence-v1.json")), false);
+    } finally { fs.rmSync(f.home, { recursive: true, force: true }); }
+  }
+});
+
 test("mutated receipt status fails closed without external verification", () => {
   const f = fixture();
   try {

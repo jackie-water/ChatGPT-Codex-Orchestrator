@@ -90,6 +90,7 @@ function independentlyVerifiedProvenance({ state, githubApi, routeFile, issueId 
   const sandbox = repositoryParts(state.sandbox_repository);
   const remoteControl = remoteRepository(githubApi, state.control_repository);
   const remoteSandbox = remoteRepository(githubApi, state.sandbox_repository);
+  assertDistinctTrustDomains(control, sandbox, remoteControl, remoteSandbox);
   const supplied = String(issueId || "");
   const suppliedMatch = supplied.match(/\/issues\/(\d+)(?:$|[?#])/);
   const registrationIssueId = Number(suppliedMatch?.[1] || (/^\d+$/.test(supplied) ? supplied : registrationIssueIdFromState(state, routeFile)));
@@ -136,6 +137,19 @@ function repositoryMatches(actual, expected, role, persistedId) {
     String(actual?.full_name || "").toLowerCase() === wanted.full_name.toLowerCase() &&
     String(actual?.id || "") === String(persistedId || "") &&
     (actual?.role === undefined || actual.role === role);
+}
+
+function validRepositoryId(value) {
+  return (Number.isSafeInteger(value) && value > 0) ||
+    (typeof value === "string" && /^[1-9]\d*$/.test(value) && Number.isSafeInteger(Number(value)));
+}
+
+function assertDistinctTrustDomains(control, sandbox, remoteControl, remoteSandbox) {
+  if (control.full_name.toLowerCase() === sandbox.full_name.toLowerCase() ||
+      !validRepositoryId(remoteControl?.id) || !validRepositoryId(remoteSandbox?.id) ||
+      String(remoteControl.id) === String(remoteSandbox.id)) {
+    throw new Error("independent GitHub trust domains are not distinct");
+  }
 }
 
 function repositoryOriginMatches(value, expected) {
@@ -196,6 +210,9 @@ function verifyLocalIdentity(local, state) {
       !Number.isFinite(Date.parse(receipt.issued_at)) || new Date(receipt.issued_at).toISOString() !== receipt.issued_at)) {
     gates.push("trusted_manifest_issued_at");
   }
+  if (control && control.role !== "control") gates.push("control_clone_role");
+  if (control && control.origin !== undefined && !repositoryOriginMatches(control.origin, state.control_repository)) gates.push("control_clone_origin");
+  if (control && control.remote_origin !== undefined && !repositoryOriginMatches(control.remote_origin, state.control_repository)) gates.push("control_clone_remote_origin");
   const expected = { instance_id: state.instance_id, installation_id: state.installation_id, control_repository: state.control_repository, sandbox_repository: state.sandbox_repository };
   if (control && Object.entries(expected).some(([key, value]) => value && control[key] !== value)) gates.push("control_identity_match");
   if (intent && (intent.installation_id !== state.installation_id || intent.generated_repositories?.control !== state.control_repository || intent.generated_repositories?.sandbox !== state.sandbox_repository)) gates.push("migration_identity_match");
@@ -234,8 +251,11 @@ function verifyNewInstallPrepared({ local, state, githubApi }) {
 }
 
 function independentlyVerifiedProvenanceWithoutIssue({ state, githubApi }) {
+  const control = repositoryParts(state.control_repository);
+  const sandbox = repositoryParts(state.sandbox_repository);
   const remoteControl = remoteRepository(githubApi, state.control_repository);
   const remoteSandbox = remoteRepository(githubApi, state.sandbox_repository);
+  assertDistinctTrustDomains(control, sandbox, remoteControl, remoteSandbox);
   if (!remoteControl?.id || !remoteSandbox?.id ||
       !repositoryMatches(remoteControl, state.control_repository, "control", remoteControl.id) ||
       !repositoryMatches(remoteSandbox, state.sandbox_repository, "sandbox", remoteSandbox.id)) throw new Error("independent GitHub repository provenance is contradictory");
