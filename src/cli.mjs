@@ -145,7 +145,8 @@ function macosTrustedRecoveryEvidence(state, { requireReceipt = true } = {}) {
 function dryRun() {
   let state;
   try { state=loadState({create:false}); }
-  catch {
+  catch (error) {
+    if (process.platform !== "darwin") throw error;
     const existingInstanceRecovery=process.platform==="darwin"?macosRecoveryReport():null;
     return emit({status:"ERROR",error_id:"MACOS-EXISTING-INSTANCE-REVIEW",preferred_language:"en",message:"macOS installer state is unreadable; dry-run stopped before any external setup action.",dry_run:true,existing_instance_recovery:existingInstanceRecovery,mutations_performed:false,plan:[]},1);
   }
@@ -155,6 +156,7 @@ function dryRun() {
   if(existingInstanceRecovery && existingInstanceRecovery.status!=="ABSENT" && !macosBootstrapMayAdvance(state, existingInstanceRecovery, trustedRecoveryEvidence) && (!macosStateBound(state, existingInstanceRecovery) || existingInstanceRecovery.status==="CONFLICT")) {
     return emit({status:existingInstanceRecovery.status==="CONFLICT"?"ERROR":"NEEDS_USER_ACTION",error_id:"MACOS-EXISTING-INSTANCE-REVIEW",preferred_language:lang,message:"macOS existing-instance recovery requires a separate reviewed action; dry-run stopped before any external command.",dry_run:true,mutations_performed:false,existing_instance_recovery:existingInstanceRecovery,plan:[]},1);
   }
+  if(trustedRecoveryEvidence?.status==="CONFLICT") return emit({status:"ERROR",error_id:"MACOS-TRUSTED-RECOVERY-EVIDENCE",preferred_language:lang,message:"Trusted macOS recovery evidence is contradictory; dry-run stopped before prerequisite checks or any external setup action.",dry_run:true,existing_instance_recovery:existingInstanceRecovery,trusted_recovery_evidence:trustedRecoveryEvidence,mutations_performed:false,plan:[]},1);
   if(trustedRecoveryEvidence?.status==="NEEDS_HUMAN_LEGACY") return emit({status:"NEEDS_HUMAN",error_id:"MACOS-TRUSTED-RECOVERY-EVIDENCE",preferred_language:lang,message:"Historical macOS artifacts require a separate human-approved recovery procedure; no adoption or mutation was performed.",dry_run:true,existing_instance_recovery:existingInstanceRecovery,trusted_recovery_evidence:trustedRecoveryEvidence,mutations_performed:false,plan:[]},1);
   const git=commandExists("git");
   const node=commandExists("node");
