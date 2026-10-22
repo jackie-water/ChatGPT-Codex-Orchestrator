@@ -11,13 +11,14 @@ permissions:
 jobs:
   register-chat:
     if: startsWith(github.event.issue.title, '[CHAT-REGISTER]')
+    timeout-minutes: 5
     runs-on: [self-hosted, macOS, {{RUNNER_ARCH}}, {{RUNNER_LABEL}}]
     steps:
       - uses: actions/checkout@v4
       - name: Register explicit Chat callback route
         env:
           CODEX_EVENT_PATH: ${{ github.event_path }}
-        run: node scripts/register-chat.mjs --event-path "$CODEX_EVENT_PATH" --control-root "$GITHUB_WORKSPACE" --trusted-github-username "{{TRUSTED_GITHUB_USERNAME}}"
+        run: node scripts/register-chat.mjs --event-path "$CODEX_EVENT_PATH" --control-root "$GITHUB_WORKSPACE" --trusted-github-username "{{TRUSTED_GITHUB_USERNAME}}" --deliver
   run-codex:
     if: startsWith(github.event.issue.title, '[CODEX-RUN]')
     runs-on: [self-hosted, macOS, {{RUNNER_ARCH}}, {{RUNNER_LABEL}}]

@@ -4,18 +4,19 @@ import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
 import { spawnSafeSync } from "./lib/spawn-safe.mjs";
-import { loadState, saveState, stateRoot } from "./lib/state.mjs";
+import { loadState as readInstallerState, saveState as writeInstallerState, stateRoot } from "./lib/state.mjs";
 import { t, normalizeLanguage } from "./lib/i18n.mjs";
 import { ERROR_CATALOG } from "./lib/errors.mjs";
 import { sanitizeObject } from "./lib/sanitize.mjs";
 import { submitDiagnosticReport } from "./lib/reporting.mjs";
-import { prepareControlEnvironment, activateTargetProject, upgradeControlEnvironment, refreshControlRuntime, githubLogin as authenticatedGithubLogin } from "./lib/control-env.mjs";
+import { prepareControlEnvironment, activateTargetProject, upgradeControlEnvironment, refreshControlRuntime, verifyMacosGeneratedRepositories, githubLogin as authenticatedGithubLogin } from "./lib/control-env.mjs";
 import { renderProjectInstructions } from "./lib/project-instructions.mjs";
 import { ensureInstallerChatRegistration, normalizeChatUrl } from "./lib/chat-registration.mjs";
 import { pendingCallbackCount, doctorHealth, repairHealth } from "./lib/runtime-health.mjs";
 import { macosPrerequisites, migrationPreflight, macosRuntimeAction, prepareMigrationIntent } from "./lib/macos-platform.mjs";
 import { macosNativeHelperPreflight, prepareMacosNativeHelper, verifyMacosNativeCapability } from "./lib/macos-native-helper-install.mjs";
-import { inspectMacosExistingInstanceRecovery } from "./lib/macos-existing-instance-recovery.mjs";
+import { inspectMacosExistingInstanceRecovery, inspectMacosSelectedFreshInstance, approveMacosSelectedFreshInstance } from "./lib/macos-existing-instance-recovery.mjs";
+import { inspectMacosRunnerBootstrap, approveMacosRunnerBootstrap } from "./lib/macos-runner-bootstrap.mjs";
 import { verifyTrustedRecoveryEvidence, issueTrustedRecoveryEvidence, githubReadOnlyApi } from "./lib/macos-trusted-recovery-evidence.mjs";
 import { canonicalInstallationId } from "./lib/control-render.mjs";
 import {
@@ -29,6 +30,56 @@ const argv = process.argv.slice(2);
 const command = argv[0] || "help";
 const wantsJson = argv.includes("--json");
 const productConfig = JSON.parse(fs.readFileSync(new URL("../product.json", import.meta.url),"utf8"));
+
+function macosStateFile({create=false}={}){
+  const root=path.resolve(stateRoot({create:false})),home=path.resolve(os.homedir());
+  if(!root.startsWith(home+path.sep)) throw new Error("macOS installer state must be isolated inside canonical HOME");
+  let current=path.parse(root).root;
+  for(const part of root.slice(current.length).split(path.sep).filter(Boolean)){
+    current=path.join(current,part);
+    let st;
+    try{st=fs.lstatSync(current);}catch(error){if(error.code!=="ENOENT"||!create)throw error;fs.mkdirSync(current,{mode:0o700});st=fs.lstatSync(current);}
+    const within=current===home||current.startsWith(home+path.sep);
+    if(st.isSymbolicLink()||!st.isDirectory()||(typeof process.getuid==="function"&&st.uid!==process.getuid()&&!(st.uid===0&&!within))||((st.mode&0o022)!==0&&!(st.uid===0&&(st.mode&0o1000)!==0&&!within))||(current===root&&(st.mode&0o077)!==0)) throw new Error("Unsafe macOS installer state ancestor; permission repair is forbidden");
+  }
+  const file=path.join(root,"install-state.json");
+  try{const st=fs.lstatSync(file);if(st.isSymbolicLink()||!st.isFile()||st.nlink!==1||(typeof process.getuid==="function"&&st.uid!==process.getuid())||(st.mode&0o777)!==0o600) throw new Error("Unsafe macOS installer state file");}
+  catch(error){if(error.code!=="ENOENT")throw error;}
+  return file;
+}
+
+function loadState(options={}){
+  if(process.platform==="darwin"){
+    const empty=()=>({schema_version:1,preferred_language:null,current_step:"not_started",completed:[],ready:false});
+    let file;
+    try{file=macosStateFile();}catch(error){if(error.code!=="ENOENT")throw error;return empty();}
+    let fd;
+    try{
+      const before=fs.lstatSync(file);
+      fd=fs.openSync(file,fs.constants.O_RDONLY|(fs.constants.O_NOFOLLOW||0));
+      const opened=fs.fstatSync(fd);
+      if(!opened.isFile()||opened.nlink!==1||opened.ino!==before.ino||opened.dev!==before.dev||(opened.mode&0o777)!==0o600||(typeof process.getuid==="function"&&opened.uid!==process.getuid())) throw new Error("macOS installer state changed during read");
+      const state=JSON.parse(fs.readFileSync(fd,"utf8"));
+      const after=fs.lstatSync(file);
+      if(after.isSymbolicLink()||after.ino!==opened.ino||after.dev!==opened.dev||after.nlink!==1||(after.mode&0o777)!==0o600||!state||typeof state!=="object"||Array.isArray(state)) throw new Error("macOS installer state is contradictory");
+      return state;
+    }catch(error){if(error.code==="ENOENT")return empty();throw error;}
+    finally{if(fd!==undefined)fs.closeSync(fd);}
+  }
+  return readInstallerState(options);
+}
+
+function saveState(state){
+  if(process.platform!=="darwin") return writeInstallerState(state);
+  const file=macosStateFile({create:true});
+  const temporary=`${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  const fd=fs.openSync(temporary,"wx",0o600);
+  try{fs.writeFileSync(fd,JSON.stringify(state,null,2)+"\n");fs.fsyncSync(fd);}finally{fs.closeSync(fd);}
+  macosStateFile();
+  fs.renameSync(temporary,file);
+  const directory=fs.openSync(path.dirname(file),"r");
+  try{fs.fsyncSync(directory);}finally{fs.closeSync(directory);}
+}
 
 function valueOf(flag) {
   const i = argv.indexOf(flag);
@@ -120,11 +171,21 @@ function macosStateBound(state, recovery) {
     && identity.sandbox_repository === state.sandbox_repository;
 }
 
-function macosRecoveryReport() {
+function macosGithubApi() {
+  return githubReadOnlyApi({run:args=>{const result=spawnSafeSync("gh",args,{encoding:"utf8",timeout:10000,maxBuffer:1024*1024});return {ok:result.status===0,stdout:result.stdout||"",stderr:result.stderr||""};}});
+}
+
+function macosRecoveryReport(state={}) {
+  const selected=valueOf("--selected-fresh-instance");
+  if(selected!==undefined || state.selected_fresh_instance===true){
+    if(selected!==undefined&&selected!==state.instance_id) return {status:"CONFLICT",mutations_performed:false,missing_verification_gates:["exact_selected_instance_id"]};
+    return inspectMacosSelectedFreshInstance({state:{...state,selected_fresh_instance:true},home:os.homedir(),githubApi:macosGithubApi()});
+  }
   return inspectMacosExistingInstanceRecovery({ home: os.homedir() });
 }
 
 function macosBootstrapMayAdvance(state, recovery, evidence) {
+  if(recovery?.status==="SELECTED_FRESH_INSTANCE_VERIFIED") return true;
   if (!recovery || recovery.status !== "NEEDS_VERIFICATION" || recovery.instances?.length !== 1) return false;
   if (!["VERIFIED", "NEW_INSTALL_PREPARED", "NEW_INSTALL_CONTROL_PREPARED_AWAITING_ROUTE"].includes(evidence?.status)) return false;
   const identity = recovery.instances[0]?.identity || {};
@@ -136,9 +197,86 @@ function macosBootstrapMayAdvance(state, recovery, evidence) {
       identity.control_repository === state.control_repository && identity.sandbox_repository === state.sandbox_repository)));
 }
 
+function macosSelectedAwaitingFirstRoute(state,recovery){
+  // The separate fresh-instance receipt proves the pre-registration identity.
+  // A queued first route cannot prove delivery; only the canonical registration
+  // owner and its real receipt can make ensureInstallerChatRegistration READY.
+  return recovery?.status==="SELECTED_FRESH_INSTANCE_VERIFIED"&&(recovery.route_count===0||recovery.first_route_pending===true)&&!state.sandbox_review_route;
+}
+
 function macosTrustedRecoveryEvidence(state, { requireReceipt = true } = {}) {
   const api = githubReadOnlyApi({ run: args => { const result = spawnSafeSync("gh", args, { encoding: "utf8" }); return { ok: result.status === 0, stdout: result.stdout || "", stderr: result.stderr || "" }; } });
   return verifyTrustedRecoveryEvidence({ state, home: os.homedir(), githubApi: api, requireReceipt });
+}
+
+function macosRunnerActionChallenge(action,state,runner){
+  const binding=[state.installation_id,state.instance_id,state.instance_root,state.control_repository,state.control_repository_id,state.sandbox_repository,state.sandbox_repository_id,state.sandbox_project_key,state.runner_label,runner.runner_id,runner.runner_executable,runner.approval_sha256,state.browser_profile,state.browser_port,state.pending_wake_outbox];
+  return action+":"+crypto.createHash("sha256").update(JSON.stringify(binding)).digest("hex");
+}
+
+function claimMacosFirstBootOperation({state,action,challenge,home=os.homedir()}){
+  if(!["install","start"].includes(action)) return {status:"ERROR",error_id:"MACOS-FIRST-BOOT-CLAIM-ACTION",mutations_performed:false};
+  const root=path.join(path.resolve(home),".chatgpt-codex-orchestrator","instances",canonicalInstallationId(state.installation_id));
+  if(state.instance_root!==root) return {status:"ERROR",error_id:"MACOS-FIRST-BOOT-CLAIM-ROOT",mutations_performed:false};
+  let current=path.parse(root).root;
+  for(const part of root.slice(current.length).split(path.sep).filter(Boolean)){
+    current=path.join(current,part);
+    const st=fs.lstatSync(current),inside=current===path.resolve(home)||current.startsWith(path.resolve(home)+path.sep);
+    if(st.isSymbolicLink()||!st.isDirectory()||(typeof process.getuid==="function"&&st.uid!==process.getuid()&&!(st.uid===0&&!inside))||((st.mode&0o022)!==0&&!(st.uid===0&&(st.mode&0o1000)!==0&&!inside))||(current===root&&(st.mode&0o777)!==0o700)) return {status:"ERROR",error_id:"MACOS-FIRST-BOOT-CLAIM-PATH",mutations_performed:false};
+  }
+  const file=path.join(root,`macos-runner-${action}-claim.json`);
+  let fd,created=false;
+  try{
+    fd=fs.openSync(file,fs.constants.O_WRONLY|fs.constants.O_CREAT|fs.constants.O_EXCL|(fs.constants.O_NOFOLLOW||0),0o600);created=true;
+    fs.writeFileSync(fd,JSON.stringify({schema_version:1,installation_id:state.installation_id,instance_id:state.instance_id,action,challenge,pid:process.pid,claimed_at:new Date().toISOString()})+"\n");fs.fsyncSync(fd);fs.closeSync(fd);fd=undefined;
+    const directory=fs.openSync(root,"r");try{fs.fsyncSync(directory);}finally{fs.closeSync(directory);}
+    // These one-time operation claims are retained permanently. Neither stale
+    // PID guesses nor another resume process can reclaim an approved action.
+    return {status:"OWNED",path:file,mutations_performed:true};
+  }catch(error){return {status:"ERROR",error_id:error.code==="EEXIST"?"MACOS-FIRST-BOOT-ALREADY-CLAIMED":"MACOS-FIRST-BOOT-CLAIM-IO",recovery_status:"MANUAL_RECOVERY_REQUIRED",claim_path:file,mutations_performed:created?"UNKNOWN":false};}
+  finally{if(fd!==undefined)fs.closeSync(fd);}
+}
+
+// Only the official installer invokes these service gates. The journal is an
+// intent/result record, never a replacement for live runner or PID evidence.
+function advanceMacosFirstBootRunner(state,{inspect=inspectMacosRunnerBootstrap,runtime=macosRuntimeAction,persist=saveState,claim=claimMacosFirstBootOperation,home=os.homedir()}={}){
+  const runner=inspect({state,home,requireOnline:false});
+  if(runner.error_id==="MACOS-RUNNER-PROVISIONING-REQUIRED"){
+    const candidate=inspect({state,home,requireOnline:false,requireApproval:false});
+    if(candidate.action_id==="macos_runner_package_approval"&&candidate.approval_challenge) return {...candidate,message:"Review and separately approve this exact official package and independently registered Runner identity. Installation and start require further approvals."};
+  }
+  if(runner.status!=="PASS") return {...runner,action_id:runner.action_id||"provision_macos_runner",message:"The exact approved official macOS ARM64 Runner package and registration are required before installation or CHAT-REGISTER."};
+  const journal=state.macos_runner_bootstrap;
+  const installChallenge=macosRunnerActionChallenge("install",state,runner);
+  const startChallenge=macosRunnerActionChallenge("start",state,runner);
+  if(journal&&journal.install_challenge!==installChallenge) return {status:"ERROR",error_id:"MACOS-FIRST-BOOT-IDENTITY",recovery_status:"MANUAL_RECOVERY_REQUIRED",mutations_performed:false};
+  if(journal&&["INSTALL_INTENT","START_INTENT","ERROR"].includes(journal.phase)) return {status:"ERROR",error_id:"MACOS-FIRST-BOOT-INTERRUPTED",recovery_status:"MANUAL_RECOVERY_REQUIRED",journal,mutations_performed:false,message:"A service operation has an uncertain outcome. Preserve its journal and independently review the exact LaunchAgent before any retry."};
+  const phase=journal?.phase;
+  if(phase&&!['PLIST_INSTALLED','STARTED'].includes(phase)) return {status:"ERROR",error_id:"MACOS-FIRST-BOOT-JOURNAL",mutations_performed:false,recovery_status:"MANUAL_RECOVERY_REQUIRED"};
+  const operation=!phase?"install":phase==="PLIST_INSTALLED"?"start":null;
+  if(operation){
+    const challenge=operation==="install"?installChallenge:startChallenge;
+    if(state.macos_runner_action_approval!==challenge) return {status:"NEEDS_USER_ACTION",action_id:`macos_runner_${operation}`,approval_challenge:challenge,runner_id:runner.runner_id,runner_executable:runner.runner_executable,mutations_performed:false,message:`Approve only the exact macOS Runner ${operation} action for this installation.`};
+    let ownership;
+    try{ownership=claim({state,action:operation,challenge,home});}catch(error){return {status:"ERROR",error_id:"MACOS-FIRST-BOOT-CLAIM-IO",recovery_status:"MANUAL_RECOVERY_REQUIRED",mutations_performed:"UNKNOWN"};}
+    if(ownership.status!=="OWNED") return ownership;
+    delete state.macos_runner_action_approval;
+    delete state.macos_action_approval;
+    state.macos_runner_bootstrap={phase:operation==="install"?"INSTALL_INTENT":"START_INTENT",install_challenge:installChallenge,start_challenge:startChallenge,runner_id:runner.runner_id,at:new Date().toISOString()};
+    try{persist(state);}catch(error){return {status:"ERROR",error_id:"MACOS-FIRST-BOOT-INTENT-PERSIST",recovery_status:"MANUAL_RECOVERY_REQUIRED",claim_path:ownership.path,mutations_performed:true};} // Consume approval and record intent before launchctl/files.
+    let result;
+    try { result=runtime(operation,{state:{...state,macos_action_approval:operation},home}); }
+    catch(error){result={status:"ERROR",error_id:"MACOS-FIRST-BOOT-IO",details:String(error.message||error),mutations_performed:"UNKNOWN"};}
+    state.macos_runner_bootstrap={...state.macos_runner_bootstrap,phase:result.status==="PASS"?(operation==="install"?"PLIST_INSTALLED":"STARTED"):"ERROR",result,at:new Date().toISOString()};
+    try{persist(state);}catch(error){return {status:"ERROR",error_id:"MACOS-FIRST-BOOT-RESULT-PERSIST",recovery_status:"MANUAL_RECOVERY_REQUIRED",claim_path:ownership.path,mutations_performed:"UNKNOWN"};}
+    if(result.status!=="PASS") return {...result,recovery_status:"MANUAL_RECOVERY_REQUIRED"};
+    if(operation==="install") return {status:"NEEDS_USER_ACTION",action_id:"macos_runner_start",approval_challenge:startChallenge,mutations_performed:true,message:"The exact LaunchAgent is installed. Starting this Runner requires a separate approval."};
+  }
+  const service=runtime("status",{state,home});
+  if(service.status!=="PASS"||service.launchctl_state!=="loaded"||service.plist_verified!==true) return {status:"ERROR",error_id:"MACOS-FIRST-BOOT-SERVICE",service,mutations_performed:false,recovery_status:"MANUAL_RECOVERY_REQUIRED"};
+  const online=inspect({state,home,requireOnline:true});
+  if(online.status!=="PASS") return {...online,status:online.status==="NEEDS_USER_ACTION"?"WAITING":online.status,action_id:"macos_runner_online",mutations_performed:false,message:"Waiting for this exact registered macOS ARM64 Runner to be online; CHAT-REGISTER has not been published."};
+  return {status:"READY",runner:online,mutations_performed:false};
 }
 
 
@@ -151,13 +289,14 @@ function dryRun() {
     return emit({status:"ERROR",error_id:"MACOS-EXISTING-INSTANCE-REVIEW",preferred_language:"en",message:"macOS installer state is unreadable; dry-run stopped before any external setup action.",dry_run:true,existing_instance_recovery:existingInstanceRecovery,mutations_performed:false,plan:[]},1);
   }
   const lang=ensureStateLanguage(state);
-  const existingInstanceRecovery=process.platform==="darwin"?macosRecoveryReport():null;
+  const existingInstanceRecovery=process.platform==="darwin"?macosRecoveryReport(state):null;
+  if(existingInstanceRecovery?.selection_mode&&existingInstanceRecovery.status!=="SELECTED_FRESH_INSTANCE_VERIFIED") return emit({status:existingInstanceRecovery.status==="CONFLICT"?"ERROR":"NEEDS_USER_ACTION",action_id:"macos_selected_fresh_instance_approval",error_id:"MACOS-SELECTED-FRESH-INSTANCE",dry_run:true,existing_instance_recovery:existingInstanceRecovery,approval_challenge:existingInstanceRecovery.approval_challenge,mutations_performed:false,plan:[]},1);
   const trustedRecoveryEvidence=process.platform==="darwin"?macosTrustedRecoveryEvidence(state,{requireReceipt:Boolean(state.sandbox_review_route)}):null;
   if(existingInstanceRecovery && existingInstanceRecovery.status!=="ABSENT" && !macosBootstrapMayAdvance(state, existingInstanceRecovery, trustedRecoveryEvidence) && (!macosStateBound(state, existingInstanceRecovery) || existingInstanceRecovery.status==="CONFLICT")) {
     return emit({status:existingInstanceRecovery.status==="CONFLICT"?"ERROR":"NEEDS_USER_ACTION",error_id:"MACOS-EXISTING-INSTANCE-REVIEW",preferred_language:lang,message:"macOS existing-instance recovery requires a separate reviewed action; dry-run stopped before any external command.",dry_run:true,mutations_performed:false,existing_instance_recovery:existingInstanceRecovery,plan:[]},1);
   }
   if(trustedRecoveryEvidence?.status==="CONFLICT") return emit({status:"ERROR",error_id:"MACOS-TRUSTED-RECOVERY-EVIDENCE",preferred_language:lang,message:"Trusted macOS recovery evidence is contradictory; dry-run stopped before prerequisite checks or any external setup action.",dry_run:true,existing_instance_recovery:existingInstanceRecovery,trusted_recovery_evidence:trustedRecoveryEvidence,mutations_performed:false,plan:[]},1);
-  if(trustedRecoveryEvidence?.status==="NEEDS_HUMAN_LEGACY") return emit({status:"NEEDS_HUMAN",error_id:"MACOS-TRUSTED-RECOVERY-EVIDENCE",preferred_language:lang,message:"Historical macOS artifacts require a separate human-approved recovery procedure; no adoption or mutation was performed.",dry_run:true,existing_instance_recovery:existingInstanceRecovery,trusted_recovery_evidence:trustedRecoveryEvidence,mutations_performed:false,plan:[]},1);
+  if(trustedRecoveryEvidence?.status==="NEEDS_HUMAN_LEGACY"&&!macosSelectedAwaitingFirstRoute(state,existingInstanceRecovery)) return emit({status:"NEEDS_HUMAN",error_id:"MACOS-TRUSTED-RECOVERY-EVIDENCE",preferred_language:lang,message:"Historical macOS artifacts require a separate human-approved recovery procedure; no adoption or mutation was performed.",dry_run:true,existing_instance_recovery:existingInstanceRecovery,trusted_recovery_evidence:trustedRecoveryEvidence,mutations_performed:false,plan:[]},1);
   const git=commandExists("git");
   const node=commandExists("node");
   const gh=commandExists("gh");
@@ -208,6 +347,11 @@ function dryRun() {
       automatic:true,
       action:"Create a private control repository, private sandbox repository, isolated local paths, isolated runner label and isolated browser profile."
     },
+    ...(process.platform==="darwin"?[
+      {step:"official_macos_runner_provisioning",automatic:false,action:"Separately approve official ARM64 runner acquisition/registration and exact immutable package/repository/runner identities. This adapter does not acquire or register a runner."},
+      {step:"macos_runner_install",automatic:false,action:"Approve only installation of the canonical LaunchAgent after exact generated-repository authorization and live native PID capability."},
+      {step:"macos_runner_start",automatic:false,action:"Approve start separately. Publish the first CHAT-REGISTER only after GitHub independently reports the exact matching macOS ARM64 runner online."}
+    ]:[]),
     {
       step:"sandbox_end_to_end",
       automatic:"mixed",
@@ -252,7 +396,32 @@ function answer() {
 
   const bool = v => /^(true|yes|y|1|done|completed)$/i.test(String(v || ""));
 
-  if (actionId === "macos_setup_approval") {
+  if(actionId === "macos_selected_fresh_instance_approval"){
+    if(process.platform!=="darwin"||valueOf("--selected-fresh-instance")!==state.instance_id) return emit({status:"ERROR",error_id:"MACOS-SELECTED-FRESH-APPROVAL",message:"Select the exact prepared fresh instance ID for this separate approval.",mutations_performed:false},1);
+    try{
+      const selectedState={...state,selected_fresh_instance:true};
+      const receipt=approveMacosSelectedFreshInstance({state:selectedState,approval:value,home:os.homedir(),githubApi:macosGithubApi()});
+      state.selected_fresh_instance=true;
+      Object.assign(state,{control_repository_id:receipt.provenance.control_repository_id,sandbox_repository_id:receipt.provenance.sandbox_repository_id});
+      state.current_step="macos_selected_fresh_instance_verified";
+    }catch(error){return emit({status:"ERROR",error_id:"MACOS-SELECTED-FRESH-APPROVAL",message:String(error.message||error),mutations_performed:"UNKNOWN"},1);}
+  } else if(actionId === "macos_runner_package_approval"){
+    if(process.platform!=="darwin") return emit({status:"ERROR",error_id:"MACOS-RUNNER-PLATFORM",mutations_performed:false},1);
+    const report=macosRecoveryReport(state);
+    if(report.status!=="ABSENT"&&!macosBootstrapMayAdvance(state,report,macosTrustedRecoveryEvidence(state,{requireReceipt:false}))) return emit({status:"ERROR",error_id:"MACOS-EXISTING-INSTANCE-REVIEW",mutations_performed:false,existing_instance_recovery:report},1);
+    const approval=approveMacosRunnerBootstrap({state,approval:value,home:os.homedir()});
+    if(approval.status!=="PASS") return emit(approval,1);
+    state.current_step="macos_runner_install";
+  } else if(["macos_runner_install","macos_runner_start"].includes(actionId)){
+    if(process.platform!=="darwin") return emit({status:"ERROR",error_id:"MACOS-RUNNER-PLATFORM",mutations_performed:false},1);
+    const runner=inspectMacosRunnerBootstrap({state,home:os.homedir()});
+    const operation=actionId==="macos_runner_install"?"install":"start";
+    const phase=state.macos_runner_bootstrap?.phase;
+    const expectedPhase=operation==="install"?phase===undefined:phase==="PLIST_INSTALLED";
+    if(runner.status!=="PASS"||!expectedPhase||value!==macosRunnerActionChallenge(operation,state,runner)) return emit({status:"ERROR",error_id:"MACOS-RUNNER-ACTION-APPROVAL",message:"Approval must match the current exact package, Runner, repositories, installation, and next service action.",mutations_performed:false},1);
+    state.macos_runner_action_approval=value;
+    state.current_step=actionId;
+  } else if (actionId === "macos_setup_approval") {
     if (!bool(value)) return emit({status:"ERROR",error_id:"MACOS-APPROVAL-001",recoverable:false,preferred_language:lang,message:"macOS setup approval was not confirmed."},1);
     state.macos_setup_approved=true;
     state.current_step="macos_native_activation";
@@ -285,6 +454,10 @@ function answer() {
       if (currentChatUrl !== state.reviewer_chat_url) {
         return emit({status:"ERROR",error_id:"AUTH-007",recoverable:true,preferred_language:lang,message:"Authorization provenance must match the saved originating Chat URL exactly."},1);
       }
+      let identities;
+      try{identities=verifyMacosGeneratedRepositories({state});}
+      catch(error){return emit({status:"ERROR",error_id:"AUTH-008",message:"Generated repository immutable owner identities could not be verified independently.",details:String(error.message||error),mutations_performed:false},1);}
+      Object.assign(state,identities);
       state.github_plugin_authorization_verified = true;
       state.github_plugin_authorization_control_repository = controlRepository;
       state.github_plugin_authorization_sandbox_repository = sandboxRepository;
@@ -330,10 +503,11 @@ function runSetup() {
   }
   const lang = ensureStateLanguage(state);
   if(process.platform==="darwin") {
-    const existingInstanceRecovery=macosRecoveryReport();
+    const existingInstanceRecovery=macosRecoveryReport(state);
+    if(existingInstanceRecovery.selection_mode&&existingInstanceRecovery.status!=="SELECTED_FRESH_INSTANCE_VERIFIED") return emit({status:existingInstanceRecovery.status==="CONFLICT"?"ERROR":"NEEDS_USER_ACTION",action_id:"macos_selected_fresh_instance_approval",error_id:"MACOS-SELECTED-FRESH-INSTANCE",preferred_language:lang,existing_instance_recovery:existingInstanceRecovery,approval_challenge:existingInstanceRecovery.approval_challenge,mutations_performed:false,message:"A separate exact approval of this independently verified fresh instance is required; historical instances confer no authority."},1);
     const earlyTrustedEvidence=macosTrustedRecoveryEvidence(state,{requireReceipt:false});
     if(existingInstanceRecovery.status!=="ABSENT" && !macosBootstrapMayAdvance(state, existingInstanceRecovery, earlyTrustedEvidence) && (!macosStateBound(state, existingInstanceRecovery) || existingInstanceRecovery.status==="CONFLICT")) return emit({status:existingInstanceRecovery.status==="CONFLICT"?"ERROR":"NEEDS_USER_ACTION",error_id:"MACOS-EXISTING-INSTANCE-REVIEW",recoverable:existingInstanceRecovery.status!=="CONFLICT",preferred_language:lang,message:"An existing macOS instance was found without authoritative binding evidence. Setup/resume stopped before installer state, migration intent, Control, Sandbox, runner, or helper changes.",existing_instance_recovery:existingInstanceRecovery,mutations_performed:false},1);
-    if(earlyTrustedEvidence.status==="NEEDS_HUMAN_LEGACY") return emit({status:"NEEDS_HUMAN",error_id:"MACOS-TRUSTED-RECOVERY-EVIDENCE",recoverable:false,preferred_language:lang,message:"Historical macOS artifacts require a separate human-approved recovery procedure; setup/resume stopped before any mutation.",existing_instance_recovery:existingInstanceRecovery,trusted_recovery_evidence:earlyTrustedEvidence,mutations_performed:false},1);
+    if(earlyTrustedEvidence.status==="NEEDS_HUMAN_LEGACY"&&!macosSelectedAwaitingFirstRoute(state,existingInstanceRecovery)) return emit({status:"NEEDS_HUMAN",error_id:"MACOS-TRUSTED-RECOVERY-EVIDENCE",recoverable:false,preferred_language:lang,message:"Historical macOS artifacts require a separate human-approved recovery procedure; setup/resume stopped before any mutation.",existing_instance_recovery:existingInstanceRecovery,trusted_recovery_evidence:earlyTrustedEvidence,mutations_performed:false},1);
     const prerequisites=macosPrerequisites();
     const trustedEvidence=macosTrustedRecoveryEvidence(state,{requireReceipt:false});
     if(trustedEvidence.status!=="ABSENT" && trustedEvidence.status!=="NEW_INSTALL_PREPARED" && trustedEvidence.status!=="NEW_INSTALL_CONTROL_PREPARED_AWAITING_ROUTE" && trustedEvidence.status!=="NEEDS_HUMAN_LEGACY" && trustedEvidence.status!=="VERIFIED") return emit({status:"ERROR",error_id:"MACOS-TRUSTED-RECOVERY-EVIDENCE",recoverable:false,preferred_language:lang,message:"Trusted recovery evidence is contradictory; setup stopped before any macOS side effect.",trusted_recovery_evidence:trustedEvidence,mutations_performed:false},1);
@@ -363,10 +537,12 @@ function runSetup() {
       return emit({status:"ERROR",error_id:"MACOS-MIGRATION-INTENT",recoverable:true,preferred_language:lang,message:"Durable macOS migration intent could not be prepared; no Control/Sandbox mutation was performed.",details:String(error.message||error),mutations_performed:false},1);
     }
     if(!state.control_environment_ready){
-      try { const control=prepareControlEnvironment({installationId:state.installation_id,targetRepository:state.target_repository,reviewerChatUrl:state.reviewer_chat_url,trustedGithubLogin:state.github_login,sourceRoot:process.cwd(),home:os.homedir()}); Object.assign(state,control,{control_environment_ready:true,routing_architecture:"explicit-route-v1",target_environment_ready:false,macos_rollback:{available:true,automatic:false,created_at:new Date().toISOString()}}); saveState(state); }
+      try { const control=prepareControlEnvironment({installationId:state.installation_id,targetRepository:state.target_repository,reviewerChatUrl:state.reviewer_chat_url,trustedGithubLogin:state.github_login,macosSetupApproved:state.macos_setup_approved===true,sourceRoot:process.cwd(),home:os.homedir()}); Object.assign(state,control,{control_environment_ready:true,routing_architecture:"explicit-route-v1",target_environment_ready:false,macos_rollback:{available:true,automatic:false,created_at:new Date().toISOString()}}); saveState(state); }
       catch(error){ state.last_error={error_id:"SETUP-011",message:String(error.message||error),at:new Date().toISOString()}; saveState(state); return emit({status:"ERROR",error_id:"SETUP-011",recoverable:true,preferred_language:lang,message:"Native macOS Control/Sandbox preparation failed; no runner or service was started.",details:String(error.message||error)},1); }
     }
     if(state.github_plugin_authorization_verified!==true || state.github_plugin_authorization_installation_id!==state.installation_id || state.github_plugin_authorization_control_repository!==state.control_repository || state.github_plugin_authorization_sandbox_repository!==state.sandbox_repository || state.github_plugin_authorization_chat_url!==state.reviewer_chat_url) return emit(action(state,"generated_repo_authorization","setup.generated_repo.connect",{repositories:[state.control_repository,state.sandbox_repository],chat_url:state.reviewer_chat_url,verification_requirement:"The controlling Chat must confirm access to these exact generated private repositories and record this exact current Chat URL; local gh status and boolean answers are not proof.",mutations_performed:true}));
+    try{Object.assign(state,verifyMacosGeneratedRepositories({state}));saveState(state);}
+    catch(error){return emit({status:"ERROR",error_id:"MACOS-GENERATED-IDENTITY",message:"Exact generated private repository identities changed or are unverified; Runner and target remain disabled.",details:String(error.message||error),mutations_performed:false},1);}
     if(state.macos_native_installation_id && state.macos_native_installation_id!==state.installation_id) return emit({status:"ERROR",error_id:"MACOS-NATIVE-INSTALLATION-MISMATCH",recoverable:false,preferred_language:lang,message:"Native helper capability belongs to a different installation; target and Runner remain disabled.",mutations_performed:false},1);
     let nativePrepared;
     try { nativePrepared=prepareMacosNativeHelper({state,home:os.homedir(),approved:true}); }
@@ -378,7 +554,22 @@ function runSetup() {
     state.instance_root=nativePrepared.instance_path;
     state.macos_native_capability={status:"VERIFIED",instance_path:nativePrepared.instance_path,helper_path:nativePrepared.helper_path,receipt_path:nativePrepared.receipt_path,source_review_commit:nativePrepared.source_review_commit,source_sha256:nativePrepared.source_sha256,binary_sha256:nativePrepared.binary_sha256};
     saveState(state);
-    const registration=ensureInstallerChatRegistration(state,{projectKey:state.sandbox_project_key});
+    if(!state.codex_trust_sandbox) return emit(action(state,"codex_trust_sandbox","setup.codex.trust_sandbox",{folder:state.sandbox_clone_path,helper_command:"node src/cli.mjs codex-open --scope sandbox"}));
+    if(!state.reviewer_browser_ready) return emit(action(state,"reviewer_browser_login","setup.browser.login",{browser_profile:state.browser_profile,browser_port:state.browser_port,details:"Authenticate the isolated ChatGPT browser profile at the exact originating Chat. This installer does not open a browser or infer login from a profile directory."}));
+    const runnerBootstrap=advanceMacosFirstBootRunner(state);
+    if(runnerBootstrap.status!=="READY"){
+      state.current_step=runnerBootstrap.action_id||"macos_runner_bootstrap";
+      state.last_error=runnerBootstrap.status==="ERROR"?{error_id:runnerBootstrap.error_id,message:runnerBootstrap.message||runnerBootstrap.details||"Runner first boot is blocked",at:new Date().toISOString()}:state.last_error;
+      saveState(state);
+      return emit({...runnerBootstrap,preferred_language:lang,runner_bootstrap:state.macos_runner_bootstrap||null},runnerBootstrap.status==="ERROR"?1:0);
+    }
+    let registration;
+    try{registration=ensureInstallerChatRegistration(state,{projectKey:state.sandbox_project_key});}
+    catch(error){
+      state.last_error={error_id:"MACOS-CHAT-REGISTRATION",message:String(error.message||error),at:new Date().toISOString()};
+      state.current_step="sandbox_chat_registration";saveState(state);
+      return emit({status:"ERROR",error_id:"MACOS-CHAT-REGISTRATION",recoverable:true,preferred_language:lang,message:"Exact Chat registration could not be established. Preserve the issue and callback evidence; no Sandbox run was requested.",details:String(error.message||error),mutations_performed:"UNKNOWN"},1);
+    }
     if(registration.status!=="READY"){ state.sandbox_chat_registration_issue=registration.issue?.url||null; state.current_step="sandbox_chat_registration"; saveState(state); return emit({status:"WAITING",action_id:"sandbox_chat_registration",recoverable:true,preferred_language:lang,message:"Register the explicit Sandbox callback in the originating Chat before CODEX-RUN.",registration_issue:registration.issue?.url||null,mutations_performed:true}); }
     const registered=registration.record;
     const shortId=String(state.installation_id||"").replace(/[^A-Za-z0-9]/g,"").slice(0,8).toLowerCase()||"default";
@@ -432,7 +623,7 @@ function runSetup() {
         saveState(state);
         return emit({status:"ERROR",error_id:"MACOS-POST-SANDBOX-UNSUPPORTED",recoverable:false,preferred_language:lang,message:"Sandbox is verified and project trust is recorded, but the native macOS post-Sandbox Code Review/merge and target-activation gate is unsupported. Target remains disabled; no action was emitted.",current_step:state.current_step,mutations_performed:true},1);
       }
-      return emit(action(state,"codex_trust_project","setup.codex.trust_project",{folder:state.project_clone_path||null,smoke,mutations_performed:true,details:"Sandbox completion was independently verified for this installation. Confirm project-folder trust as the next human gate; target remains disabled and no LaunchAgent or runner was started."}));
+      return emit(action(state,"codex_trust_project","setup.codex.trust_project",{folder:state.project_clone_path||null,smoke,mutations_performed:true,details:"Sandbox completion was independently verified for this installation. Confirm project-folder trust as the next human gate; target remains disabled."}));
     }
     if(smoke?.stage==="NOT_STARTED"){
       try {
@@ -448,7 +639,7 @@ function runSetup() {
       }
     }
     state.macos_native_setup="SANDBOX_READY"; state.current_step="sandbox_verification"; saveState(state);
-    return emit({status:"WAITING",action_id:"sandbox_verification",recoverable:true,preferred_language:lang,mutations_performed:true,message:"Native macOS Sandbox and Control are prepared; independently verified Sandbox completion is still required. The target remains disabled. No LaunchAgent or runner was started.",smoke,control_repository:state.control_repository,sandbox_repository:state.sandbox_repository,runner_label:state.runner_label});
+    return emit({status:"WAITING",action_id:"sandbox_verification",recoverable:true,preferred_language:lang,mutations_performed:true,message:"Native macOS Sandbox and Control are prepared with the independently verified approved Runner; Sandbox completion is still required. The target remains disabled.",smoke,control_repository:state.control_repository,sandbox_repository:state.sandbox_repository,runner_label:state.runner_label});
   }
   state.installation_id ||= crypto.randomUUID();
   state.completed ||= [];
@@ -896,7 +1087,7 @@ function runtimeChecks(state) {
     const native=verifyMacosNativeCapability({state});
     return {control_repository:Boolean(state.control_repository),control_clone:Boolean(state.control_clone_path&&fs.existsSync(state.control_clone_path)),
       project_clone:Boolean(state.project_clone_path&&fs.existsSync(state.project_clone_path)),runner_configured:Boolean(state.runner_path),
-      runner_running:Boolean(result.launchctl_state==="loaded"&&result.launchctl_checked===true&&result.preflight?.inventory?.runner?.ownership==="OTHER_OR_CURRENT"),reviewer_browser:false,
+      runner_running:Boolean(result.launchctl_state==="loaded"&&result.launchctl_checked===true&&result.plist_verified===true&&result.preflight?.inventory?.runner?.ownership==="OWN_VERIFIED_LABEL"),reviewer_browser:false,
       codex_authenticated:macosPrerequisites().session_auth,pending_callbacks:pendingCallbackCount(state),migration:result.status,
       macos_native_helper:native.status==="PASS",macos_native_helper_status:native.status};
   }
@@ -1022,10 +1213,10 @@ function recoveryPreflight() {
   let state;
   let stateInvalid=false;
   try { state=loadState({create:false}); } catch { state={}; stateInvalid=true; }
-  const report=macosRecoveryReport();
+  const report=macosRecoveryReport(state);
   const trustedEvidence=stateInvalid?{status:"CONFLICT",missing_verification_gates:["installer_state"]}:macosTrustedRecoveryEvidence(state,{requireReceipt:Boolean(state.sandbox_review_route)});
   const blocked=stateInvalid || (report.status!=="ABSENT" && !macosBootstrapMayAdvance(state, report, trustedEvidence) && (!macosStateBound(state, report) || report.status==="CONFLICT"));
-  const evidenceBlocked=trustedEvidence.status==="CONFLICT"||trustedEvidence.status==="NEEDS_HUMAN_LEGACY";
+  const evidenceBlocked=trustedEvidence.status==="CONFLICT"||(trustedEvidence.status==="NEEDS_HUMAN_LEGACY"&&!macosSelectedAwaitingFirstRoute(state,report));
   const finalBlocked=blocked||evidenceBlocked;
   emit({status:finalBlocked?(blocked?(report.status==="CONFLICT"?"ERROR":"NEEDS_USER_ACTION"):"NEEDS_USER_ACTION"):"PASS",error_id:finalBlocked?(blocked?"MACOS-EXISTING-INSTANCE-REVIEW":"MACOS-TRUSTED-RECOVERY-EVIDENCE"):undefined,preferred_language:"en",message:finalBlocked?"Existing macOS evidence requires separate human review; no activation or adoption was performed.":"macOS existing-instance recovery preflight completed without mutation.",existing_instance_recovery:report,trusted_recovery_evidence:trustedEvidence,mutations_performed:false},finalBlocked?1:0);
 }

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { issueTrustedRecoveryEvidence, verifyTrustedRecoveryEvidence } from "../src/lib/macos-trusted-recovery-evidence.mjs";
+import { issueTrustedRecoveryEvidence, verifyTrustedRecoveryEvidence, verifyMacosGeneratedRepositoryIdentity, githubReadOnlyApi } from "../src/lib/macos-trusted-recovery-evidence.mjs";
 import { defaultLocalPaths } from "../src/lib/control-render.mjs";
 
 function fixture() {
@@ -410,4 +410,50 @@ test("foreign or alternate owned trust paths are rejected without receipt writes
       assert.deepEqual(fs.readdirSync(f.instance), before);
     } finally { fs.rmSync(f.home, { recursive: true, force: true }); }
   }
+});
+
+test("fresh selected repository proof uses independent immutable owner and distinct repository IDs without a Chat issue", () => {
+  const installationId = "fresh-identity-a";
+  const instanceId = "freshide";
+  const state = {
+    installation_id: installationId, instance_id: instanceId, github_login: "owner",
+    control_repository: `owner/chatgpt-codex-orchestrator-control-${instanceId}`,
+    sandbox_repository: `owner/chatgpt-codex-orchestrator-sandbox-${instanceId}`,
+    reviewer_chat_url: "https://chatgpt.com/c/fresh-identity",
+    macos_setup_approved: true, github_plugin_authorized: true, github_plugin_authorization_verified: true,
+    generated_repo_authorized: true, target_environment_ready: false, sandbox_only: true
+  };
+  Object.assign(state, {
+    github_plugin_authorization_installation_id: installationId,
+    github_plugin_authorization_control_repository: state.control_repository,
+    github_plugin_authorization_sandbox_repository: state.sandbox_repository,
+    github_plugin_authorization_chat_url: state.reviewer_chat_url
+  });
+  const calls = [];
+  const api = {
+    getAuthenticatedUser: () => { calls.push("user"); return { login: "owner", id: 42 }; },
+    getRepository: repository => {
+      calls.push(repository);
+      const role = repository === state.control_repository ? "control" : "sandbox";
+      return { id: role === "control" ? 101 : 202, private: true, visibility: "private", full_name: repository, name: repository.split("/")[1], owner: { login: "owner", id: 42 }, description: `ChatGPT Codex Orchestrator ${role} installation ${installationId}` };
+    },
+    getIssue: () => { throw new Error("first registration must not depend on its own Chat issue"); }
+  };
+  assert.deepEqual(verifyMacosGeneratedRepositoryIdentity({ state, githubApi: api }), { github_login: "owner", github_user_id: "42", control_repository_id: "101", sandbox_repository_id: "202" });
+  assert.deepEqual(calls, ["user", state.control_repository, state.sandbox_repository]);
+  assert.throws(() => verifyMacosGeneratedRepositoryIdentity({ state: { ...state, github_plugin_authorization_installation_id: "foreign" }, githubApi: api }), /exact first-install authorization/);
+  assert.equal(calls.length, 3);
+});
+
+test("read-only GitHub adapter pins user, repository, and issue provenance to github.com", () => {
+  const calls = [];
+  const api = githubReadOnlyApi({ run: args => { calls.push(args); return { ok: true, stdout: JSON.stringify({ login: "synthetic", id: 42 }) }; } });
+  assert.deepEqual(api.getAuthenticatedUser(), { login: "synthetic", id: 42 });
+  api.getRepository("synthetic/control");
+  api.getIssue("synthetic/control", 410);
+  assert.deepEqual(calls, [
+    ["api", "--hostname", "github.com", "user"],
+    ["api", "--hostname", "github.com", "repos/synthetic/control"],
+    ["api", "--hostname", "github.com", "repos/synthetic/control/issues/410"]
+  ]);
 });

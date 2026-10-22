@@ -57,13 +57,14 @@ function psQuote(value){
   return "'" + String(value).replaceAll("'","''") + "'";
 }
 
-export function renderConfigPs1({githubLogin,projectKey,projectClonePath,projectMappings,runnerPath,browserPort,browserProfile,chatRouteFile}){
+export function renderConfigPs1({githubLogin,projectKey,projectClonePath,projectMappings,runnerPath,browserPort,browserProfile,chatRouteFile,instanceId:explicitInstanceId}){
   const mappings=projectMappings?.length
     ? projectMappings
     : [{projectKey,projectClonePath}];
 
   const localLines=mappings.map(x=>"  "+psQuote(x.projectKey)+" = "+psQuote(x.projectClonePath));
-  const instanceId=String(runnerPath).split(/[\\\\/]/).filter(Boolean).pop()||"default";
+  const instanceId=explicitInstanceId||String(runnerPath).split(/[\\\\/]/).filter(Boolean).pop()||"default";
+  if(explicitInstanceId!==undefined&&!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(explicitInstanceId)) throw new Error("Invalid explicit instance config identity");
   const routeFile=chatRouteFile||path.join(path.dirname(path.dirname(runnerPath)),".chatgpt-codex-orchestrator","routes",instanceId,"chat-routes.json");
 
   return [
@@ -94,12 +95,13 @@ export function renderWorkflow(template,{runnerLabel,platform=process.platform,a
   return rendered.replaceAll("{{TRUSTED_GITHUB_USERNAME}}",String(trustedGithubUsername||""));
 }
 
-export function defaultLocalPaths({home,installationId,projectKey}){
+export function defaultLocalPaths({home,installationId,projectKey,platform=process.platform}){
   const short=historicalInstallationId(installationId);
+  const instanceRoot=path.join(home,".chatgpt-codex-orchestrator","instances",canonicalInstallationId(installationId));
   return {
     control:path.join(home,"ChatGPTCodexOrchestrator","control-"+short),
-    project:path.join(home,"ChatGPTCodexProjects",projectKey),
-    runner:path.join(home,"ChatGPTCodexOrchestrator","runner-"+short),
+    project:platform==="darwin"?path.join(instanceRoot,"automation",projectKey):path.join(home,"ChatGPTCodexProjects",projectKey),
+    runner:platform==="darwin"?path.join(instanceRoot,"runner"):path.join(home,"ChatGPTCodexOrchestrator","runner-"+short),
     runnerLabel:"codex-orchestrator-"+short.toLowerCase()
   };
 }

@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
-import { defaultLocalPaths } from "./control-render.mjs";
+import { canonicalInstallationId, defaultLocalPaths } from "./control-render.mjs";
 
 export const TRUSTED_RECOVERY_EVIDENCE_VERSION = 1;
 const ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -284,6 +284,44 @@ function independentlyVerifiedProvenanceWithoutIssue({ state, githubApi }) {
   return { control_repository_id: String(remoteControl.id), sandbox_repository_id: String(remoteSandbox.id) };
 }
 
+// This is a separate first-install trust contract. Legacy recovery deliberately
+// keeps its existing contract; selecting a fresh instance never adopts an old
+// route, migration snapshot, or locally asserted GitHub identity.
+export function verifyMacosGeneratedRepositoryIdentity({ state = {}, githubApi } = {}) {
+  const login = String(state.github_login || "");
+  const short = canonicalInstallationId(state.installation_id);
+  if (!safeId(state.installation_id) || state.instance_id !== short || !/^[A-Za-z0-9-]+$/.test(login) ||
+      state.macos_setup_approved !== true || state.github_plugin_authorization_verified !== true ||
+      state.github_plugin_authorized !== true || state.generated_repo_authorized !== true ||
+      state.github_plugin_authorization_installation_id !== state.installation_id ||
+      state.github_plugin_authorization_control_repository !== state.control_repository ||
+      state.github_plugin_authorization_sandbox_repository !== state.sandbox_repository ||
+      !canonicalUrl(state.reviewer_chat_url) || canonicalUrl(state.github_plugin_authorization_chat_url) !== canonicalUrl(state.reviewer_chat_url) ||
+      state.target_environment_ready === true || state.sandbox_only === false) throw new Error("exact first-install authorization is required");
+  const expectedControl = `${login}/chatgpt-codex-orchestrator-control-${short}`;
+  const expectedSandbox = `${login}/chatgpt-codex-orchestrator-sandbox-${short}`;
+  if (state.control_repository !== expectedControl || state.sandbox_repository !== expectedSandbox) throw new Error("generated repository identities do not match this installation");
+  if (typeof githubApi?.getAuthenticatedUser !== "function") throw new Error("independent authenticated GitHub identity is unavailable");
+  const user = githubApi.getAuthenticatedUser();
+  if (user?.login !== login || !validRepositoryId(user?.id) ||
+      (state.github_user_id !== undefined && String(state.github_user_id) !== String(user.id))) throw new Error("independent authenticated GitHub identity conflicts");
+  const control = repositoryParts(expectedControl);
+  const sandbox = repositoryParts(expectedSandbox);
+  const remoteControl = remoteRepository(githubApi, expectedControl);
+  const remoteSandbox = remoteRepository(githubApi, expectedSandbox);
+  assertDistinctTrustDomains(control, sandbox, remoteControl, remoteSandbox);
+  if ((state.control_repository_id !== undefined && String(state.control_repository_id) !== String(remoteControl.id)) ||
+      (state.sandbox_repository_id !== undefined && String(state.sandbox_repository_id) !== String(remoteSandbox.id))) throw new Error("persisted generated repository IDs conflict");
+  for (const [actual, expected, role] of [[remoteControl, expectedControl, "control"], [remoteSandbox, expectedSandbox, "sandbox"]]) {
+    if (!repositoryMatches(actual, expected, role, actual?.id) || actual?.private !== true ||
+        (actual.visibility !== undefined && String(actual.visibility).toLowerCase() !== "private") || actual?.owner?.login !== login ||
+        String(actual?.owner?.id) !== String(user.id) ||
+        actual?.description !== `ChatGPT Codex Orchestrator ${role} installation ${state.installation_id}` ||
+        actual?.archived === true || actual?.disabled === true || actual?.fork === true) throw new Error("independent generated repository identity conflicts");
+  }
+  return { github_login: login, github_user_id: String(user.id), control_repository_id: String(remoteControl.id), sandbox_repository_id: String(remoteSandbox.id) };
+}
+
 export function verifyTrustedRecoveryEvidence({ state = {}, home = os.homedir(), fsImpl = fs, githubApi, requireReceipt = true } = {}) {
   const local = localProof({ state, home, fsImpl });
   if (local.status === "ABSENT" && !state?.control_environment_ready && !state?.instance_root) return diagnostic("ABSENT", local.gates);
@@ -368,5 +406,5 @@ export function issueTrustedRecoveryEvidence({ state = {}, home = os.homedir(), 
 export function githubReadOnlyApi({ run } = {}) {
   if (typeof run !== "function") throw new Error("read-only GitHub API runner is required");
   const json = args => { const result = run(args); if (!result?.ok) throw new Error("GitHub API unavailable"); return JSON.parse(result.stdout || "{}"); };
-  return { getRepository: repository => json(["api", `repos/${repository}`]), getIssue: (repository, number) => json(["api", `repos/${repository}/issues/${number}`]) };
+  return { getAuthenticatedUser: () => json(["api", "--hostname", "github.com", "user"]), getRepository: repository => json(["api", "--hostname", "github.com", `repos/${repository}`]), getIssue: (repository, number) => json(["api", "--hostname", "github.com", `repos/${repository}/issues/${number}`]) };
 }

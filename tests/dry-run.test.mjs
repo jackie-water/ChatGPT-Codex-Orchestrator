@@ -20,12 +20,14 @@ test("dry-run reports the installation plan without enabling the real project",(
   const home=fs.mkdtempSync(path.join(tempBase,"orchestrator-dry-run-"));
   fs.chmodSync(home,0o700);
   try{
+    const stateRoot=path.join(home,"state");
+    fs.mkdirSync(stateRoot,{mode:0o700});
     const r=spawnSync(process.execPath,["src/cli.mjs","dry-run","--json","--language","en"],{
       cwd:process.cwd(),
       encoding:"utf8",
-      env:{...process.env,CHATGPT_CODEX_ORCHESTRATOR_HOME:home,HOME:home}
+      env:{...process.env,CHATGPT_CODEX_ORCHESTRATOR_HOME:stateRoot,HOME:home}
     });
-    assert.equal(r.status,0);
+    assert.equal(r.status,0,r.stderr);
     const payload=JSON.parse(r.stdout);
     assert.equal(payload.dry_run,true);
     assert.equal(payload.mutations_performed,false);

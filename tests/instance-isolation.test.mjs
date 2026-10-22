@@ -38,7 +38,13 @@ test("callback queues are scoped to the installation instance",()=>{
 test("control environment writes instance metadata and an instance-scoped config",()=>{
   const text=fs.readFileSync(new URL("../src/lib/control-env.mjs",import.meta.url),"utf8");
   assert.match(text,/writeInstanceMetadata/);
-  assert.match(text,/path\.join\(configRoot,"instances",short\)/);
+  const prepare=text.slice(text.indexOf("export function prepareControlEnvironment("));
+  assert.equal(prepare.match(/\bconst\s+instanceRoot\s*=/g)?.length,1);
+  assert.match(prepare,/const\s+instanceRoot\s*=\s*path\.join\(\s*home\s*,\s*"\.chatgpt-codex-orchestrator"\s*,\s*"instances"\s*,\s*short\s*\)/);
+  assert.match(prepare,/const\s+configPath\s*=\s*path\.join\(\s*instanceRoot\s*,\s*"config\.ps1"\s*\)/);
+  assert.match(prepare,/const\s+chatRouteFile\s*=\s*path\.join\(\s*instanceRoot\s*,\s*"chat-routes\.json"\s*\)/);
+  assert.match(prepare,/const\s+pendingWakeOutbox\s*=\s*path\.join\(\s*instanceRoot\s*,\s*"pending-wakes"\s*\)/);
+  assert.match(prepare,/fs\.writeFileSync\(\s*configPath\s*,\s*configText\s*,\s*\{\s*mode\s*:\s*0o600\s*\}\s*\)/);
   assert.match(text,/browserPortForInstallation/);
   assert.match(text,/retireLegacyGlobalPending/);
 });

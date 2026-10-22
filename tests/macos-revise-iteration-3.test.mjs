@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import vm from "node:vm";
 import { spawnSync } from "node:child_process";
 import { isOptionalPushurlQuery, normalizeOptionalPushurlResult, spawnSync as dispatcherSpawnSync, validateSandboxRemotes } from "../runtime/scripts/macos-dispatch.mjs";
 
@@ -11,8 +12,11 @@ const env = fs.readFileSync("src/lib/control-env.mjs", "utf8");
 const dispatch = fs.readFileSync("runtime/scripts/macos-dispatch.mjs", "utf8");
 
 test("macOS setup creates before exact generated-repository confirmation", () => {
-  const start = cli.indexOf('if(process.platform==="darwin")');
-  const section = cli.slice(start, cli.indexOf("  state.installation_id ||= crypto.randomUUID();", start) + 1000);
+  const setup = cli.indexOf("function runSetup() {");
+  const start = cli.indexOf('if(process.platform==="darwin")',setup);
+  const end = cli.indexOf("\n  state.installation_id ||= crypto.randomUUID();",start);
+  assert.ok(setup>=0&&start>setup&&end>start);
+  const section = cli.slice(start,end);
   assert.ok(section.indexOf("if(!state.github_plugin_authorized)") < section.indexOf("prepareControlEnvironment"));
   assert.doesNotMatch(section.slice(0, section.indexOf("prepareControlEnvironment")), /github_plugin_authorization_verified!==true/);
 });
@@ -94,35 +98,54 @@ test("macOS dispatcher rejects remote config status, stderr, and spawn failures"
   ]) assert.throws(() => validateSandboxRemotes(repo, "trusted/sandbox-fixture", (command, args) => args.at(-1) === "remote.origin.url" ? failure : good(command, args)), /Sandbox remote configuration could not be read/);
 });
 
-test("Darwin CLI records exact post-creation GitHub authorization without inferring a Sandbox route", { skip: process.platform !== "darwin" }, () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-p3-cli-"));
-  const stateFile = path.join(root, "install-state.json");
-  const chatUrl = "https://chatgpt.com/g/project/c/6ad1852c-b7a4-83ec-aeab-6b83a28ea58f";
-  const base = {
-    schema_version: 1, preferred_language: "en", completed: [], installation_id: "install-226",
-    reviewer_chat_url: chatUrl, control_environment_ready: true,
-    control_repository: "trusted/control-226", sandbox_repository: "trusted/sandbox-226"
-  };
-  fs.writeFileSync(stateFile, JSON.stringify(base));
-  const run = args => spawnSync(process.execPath, ["src/cli.mjs", "answer", "--json", ...args], {
-    cwd: process.cwd(), env: { ...process.env, CHATGPT_CODEX_ORCHESTRATOR_HOME: root }, encoding: "utf8"
+test("Darwin authorization records independently verified generated identities without inferring a Chat route", () => {
+  const root=fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()),"codex-p3-auth-synthetic-"));
+  const home=path.join(root,"home"),stateDir=path.join(home,".chatgpt-codex-orchestrator");
+  fs.mkdirSync(stateDir,{recursive:true,mode:0o700});
+  const stateFile=path.join(stateDir,"install-state.json");
+  const chatUrl="https://chatgpt.com/g/project/c/6ad1852c-b7a4-83ec-aeab-6b83a28ea58f";
+  const base={schema_version:1,preferred_language:"en",completed:[],installation_id:"abcd1234-install",instance_id:"abcd1234",github_login:"trusted",
+    instance_root:path.join(stateDir,"instances","abcd1234"),reviewer_chat_url:chatUrl,control_environment_ready:true,
+    control_repository:"trusted/chatgpt-codex-orchestrator-control-abcd1234",sandbox_repository:"trusted/chatgpt-codex-orchestrator-sandbox-abcd1234",target_environment_ready:false};
+  const input={};let verificationFailure=false,verificationCalls=0,saves=0;const emissions=[];
+  const save=state=>fs.writeFileSync(stateFile,JSON.stringify(state),{mode:0o600});
+  const context=vm.createContext({
+    process:{platform:"darwin",env:{HOME:home}},
+    loadState:()=>JSON.parse(fs.readFileSync(stateFile,"utf8")),ensureStateLanguage:()=>"en",valueOf:flag=>input[flag]||"",t:()=>"saved",
+    verifyMacosGeneratedRepositories:({state})=>{
+      verificationCalls++;assert.equal(state.installation_id,base.installation_id);assert.equal(state.control_repository,base.control_repository);assert.equal(state.sandbox_repository,base.sandbox_repository);
+      if(verificationFailure) throw new Error("Synthetic immutable repository identity mismatch");
+      return {control_repository_id:"101",sandbox_repository_id:"202"};
+    },
+    saveState:state=>{saves++;save(state);},emit:(payload,exitCode=0)=>{const emission={payload,exitCode};emissions.push(emission);return emission;}
   });
-  const rejected = args => assert.notEqual(run(args).status, 0);
-  rejected(["--action", "generated_repo_authorization", "--value", "true"]);
-  rejected(["--action", "generated_repo_authorization", "--control-repository", "evil/control", "--sandbox-repository", base.sandbox_repository, "--chat-url", chatUrl]);
-  rejected(["--action", "generated_repo_authorization", "--control-repository", base.control_repository, "--sandbox-repository", "evil/sandbox", "--chat-url", chatUrl]);
-  rejected(["--action", "generated_repo_authorization", "--control-repository", base.control_repository, "--sandbox-repository", base.sandbox_repository, "--chat-url", "https://chatgpt.com/c/chat-212"]);
-  fs.writeFileSync(stateFile, JSON.stringify({ ...base, control_environment_ready: false }));
-  rejected(["--action", "generated_repo_authorization", "--control-repository", base.control_repository, "--sandbox-repository", base.sandbox_repository, "--chat-url", chatUrl]);
-  fs.writeFileSync(stateFile, JSON.stringify(base));
-  const accepted = run(["--action", "generated_repo_authorization", "--control-repository", base.control_repository, "--sandbox-repository", base.sandbox_repository, "--chat-url", chatUrl]);
-  assert.equal(accepted.status, 0, accepted.stderr);
-  const saved = JSON.parse(fs.readFileSync(stateFile, "utf8"));
-  assert.equal(saved.github_plugin_authorization_verified, true);
-  assert.equal(saved.github_plugin_authorization_installation_id, base.installation_id);
-  assert.equal(saved.github_plugin_authorization_control_repository, base.control_repository);
-  assert.equal(saved.github_plugin_authorization_sandbox_repository, base.sandbox_repository);
-  assert.equal(saved.github_plugin_authorization_chat_url, chatUrl);
-  assert.equal(Object.hasOwn(saved, "sandbox_review_route"), false);
-  fs.rmSync(root, { recursive: true, force: true });
+  const start=cli.indexOf("function answer() {"),end=cli.indexOf("function runSetup() {",start);assert.ok(start>=0&&end>start);
+  vm.runInContext(cli.slice(start,end)+"\nthis.invokeAnswer=answer;",context);
+  const run=(overrides={},state=base)=>{
+    save(state);for(const key of Object.keys(input))delete input[key];
+    Object.assign(input,{"--action":"generated_repo_authorization","--control-repository":base.control_repository,"--sandbox-repository":base.sandbox_repository,"--chat-url":chatUrl},overrides);
+    context.invokeAnswer();return emissions.at(-1);
+  };
+  try {
+    for(const [overrides,state,error] of [
+      [{"--value":"true"},base,"AUTH-005"],
+      [{"--control-repository":"evil/control"},base,"AUTH-006"],
+      [{"--sandbox-repository":"evil/sandbox"},base,"AUTH-006"],
+      [{"--chat-url":"https://chatgpt.com/c/chat-212"},base,"AUTH-007"],
+      [{}, {...base,control_environment_ready:false},"AUTH-006"]
+    ]){
+      const result=run(overrides,state);assert.equal(result.exitCode,1);assert.equal(result.payload.error_id,error);assert.equal(saves,0);assert.equal(verificationCalls,0);
+      assert.equal(JSON.parse(fs.readFileSync(stateFile,"utf8")).github_plugin_authorization_verified,undefined);
+    }
+    verificationFailure=true;let result=run();assert.equal(result.exitCode,1);assert.equal(result.payload.error_id,"AUTH-008");assert.equal(saves,0);assert.equal(verificationCalls,1);
+    verificationFailure=false;result=run();assert.equal(result.exitCode,0);assert.equal(result.payload.status,"PASS");assert.equal(saves,1);assert.equal(verificationCalls,2);
+    const saved=JSON.parse(fs.readFileSync(stateFile,"utf8"));
+    assert.equal(saved.github_plugin_authorization_verified,true);
+    assert.equal(saved.github_plugin_authorization_installation_id,base.installation_id);
+    assert.equal(saved.github_plugin_authorization_control_repository,base.control_repository);
+    assert.equal(saved.github_plugin_authorization_sandbox_repository,base.sandbox_repository);
+    assert.equal(saved.github_plugin_authorization_chat_url,chatUrl);
+    assert.equal(saved.control_repository_id,"101");assert.equal(saved.sandbox_repository_id,"202");assert.equal(saved.target_environment_ready,false);
+    assert.equal(Object.hasOwn(saved,"sandbox_review_route"),false);assert.equal(fs.statSync(stateFile).mode&0o777,0o600);
+  } finally {fs.rmSync(root,{recursive:true,force:true});}
 });

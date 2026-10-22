@@ -17,7 +17,7 @@ import {
 import { trustedCodeReviewCodexExecutable } from "./macos-code-review-runtime.mjs";
 
 function run(command,args,{cwd,allowFailure=false}={}){
-  const r=spawnSafeSync(command,args,{cwd,encoding:"utf8"});
+  const r=spawnSafeSync(command,args,{cwd,encoding:"utf8",...(process.platform==="darwin"&&command==="gh"?{env:{...process.env,GH_HOST:"github.com"}}:{})});
   if(r.status!==0&&!allowFailure){
     throw new Error((r.stderr||r.stdout||command+" failed").trim());
   }
@@ -25,7 +25,7 @@ function run(command,args,{cwd,allowFailure=false}={}){
 }
 
 export function githubLogin(){
-  const r=run("gh",["api","user","--jq",".login"]);
+  const r=run("gh",["api","user","--jq",".login",...(process.platform==="darwin"?["--hostname","github.com"]:[])]);
   if(!/^[A-Za-z0-9-]+$/.test(r.stdout)) throw new Error("Could not determine GitHub login");
   return r.stdout;
 }
@@ -54,10 +54,49 @@ function ensureOwnedPrivateRepo({fullName,installationId,purpose}){
   return {created:false,marker};
 }
 
+// Query immutable identities independently of installer answers and checkout
+// metadata. This is deliberately read-only and cannot grant connector access.
+export function verifyMacosGeneratedRepositories({state,commandRunner=run}){
+  const login=String(state.github_login||"");
+  const short=canonicalInstallationId(state.installation_id);
+  if(!state.installation_id||!short||!/^[A-Za-z0-9-]+$/.test(login)) throw new Error("Exact macOS installation and GitHub owner are required");
+  const json=args=>{const r=commandRunner("gh",[...args,"--hostname","github.com"]);if(!r.ok)throw new Error("Independent GitHub identity query failed");return JSON.parse(r.stdout);};
+  const user=json(["api","user"]);
+  const validId=id=>/^[1-9]\d*$/.test(String(id||""))&&Number.isSafeInteger(Number(id));
+  if(user.login!==login||!validId(user.id)) throw new Error("Authenticated GitHub immutable owner identity changed");
+  if(state.github_owner_id!==undefined&&String(state.github_owner_id)!==String(user.id)) throw new Error("Persisted immutable GitHub owner identity changed");
+  const ids={};
+  for(const role of ["control","sandbox"]){
+    const repository=`${login}/chatgpt-codex-orchestrator-${role}-${short}`;
+    if(state[`${role}_repository`]!==repository) throw new Error("Generated repository name does not match this installation");
+    const remote=json(["api",`repos/${repository}`]);
+    if(remote.full_name!==repository||remote.name!==repository.split("/")[1]||remote.private!==true||remote.owner?.login!==login||String(remote.owner?.id)!==String(user.id)||!validId(remote.id)||remote.description!==`ChatGPT Codex Orchestrator ${role} installation ${state.installation_id}`) throw new Error("Generated private repository owner, role, or immutable identity is contradictory");
+    if(state[`${role}_repository_id`]!==undefined&&String(state[`${role}_repository_id`])!==String(remote.id)) throw new Error("Generated repository immutable ID changed");
+    ids[`${role}_repository_id`]=String(remote.id);
+  }
+  if(ids.control_repository_id===ids.sandbox_repository_id) throw new Error("Control and Sandbox trust domains must be distinct");
+  return {...ids,github_owner_id:String(user.id)};
+}
+
+function preparePrivateMacDirectory(directory,home){
+  const absolute=path.resolve(directory),base=path.resolve(home);
+  if(absolute!==directory||!absolute.startsWith(base+path.sep)) throw new Error("macOS installation path escapes canonical HOME");
+  let cursor=path.parse(absolute).root;
+  for(const part of absolute.slice(cursor.length).split(path.sep).filter(Boolean)){
+    cursor=path.join(cursor,part);
+    let st;
+    try{st=fs.lstatSync(cursor);}catch(error){if(error.code!=="ENOENT")throw error;if(!cursor.startsWith(base+path.sep))throw new Error("Missing HOME ancestor");fs.mkdirSync(cursor,{mode:0o700});st=fs.lstatSync(cursor);}
+    const inside=cursor===base||cursor.startsWith(base+path.sep);
+    const owned=typeof process.getuid!=="function"||st.uid===process.getuid()||(!inside&&st.uid===0);
+    const writable=(st.mode&0o022)!==0&&!(st.uid===0&&(st.mode&0o1000)!==0&&!inside);
+    if(st.isSymbolicLink()||!st.isDirectory()||!owned||writable||(cursor===absolute&&(st.mode&0o077)!==0)) throw new Error("Unsafe macOS private installation path; no permission repair or adoption is allowed");
+  }
+}
+
 function ensureClone(repository,target){
   if(fs.existsSync(path.join(target,".git"))){
     const origin=run("git",["remote","get-url","origin"],{cwd:target}).stdout;
-    if(!origin.toLowerCase().includes(repository.toLowerCase())) throw new Error("Existing local folder points to a different Git repository");
+    if(process.platform==="darwin"?normalizedGithubRepository(origin)!==repository.toLowerCase():!origin.toLowerCase().includes(repository.toLowerCase())) throw new Error("Existing local folder points to a different Git repository");
     run("git",["fetch","origin","--prune"],{cwd:target});
     return;
   }
@@ -226,7 +265,7 @@ function pinCodexExecutable(platform,execute=run){
   } catch { throw new Error("Installed macOS Codex executable could not be pinned"); }
 }
 
-function writeInstanceMetadata(controlPath,{instanceId,installationId,trustedGithubUsername,launchAgentLabel,runnerLabel,controlRepository,sandboxRepository,codexExecutable,platform=process.platform,arch=process.arch}){
+function writeInstanceMetadata(controlPath,{instanceId,installationId,trustedGithubUsername,launchAgentLabel,runnerLabel,controlRepository,sandboxRepository,codexExecutable,macosBindings={},platform=process.platform,arch=process.arch}){
   requireRuntimePlatform(platform,arch);
   if(!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(instanceId)) throw new Error("Invalid instance id");
   if(!/^[A-Za-z0-9-]+$/.test(String(trustedGithubUsername||""))) throw new Error("Invalid trusted GitHub login");
@@ -244,10 +283,10 @@ function writeInstanceMetadata(controlPath,{instanceId,installationId,trustedGit
     arch,
     runner_label:runnerLabel,
     control_repository:controlRepository,
-    ...(platform==="darwin"?{sandbox_repository:sandboxRepository,role:"control"}:{}),
+    ...(platform==="darwin"?{sandbox_repository:sandboxRepository,role:"control",origin:`https://github.com/${controlRepository}.git`,remote_origin:`https://github.com/${controlRepository}.git`}:{}),
     trusted_github_username:trustedGithubUsername,
     launch_agent_label:launchAgentLabel||null,
-    ...(platform==="darwin"?{codex_executable:codexExecutable}: {})
+    ...(platform==="darwin"?{codex_executable:codexExecutable,...macosBindings}: {})
   },null,2)+"\n";
   if(platform==="darwin") {
     const temporary=`${metadataPath}.${process.pid}.${crypto.randomUUID()}.tmp`;
@@ -414,6 +453,7 @@ export function upgradeControlEnvironment({state,sourceRoot=process.cwd(),home=o
       {projectKey:state.sandbox_project_key,projectClonePath:state.sandbox_clone_path}
     ],
     runnerPath:state.runner_path,
+    ...(process.platform==="darwin"?{instanceId:`runner-${instanceId}`}:{}),
     browserPort:state.browser_port,
     browserProfile:state.browser_profile,
     chatRouteFile
@@ -489,11 +529,13 @@ export function prepareControlEnvironment({
   targetRepository,
   reviewerChatUrl,
   trustedGithubLogin,
+  macosSetupApproved=false,
   sourceRoot=process.cwd(),
   home=os.homedir()
 }){
   if(!installationId) throw new Error("installationId is required");
   if(!/^https:\/\/chatgpt\.com\//i.test(reviewerChatUrl)) throw new Error("Invalid reviewer Chat URL");
+  if(process.platform==="darwin"&&(process.arch!=="arm64"||macosSetupApproved!==true)) throw new Error("macOS ARM64 Control preparation requires exact setup approval");
 
   const login=githubLogin();
   if(trustedGithubLogin && String(trustedGithubLogin)!==login) throw new Error("Authenticated GitHub identity changed; refusing to retarget generated repositories");
@@ -501,6 +543,21 @@ export function prepareControlEnvironment({
   const projectKey=safeKey(String(targetRepository).split("/").pop());
   const paths=defaultLocalPaths({home,installationId,projectKey});
   const short=installationShortId(installationId);
+  const instanceRoot=path.join(home,".chatgpt-codex-orchestrator","instances",short);
+  const browserProfile=process.platform==="win32"
+    ? path.join(process.env.LOCALAPPDATA||path.join(home,"AppData","Local"),"ChatGPTCodexOrchestratorReviewer-"+short)
+    : path.join(instanceRoot,"browser-profile");
+  const browserPort=browserPortForInstallation(short);
+  const chatRouteFile=path.join(instanceRoot,"chat-routes.json");
+  const pendingWakeOutbox=path.join(instanceRoot,"pending-wakes");
+  if(process.platform==="darwin"){
+    for(const directory of [instanceRoot,path.dirname(paths.project),path.dirname(paths.control),browserProfile,pendingWakeOutbox]) preparePrivateMacDirectory(directory,home);
+    if(fs.existsSync(paths.control)){
+      assertSafeRuntimePath(path.join(paths.control,"instance.json"),{type:"file"});
+      const prior=JSON.parse(fs.readFileSync(path.join(paths.control,"instance.json"),"utf8"));
+      if(prior.installation_id!==installationId||prior.instance_id!==short||prior.role!=="control") throw new Error("Existing Control clone is not this exact approved installation");
+    }
+  }
 
   inspectExistingClone(paths.project,"Target");
   ensureClone(targetRepository,paths.project);
@@ -517,11 +574,12 @@ export function prepareControlEnvironment({
 
   const controlRepository=login+"/chatgpt-codex-orchestrator-control-"+short;
   ensureOwnedPrivateRepo({fullName:controlRepository,installationId,purpose:"control"});
+  const immutableIdentities=process.platform==="darwin"?verifyMacosGeneratedRepositories({state:{installation_id:installationId,github_login:login,control_repository:controlRepository,sandbox_repository:sandboxRepository}}):{};
   inspectExistingClone(paths.control,"Control");
   ensureClone(controlRepository,paths.control);
   const runtimeFiles=prepareControlRuntimeFiles({sourceRoot,controlRoot:paths.control});
   const workflow=prepareRuntimeWorkflow({sourceRoot,controlPath:paths.control,platform:process.platform,arch:process.arch,runnerLabel:paths.runnerLabel,trustedGithubUsername:login});
-  writeInstanceMetadata(paths.control,{instanceId:short,installationId,trustedGithubUsername:login,launchAgentLabel:process.platform==="darwin"?`com.chatgpt.codex.${short.toLowerCase()}`:null,runnerLabel:paths.runnerLabel,controlRepository,sandboxRepository,codexExecutable:pinCodexExecutable(process.platform)});
+  writeInstanceMetadata(paths.control,{instanceId:short,installationId,trustedGithubUsername:login,launchAgentLabel:process.platform==="darwin"?`com.chatgpt.codex.${short.toLowerCase()}`:null,runnerLabel:paths.runnerLabel,controlRepository,sandboxRepository,codexExecutable:pinCodexExecutable(process.platform),macosBindings:{...immutableIdentities,instance_root:instanceRoot,browser_profile:browserProfile,browser_port:browserPort,chat_route_file:chatRouteFile,pending_wake_outbox:pendingWakeOutbox}});
   writeControlRuntimeFiles({controlRoot:paths.control,files:runtimeFiles});
   fs.mkdirSync(path.dirname(workflow.workflowPath),{recursive:true});
   fs.writeFileSync(workflow.workflowPath,workflow.content);
@@ -558,14 +616,8 @@ export function prepareControlEnvironment({
     ""
   ].join("\n"));
 
-  const configRoot=path.join(home,".chatgpt-codex-orchestrator");
-  const instanceRoot=path.join(configRoot,"instances",short);
   fs.mkdirSync(instanceRoot,{recursive:true});
-  const browserProfile=process.platform==="win32"
-    ? path.join(process.env.LOCALAPPDATA||path.join(home,"AppData","Local"),"ChatGPTCodexOrchestratorReviewer-"+short)
-    : path.join(instanceRoot,"browser-profile");
-  const browserPort=browserPortForInstallation(short);
-  const chatRouteFile=path.join(instanceRoot,"chat-routes.json");
+  if(process.platform==="darwin"&&!fs.existsSync(chatRouteFile)) fs.writeFileSync(chatRouteFile,JSON.stringify({version:1,instance_id:short,installation_id:installationId,control_repository:controlRepository,sandbox_repository:sandboxRepository,routes:[]})+"\n",{flag:"wx",mode:0o600});
   const configPath=path.join(instanceRoot,"config.ps1");
   const configText=renderConfigPs1({
     githubLogin:login,
@@ -574,6 +626,7 @@ export function prepareControlEnvironment({
       {projectKey:sandboxProjectKey,projectClonePath:sandboxClonePath}
     ],
     runnerPath:paths.runner,
+    ...(process.platform==="darwin"?{instanceId:`runner-${short}`}:{}),
     browserPort,
     browserProfile,
     chatRouteFile
@@ -584,6 +637,7 @@ export function prepareControlEnvironment({
 
   return {
     github_login:login,
+    ...immutableIdentities,
     project_key:projectKey,
     target_repository:targetRepository,
     default_branch:target.defaultBranchRef?.name||"main",
@@ -607,6 +661,7 @@ export function prepareControlEnvironment({
     config_path:configPath,
     browser_port:browserPort,
     browser_profile:browserProfile,
+    pending_wake_outbox:pendingWakeOutbox,
     chat_route_file:chatRouteFile,
     control_repo_changed:commit.changed
   };
