@@ -11,6 +11,7 @@ const INSTANCE_ROOT_NAME = ".chatgpt-codex-orchestrator";
 const MAX_TREE_ENTRIES = 4096;
 const MAX_TREE_DEPTH = 64;
 const MAX_TREE_BASENAME_LENGTH = 255;
+const RUNTIME_BROWSER_PROFILE_SINGLETONS = new Set(["SingletonLock", "SingletonSocket", "SingletonCookie"]);
 
 function uidAllowed(stat) {
   return typeof process.getuid !== "function" || stat.uid === process.getuid() || stat.uid === 0;
@@ -80,7 +81,17 @@ function safeFile(fsImpl, file) {
   return { ok: true };
 }
 
-function safeInstanceTree(fsImpl, root, { strictOwner = false, selectedRunnerWork = false } = {}) {
+function isOpaqueRuntimeBrowserProfileSingleton(relative, stat) {
+  // Chromium owns these three links at the profile root while it is live. They
+  // are inert tree leaves here: never read, resolve, stat, or enumerate a target,
+  // and never use their contents as browser identity, PID, or listener evidence.
+  return path.dirname(relative) === "browser-profile"
+    && RUNTIME_BROWSER_PROFILE_SINGLETONS.has(path.basename(relative))
+    && stat.nlink === 1
+    && (typeof process.getuid !== "function" || stat.uid === process.getuid());
+}
+
+function safeInstanceTree(fsImpl, root, { strictOwner = false, selectedRunnerWork = false, selectedRuntimeBrowserProfileSingletons = false } = {}) {
   const pending = [{ file: path.resolve(root), depth: 0 }];
   let visited = 0;
   while (pending.length) {
@@ -90,7 +101,10 @@ function safeInstanceTree(fsImpl, root, { strictOwner = false, selectedRunnerWor
     const result = lstat(fsImpl, file);
     if (!result.ok) return { ok: false, reason: result.missing ? "traversal" : "unreadable" };
     const stat = result.stat;
-    if (stat.isSymbolicLink()) return { ok: false, reason: "symlink" };
+    if (stat.isSymbolicLink()) {
+      if (selectedRuntimeBrowserProfileSingletons && isOpaqueRuntimeBrowserProfileSingleton(relative, stat)) continue;
+      return { ok: false, reason: "symlink" };
+    }
     if (!uidAllowed(stat) || (strictOwner && typeof process.getuid === "function" && stat.uid !== process.getuid())) return { ok: false, reason: "unsafe-owner" };
     const runnerWork = path.join("runner", "_work");
     const passive = relative === "" || relative === ".git" || relative.startsWith(`.git${path.sep}`) || relative === "browser-profile" || relative.startsWith(`browser-profile${path.sep}`) || relative === "automation" || relative.startsWith(`automation${path.sep}`) || relative === "logs" || relative.startsWith(`logs${path.sep}`) || (selectedRunnerWork && (relative === runnerWork || relative.startsWith(`${runnerWork}${path.sep}`)));
@@ -357,7 +371,7 @@ export function inspectMacosSelectedFreshInstance({ state = {}, home = os.homedi
     const stat = lstat(fsImpl, directory);
     if (!check.ok || !stat.ok || !strictOwner(stat.stat)) return selectedResult("CONFLICT", ["private_owned_selected_instance"]);
   }
-  if (!safeInstanceTree(fsImpl, root, { strictOwner: true, selectedRunnerWork: true }).ok) return selectedResult("CONFLICT", ["safe_selected_instance_tree"]);
+  if (!safeInstanceTree(fsImpl, root, { strictOwner: true, selectedRunnerWork: true, selectedRuntimeBrowserProfileSingletons: true }).ok) return selectedResult("CONFLICT", ["safe_selected_instance_tree"]);
   const expectedControl = path.resolve(defaultLocalPaths({ home: homePath, installationId: state.installation_id, projectKey: state.sandbox_project_key }).control);
   if (state.control_clone_path !== expectedControl || state.chat_route_file !== path.join(root, "chat-routes.json")) return selectedResult("CONFLICT", ["canonical_selected_proof_paths"]);
   const control = selectedJson(fsImpl, path.join(expectedControl, "instance.json"));

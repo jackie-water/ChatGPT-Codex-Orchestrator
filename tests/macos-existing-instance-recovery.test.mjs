@@ -384,6 +384,91 @@ function selectedFixture(t) {
 const inspectSelected = f => inspectMacosSelectedFreshInstance({ state: f.state, home: f.home, githubApi: f.githubApi });
 const approveSelected = (f, approval = inspectSelected(f).approval_challenge) => approveMacosSelectedFreshInstance({ state: f.state, home: f.home, githubApi: f.githubApi, approval, now: () => new Date("2026-10-22T00:00:00.000Z") });
 
+test("selected runtime browser-profile singleton links are opaque live-session leaves only", t => {
+  const f = selectedFixture(t);
+  const profile = path.join(f.instance, "browser-profile");
+  fs.mkdirSync(path.join(profile, "Default", "Local Storage"), { recursive: true, mode: 0o700 });
+  const targets = {
+    SingletonLock: "synthetic-mac-4242",
+    SingletonSocket: path.join(f.home, "synthetic-chromium-runtime", "SingletonSocket"),
+    SingletonCookie: "13751948561234567890"
+  };
+  const singletonPaths = new Set(Object.keys(targets).map(name => path.join(profile, name)));
+  const targetPaths = Object.values(targets).map(target => path.resolve(profile, target));
+  for (const [name, target] of Object.entries(targets)) fs.symlinkSync(target, path.join(profile, name));
+  assert.equal(inspectSelected(f).status, "NEEDS_USER_ACTION");
+  approveSelected(f);
+  const forbiddenAccesses = [];
+  const fsImpl = { ...fs };
+  for (const operation of ["lstatSync", "statSync", "realpathSync", "readlinkSync", "readFileSync", "readdirSync", "openSync"]) {
+    fsImpl[operation] = (file, ...args) => {
+      if (typeof file === "string" && ((operation !== "lstatSync" && singletonPaths.has(file)) || targetPaths.some(target => file === target || file.startsWith(`${target}${path.sep}`)))) {
+        forbiddenAccesses.push({ operation, file });
+        throw new Error("singleton links and targets must remain opaque");
+      }
+      return fs[operation](file, ...args);
+    };
+  }
+  const result = inspectMacosSelectedFreshInstance({ state: f.state, home: f.home, githubApi: f.githubApi, fsImpl });
+  assert.equal(result.status, "SELECTED_FRESH_INSTANCE_VERIFIED");
+  assert.deepEqual(forbiddenAccesses, []);
+  // The historical/global inspection does not acquire this selected-only policy.
+  assert.equal(inspectMacosExistingInstanceRecovery({ home: f.home }).status, "CONFLICT");
+});
+
+test("selected runtime browser-profile policy rejects arbitrary nested escape and identity symlink aliases", t => {
+  for (const relative of [
+    "browser-profile/Preferences",
+    "browser-profile/Default/SingletonLock",
+    "browser-profile/SingletonSocket/nested",
+    "browser-profile/escape",
+    "browser-profile",
+    "instance.json",
+    "chat-routes.json",
+    "migration-intent.json",
+    "selected-fresh-instance-approval-v1.json",
+    "runner/SingletonSocket",
+    "SingletonCookie"
+  ]) {
+    const f = selectedFixture(t);
+    approveSelected(f);
+    const alias = path.join(f.instance, relative);
+    fs.mkdirSync(path.dirname(alias), { recursive: true, mode: 0o700 });
+    if (fs.existsSync(alias)) fs.rmSync(alias, { recursive: true });
+    // The path-escape target and proof aliases confer no authority, even when
+    // a legitimate live-session singleton has also been created beside them.
+    fs.symlinkSync(relative === "browser-profile/escape" ? "../../../outside-profile" : path.join(f.control, "instance.json"), alias);
+    if (relative !== "browser-profile") {
+      const profile = path.join(f.instance, "browser-profile");
+      fs.mkdirSync(profile, { recursive: true, mode: 0o700 });
+      fs.symlinkSync("synthetic-mac-4242", path.join(profile, "SingletonLock"));
+    }
+    assert.deepEqual(inspectSelected(f).missing_verification_gates, ["safe_selected_instance_tree"], relative);
+  }
+});
+
+test("selected runtime browser-profile singleton links require current ownership and a single link", t => {
+  const f = selectedFixture(t);
+  const profile = path.join(f.instance, "browser-profile");
+  fs.mkdirSync(profile, { mode: 0o700 });
+  const singleton = path.join(profile, "SingletonLock");
+  fs.symlinkSync("synthetic-mac-4242", singleton);
+  for (const kind of ["owner", "hardlinked-symlink"]) {
+    if (kind === "owner" && typeof process.getuid !== "function") continue;
+    const fsImpl = { ...fs, lstatSync: file => {
+      const stat = fs.lstatSync(file);
+      if (file === singleton) Object.defineProperty(stat, kind === "owner" ? "uid" : "nlink", { value: kind === "owner" ? process.getuid() + 1 : 2 });
+      return stat;
+    } };
+    const result = inspectMacosSelectedFreshInstance({ state: f.state, home: f.home, githubApi: f.githubApi, fsImpl });
+    assert.deepEqual(result.missing_verification_gates, ["safe_selected_instance_tree"], kind);
+  }
+  fs.unlinkSync(singleton);
+  fs.writeFileSync(singleton, "not a live Chromium link", { mode: 0o600 });
+  fs.linkSync(singleton, path.join(f.home, "hardlinked-singleton"));
+  assert.deepEqual(inspectSelected(f).missing_verification_gates, ["safe_selected_instance_tree"]);
+});
+
 test("explicit selected fresh approval leaves unsafe historical bytes and modes untouched", t => {
   const f = selectedFixture(t);
   const legacy = path.join(f.instances, "1832f0bb");

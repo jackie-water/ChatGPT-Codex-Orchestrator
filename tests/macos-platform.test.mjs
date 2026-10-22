@@ -77,3 +77,26 @@ test("failed kickstart leaves durable recovery requirement without reporting run
     assert.equal(result.status,"ERROR");assert.equal(result.mutations_performed,"UNKNOWN");assert.equal(result.recovery_status,"INSPECT_ONLY_NO_AUTOMATIC_RETRY");
   }finally{f.cleanup();}
 });
+
+test("runner environment approval is rechecked after native verification and before bootstrap",()=>{
+  const f=fixture();try{
+    assert.equal(macosRuntimeAction("install",f.options).status,"PASS");f.state.macos_action_approval="start";
+    let envDigest=null,inspections=0;
+    const runnerInspector=()=>{inspections++;return {status:"PASS",runner_executable:f.executable,program_arguments:["run"],env_sha256:envDigest};};
+    const result=macosRuntimeAction("start",{...f.options,runnerInspector,capabilityVerifier:()=>{envDigest="a".repeat(64);return f.capability;}});
+    assert.equal(result.error_id,"MACOS-RUNNER-APPROVAL-DRIFT");assert.equal(result.mutations_performed,false);assert.equal(inspections,2);
+    assert.equal(f.calls.some(x=>["bootstrap","kickstart"].includes(x.args[0])),false);
+  }finally{f.cleanup();}
+});
+
+test("environment tamper during bootstrap blocks kickstart and requires inspection",()=>{
+  const f=fixture();try{
+    assert.equal(macosRuntimeAction("install",f.options).status,"PASS");f.state.macos_action_approval="start";
+    let tampered=false,inspections=0;
+    const runnerInspector=()=>{inspections++;return tampered?{status:"ERROR",error_id:"MACOS-RUNNER-ENV"}:{status:"PASS",runner_executable:f.executable,program_arguments:["run"],env_sha256:null};};
+    const commandRunner=(command,args)=>{const result=f.options.commandRunner(command,args);if(command==="launchctl"&&args[0]==="bootstrap")tampered=true;return result;};
+    const result=macosRuntimeAction("start",{...f.options,runnerInspector,commandRunner});
+    assert.equal(result.error_id,"MACOS-RUNNER-ENV");assert.equal(result.mutations_performed,true);assert.equal(result.recovery_status,"INSPECT_ONLY_NO_AUTOMATIC_RETRY");assert.equal(inspections,3);
+    assert.equal(f.calls.filter(x=>x.args[0]==="bootstrap").length,1);assert.equal(f.calls.some(x=>x.args[0]==="kickstart"),false);
+  }finally{f.cleanup();}
+});

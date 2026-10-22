@@ -159,6 +159,8 @@ export function macosRuntimeAction(action,{state={},commandRunner=cmd,home=HOME(
   try { runner=runnerInspector({state,home,platform,arch,commandRunner,requireOnline:false}); }
   catch(error) { return {status:"ERROR",error_id:"MACOS-RUNNER-VERIFY",mutations_performed:false,details:String(error.message||error)}; }
   if(runner?.status!=="PASS") return {...runner,status:runner?.status||"ERROR",mutations_performed:false,preflight,plist_verified:false};
+  const authorizationKeys=["runner_executable","program_arguments","approval_sha256","config_sha256","env_sha256"];
+  const approvedRunnerAuthorization=JSON.stringify(authorizationKeys.map(key=>runner[key]));
   const label=state.launch_agent_label, plist=path.join(home,"Library","LaunchAgents",`${label}.plist`);
   const listed=commandRunner("launchctl",["list"]);
   if(!listed.ok) return {status:"ERROR",error_id:"MACOS-LAUNCHCTL-001",mutations_performed:false,launchctl_state:"unknown",details:listed.output,preflight};
@@ -205,9 +207,23 @@ export function macosRuntimeAction(action,{state={},commandRunner=cmd,home=HOME(
     }
   }
   if(!plistVerified) return {status:"ERROR",error_id:"MACOS-PLIST-MISSING",mutations_performed:false,action,plist_verified:false};
+  const recheckRunnerAuthorization=()=>{
+    let current;
+    try { current=runnerInspector({state,home,platform,arch,commandRunner,requireOnline:false}); }
+    catch { return {status:"ERROR",error_id:"MACOS-RUNNER-VERIFY",mutations_performed:false,action}; }
+    if(current?.status!=="PASS") return {...current,status:current?.status||"ERROR",mutations_performed:false,action};
+    if(JSON.stringify(authorizationKeys.map(key=>current[key]))!==approvedRunnerAuthorization) return {status:"ERROR",error_id:"MACOS-RUNNER-APPROVAL-DRIFT",mutations_performed:false,action,details:"Runner authorization changed before startup."};
+    return null;
+  };
+  if(action==="start") {
+    const changed=recheckRunnerAuthorization();
+    if(changed) return changed;
+  }
   const result=commandRunner("launchctl",[action==="start"?"bootstrap":"bootout",`gui/${owner()||0}`,plist]);
   if(!result.ok) return {status:"ERROR",error_id:"MACOS-LAUNCHCTL-ACTION",mutations_performed:"UNKNOWN",action,launchctl_state:"unknown",details:result.output,recovery_status:"INSPECT_ONLY_NO_AUTOMATIC_RETRY"};
   if(action==="start") {
+    const changed=recheckRunnerAuthorization();
+    if(changed) return {...changed,mutations_performed:true,launchctl_state:"unknown",recovery_status:"INSPECT_ONLY_NO_AUTOMATIC_RETRY"};
     const started=commandRunner("launchctl",["kickstart",`gui/${owner()||0}/${label}`]);
     if(!started.ok) return {status:"ERROR",error_id:"MACOS-LAUNCHCTL-START",mutations_performed:"UNKNOWN",action,launchctl_state:"unknown",details:started.output,recovery_status:"INSPECT_ONLY_NO_AUTOMATIC_RETRY"};
   }
