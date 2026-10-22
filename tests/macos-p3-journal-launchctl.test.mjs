@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import crypto from "node:crypto";
 import { prepareMigrationIntent, migrationIntentPath, renderLaunchAgent, macosRuntimeAction } from "../src/lib/macos-platform.mjs";
 import { defaultLocalPaths } from "../src/lib/control-render.mjs";
 
@@ -47,7 +48,7 @@ test("P3 launchctl refuses unknown initial state without side effects",()=>{
   const home=fs.mkdtempSync(path.join(os.tmpdir(),"orch-p3-home-"));
   const commands=[];
   const fake=(name,args)=>{ commands.push(args); return {ok:false,output:"unknown"}; };
-  const state={sandbox_only:true,target_environment_ready:false,installation_id:"abc12345",instance_id:"abc12345",runner_owner:"abc12345",runner_label:"codex-orchestrator-abc12345",launch_agent_label:"com.chatgpt.codex.abc12345",runner_path:path.join(home,"runner"),instance_root:path.join(home,"instance"),macos_setup_approved:true,macos_action_approval:"start"};
+  const state={sandbox_only:true,target_environment_ready:false,installation_id:"abc12345",instance_id:"abc12345",runner_owner:"abc12345",runner_label:"codex-orchestrator-abc12345",launch_agent_label:"com.chatgpt.codex.abc12345",runner_path:path.join(home,"runner"),instance_root:path.join(home,".chatgpt-codex-orchestrator","instances","abc12345"),macos_setup_approved:true,macos_action_approval:"start"};
   const old=process.env.HOME; process.env.HOME=home;
   try {
     const result=macosRuntimeAction("start",{state,commandRunner:fake});
@@ -58,16 +59,20 @@ test("P3 launchctl refuses unknown initial state without side effects",()=>{
   } finally { if(old===undefined) delete process.env.HOME; else process.env.HOME=old; fs.rmSync(home,{recursive:true,force:true}); }
 });
 
-test("P3 launchctl rejects an unverified post-start state",()=>{
+test("P3 launchctl refuses start without an immutable plist import",()=>{
   const home=fs.mkdtempSync(path.join(os.tmpdir(),"orch-p3-home-"));
   const commands=[];
   const fake=(name,args)=>{ commands.push(args); if(args[0]==="list") return {ok:true,output:""}; if(args[0]==="bootstrap") return {ok:true,output:"started"}; return {ok:false,output:"not-proven"}; };
-  const state={sandbox_only:true,target_environment_ready:false,installation_id:"abc12345",instance_id:"abc12345",runner_owner:"abc12345",runner_label:"codex-orchestrator-abc12345",launch_agent_label:"com.chatgpt.codex.abc12345",runner_path:path.join(home,"runner"),instance_root:path.join(home,"instance"),macos_setup_approved:true,macos_action_approval:"start"};
+  const state={sandbox_only:true,target_environment_ready:false,installation_id:"abc12345",instance_id:"abc12345",runner_owner:"abc12345",runner_label:"codex-orchestrator-abc12345",launch_agent_label:"com.chatgpt.codex.abc12345",runner_path:path.join(home,"runner"),instance_root:path.join(home,".chatgpt-codex-orchestrator","instances","abc12345"),macos_setup_approved:true,macos_action_approval:"start"};
   state.runner_path=path.join(state.instance_root,"runner");
   const executable=path.join(state.runner_path,"bin","Runner.Listener");
   fs.mkdirSync(path.dirname(executable),{recursive:true,mode:0o700});
   fs.writeFileSync(executable,"synthetic executable never run",{mode:0o700});
-  const runnerInspector=()=>({status:"PASS",runner_executable:executable,program_arguments:["run"]});
+  state.control_repository="owner/control";
+  const configFile=path.join(state.runner_path,".runner"),configBytes=Buffer.from(JSON.stringify({agentId:42,agentName:state.runner_label,gitHubUrl:`https://github.com/${state.control_repository}`,serverUrl:"https://pipelines.actions.githubusercontent.com/example",workFolder:"_work"}));
+  fs.writeFileSync(configFile,configBytes,{mode:0o600});const configStat=fs.lstatSync(configFile);
+  const configIdentity=Object.fromEntries(["dev","ino","uid","gid","mode","nlink","size","mtimeMs","ctimeMs"].map(key=>[key,configStat[key]]));
+  const runnerInspector=()=>({status:"PASS",runner_executable:executable,program_arguments:["run"],runner_id:"42",config_identity:configIdentity,config_sha256:crypto.createHash("sha256").update(configBytes).digest("hex")});
   const helper=path.join(state.instance_root,"runtime","native","macos","process-identity");
   const plistDir=path.join(home,"Library","LaunchAgents");
   const plist=path.join(plistDir,`${state.launch_agent_label}.plist`);
@@ -77,8 +82,8 @@ test("P3 launchctl rejects an unverified post-start state",()=>{
     fs.mkdirSync(plistDir,{recursive:true,mode:0o700});
     fs.writeFileSync(plist,renderLaunchAgent({label:state.launch_agent_label,runnerPath:executable,workingDirectory:state.runner_path,programArguments:["run"],instanceRoot:state.instance_root,nativeHelperPath:helper,nativeProcessIdentity:true}),{mode:0o600});
     const result=macosRuntimeAction("start",{state,home,platform:"darwin",arch:"arm64",commandRunner:fake,runnerInspector,capabilityVerifier:()=>capability});
-    assert.equal(result.status,"ERROR"); assert.equal(result.launchctl_state,"unknown");
-    assert.equal(commands.filter(x=>x[0]==="bootstrap").length,1);
+    assert.equal(result.status,"ERROR"); assert.equal(result.launchctl_state,"unknown");assert.equal(result.error_id,"MACOS-LAUNCHCTL-IMMUTABLE-IMPORT-REQUIRED");assert.equal(result.mutations_performed,false);
+    assert.equal(commands.filter(x=>["bootstrap","kickstart"].includes(x[0])).length,0);
   } finally { if(old===undefined) delete process.env.HOME; else process.env.HOME=old; fs.rmSync(home,{recursive:true,force:true}); }
 });
 
@@ -86,12 +91,16 @@ test("P3 launchctl rejects start with an invalid capability or mismatched plist"
   const home=fs.mkdtempSync(path.join(os.tmpdir(),"orch-p3-home-"));
   const commands=[];
   const fake=(name,args)=>{ commands.push(args); return args[0]==="list"?{ok:true,output:""}:{ok:false,output:"unexpected"}; };
-  const state={sandbox_only:true,target_environment_ready:false,installation_id:"abc12345",instance_id:"abc12345",runner_owner:"abc12345",runner_label:"codex-orchestrator-abc12345",launch_agent_label:"com.chatgpt.codex.abc12345",runner_path:path.join(home,"runner"),instance_root:path.join(home,"instance"),macos_setup_approved:true,macos_action_approval:"start"};
+  const state={sandbox_only:true,target_environment_ready:false,installation_id:"abc12345",instance_id:"abc12345",runner_owner:"abc12345",runner_label:"codex-orchestrator-abc12345",launch_agent_label:"com.chatgpt.codex.abc12345",runner_path:path.join(home,"runner"),instance_root:path.join(home,".chatgpt-codex-orchestrator","instances","abc12345"),macos_setup_approved:true,macos_action_approval:"start"};
   state.runner_path=path.join(state.instance_root,"runner");
   const executable=path.join(state.runner_path,"bin","Runner.Listener");
   fs.mkdirSync(path.dirname(executable),{recursive:true,mode:0o700});
   fs.writeFileSync(executable,"synthetic executable never run",{mode:0o700});
-  const runnerInspector=()=>({status:"PASS",runner_executable:executable,program_arguments:["run"]});
+  state.control_repository="owner/control";
+  const configFile=path.join(state.runner_path,".runner"),configBytes=Buffer.from(JSON.stringify({agentId:42,agentName:state.runner_label,gitHubUrl:`https://github.com/${state.control_repository}`,serverUrl:"https://pipelines.actions.githubusercontent.com/example",workFolder:"_work"}));
+  fs.writeFileSync(configFile,configBytes,{mode:0o600});const configStat=fs.lstatSync(configFile);
+  const configIdentity=Object.fromEntries(["dev","ino","uid","gid","mode","nlink","size","mtimeMs","ctimeMs"].map(key=>[key,configStat[key]]));
+  const runnerInspector=()=>({status:"PASS",runner_executable:executable,program_arguments:["run"],runner_id:"42",config_identity:configIdentity,config_sha256:crypto.createHash("sha256").update(configBytes).digest("hex")});
   const helper=path.join(state.instance_root,"runtime","native","macos","process-identity");
   const plistDir=path.join(home,"Library","LaunchAgents");
   const plist=path.join(plistDir,`${state.launch_agent_label}.plist`);

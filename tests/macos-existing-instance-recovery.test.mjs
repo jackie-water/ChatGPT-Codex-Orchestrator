@@ -3,9 +3,12 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import crypto from "node:crypto";
+import { gzipSync } from "node:zlib";
 import { spawnSync } from "node:child_process";
 import { inspectMacosExistingInstanceRecovery, inspectMacosSelectedFreshInstance, approveMacosSelectedFreshInstance } from "../src/lib/macos-existing-instance-recovery.mjs";
 import { canonicalInstallationId, defaultLocalPaths } from "../src/lib/control-render.mjs";
+import { MACOS_RUNNER_RUNTIME_PATH } from "../src/lib/macos-runner-bootstrap.mjs";
 
 function fixture(t) {
   const home = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "codex-macos-recovery-"));
@@ -624,5 +627,221 @@ test("selected-only passive Runner work accepts owned checkout modes and still r
   assert.equal(inspectMacosExistingInstanceRecovery({ home: f.home }).status, "CONFLICT");
   fs.linkSync(checkout, path.join(f.home, "outside-checkout-hardlink"));
   assert.deepEqual(inspectSelected(f).missing_verification_gates, ["safe_selected_instance_tree"]);
+});
+
+test("selected recovery permits only the owned singly linked runner .env at 0400 without chmod", t => {
+  const f = selectedFixture(t);
+  approveSelected(f);
+  fs.mkdirSync(path.join(f.instance, "runner"), { mode: 0o700 });
+  const file = path.join(f.instance, "runner", ".env");
+  fs.writeFileSync(file, "LANG=C\nLC_ALL=C\n", { mode: 0o400 });
+  const before = fs.lstatSync(file), bytes = fs.readFileSync(file);
+  const fsImpl = { ...fs, chmodSync: () => { throw new Error("selected recovery must never chmod .env"); } };
+  const report = inspectMacosSelectedFreshInstance({ state: f.state, home: f.home, githubApi: f.githubApi, fsImpl });
+  assert.equal(report.status, "SELECTED_FRESH_INSTANCE_VERIFIED");
+  assert.equal(fs.lstatSync(file).mode, before.mode);
+  assert.equal(fs.lstatSync(file).ino, before.ino);
+  assert.deepEqual(fs.readFileSync(file), bytes);
+  assert.equal(inspectMacosExistingInstanceRecovery({ home: f.home }).status, "CONFLICT");
+});
+
+test("selected recovery .env 0400 exception rejects aliases ownership and every unrelated private path", t => {
+  for (const kind of ["symlink", "hardlink", "foreign-owner", "directory", "readonly-mode", "executable-mode", "special-mode", "root-env", "nested-env", "runner-config", "credentials", "other-file"]) {
+    if (kind === "foreign-owner" && typeof process.getuid !== "function") continue;
+    const f = selectedFixture(t);
+    approveSelected(f);
+    const relative = kind === "root-env" ? ".env" : kind === "nested-env" ? "runner/nested/.env" : kind === "runner-config" ? "runner/.runner" : kind === "credentials" ? "runner/.credentials" : kind === "other-file" ? "runner/other" : "runner/.env";
+    const file = path.join(f.instance, relative);
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    if (kind === "directory") fs.mkdirSync(file, { mode: 0o400 });
+    else if (kind === "symlink") {
+      const target = path.join(f.home, "outside-env");
+      fs.writeFileSync(target, "LANG=C\n", { mode: 0o400 });
+      fs.symlinkSync(target, file);
+    } else {
+      fs.writeFileSync(file, "LANG=C\n", { mode: 0o600 });
+      fs.chmodSync(file, kind === "readonly-mode" ? 0o444 : kind === "executable-mode" ? 0o500 : kind === "special-mode" ? 0o4400 : 0o400);
+      if (kind === "hardlink") fs.linkSync(file, path.join(f.home, "hardlinked-env"));
+    }
+    const fsImpl = { ...fs, lstatSync: target => {
+      const stat = fs.lstatSync(target);
+      if (kind === "foreign-owner" && target === file) Object.defineProperty(stat, "uid", { value: process.getuid() + 1 });
+      return stat;
+    } };
+    const report = inspectMacosSelectedFreshInstance({ state: f.state, home: f.home, githubApi: f.githubApi, fsImpl });
+    assert.deepEqual(report.missing_verification_gates, ["safe_selected_instance_tree"], kind);
+    if (kind === "directory") fs.chmodSync(file, 0o700);
+  }
+});
+
+const packageHash = bytes => crypto.createHash("sha256").update(bytes).digest("hex");
+function selectedPackageArchive(entries) {
+  const chunks = [];
+  for (const { name, bytes = Buffer.alloc(0), mode = 0o700, type = "0", link = "" } of entries) {
+    const header = Buffer.alloc(512);
+    header.write(name, 0, 100);
+    header.write(mode.toString(8).padStart(7, "0") + "\0", 100);
+    header.write("0000000\0", 108);
+    header.write("0000000\0", 116);
+    header.write(bytes.length.toString(8).padStart(11, "0") + "\0", 124);
+    header.write("00000000000\0", 136);
+    header.fill(32, 148, 156);
+    header[156] = type.charCodeAt(0);
+    header.write(link, 157, 100);
+    header.write("ustar\0", 257);
+    header.write("00", 263);
+    const checksum = header.reduce((sum, byte) => sum + byte, 0);
+    header.write(checksum.toString(8).padStart(6, "0") + "\0 ", 148);
+    chunks.push(header, bytes, Buffer.alloc((512 - bytes.length % 512) % 512));
+  }
+  return gzipSync(Buffer.concat([...chunks, Buffer.alloc(1024)]));
+}
+
+function selectedPackageFixture(t, { extraDependencies = 0, candidateOnly = false } = {}) {
+  const f = selectedFixture(t);
+  approveSelected(f);
+  const runner = path.join(f.instance, "runner"), executable = path.join(runner, "bin", "Runner.Listener");
+  Object.assign(f.state, {
+    runner_path: runner, runner_owner: f.state.installation_id,
+    runner_label: `codex-orchestrator-${f.state.instance_id}`, launch_agent_label: `com.chatgpt.codex.${f.state.instance_id}`,
+    control_repository_id: "101", sandbox_repository_id: "202",
+    browser_profile: path.join(f.instance, "browser-profile"), browser_port: 13333, pending_wake_outbox: path.join(f.instance, "pending-wakes")
+  });
+  const native = Buffer.alloc(32);
+  native.writeUInt32LE(0xfeedfacf, 0);
+  native.writeUInt32LE(0x0100000c, 4);
+  native.writeUInt32LE(2, 12);
+  const template = Buffer.from('#!/bin/bash\nSVC_NAME="{{SvcNameVar}}"\nSVC_DESCRIPTION="{{SvcDescription}}"\n# Synthetic official service template; never executed.\n');
+  const entries = [
+    { name: "bin/Runner.Listener", bytes: native },
+    { name: "bin/Runner.Worker", bytes: native },
+    { name: "bin/darwin.svc.sh.template", bytes: template, mode: 0o600 },
+    { name: "run.sh", bytes: Buffer.from("#!/bin/sh\n# Synthetic official runner script; never executed.\n") }
+  ];
+  for (const runtime of ["node20", "node24"]) {
+    const base = `externals/${runtime}`;
+    entries.push(
+      { name: `${base}/bin/node`, bytes: native },
+      { name: `${base}/lib/node_modules/npm/bin/npm-cli.js`, bytes: Buffer.from("// synthetic npm CLI\n"), mode: 0o600 },
+      { name: `${base}/lib/node_modules/npm/bin/npx-cli.js`, bytes: Buffer.from("// synthetic npx CLI\n"), mode: 0o600 },
+      { name: `${base}/lib/node_modules/corepack/dist/corepack.js`, bytes: Buffer.from("// synthetic corepack CLI\n"), mode: 0o600 },
+      { name: `${base}/lib/node_modules/npm/node_modules/@npmcli/fs/lib/index.js`, bytes: Buffer.from("// synthetic scoped package\n"), mode: 0o600 },
+      { name: `${base}/lib/node_modules/npm/node_modules/package+variant/index.js`, bytes: Buffer.from("// synthetic package variant\n"), mode: 0o600 },
+      { name: `${base}/bin/npm`, type: "2", link: "../lib/node_modules/npm/bin/npm-cli.js", mode: 0o777 },
+      { name: `${base}/bin/npx`, type: "2", link: "../lib/node_modules/npm/bin/npx-cli.js", mode: 0o777 },
+      { name: `${base}/bin/corepack`, type: "2", link: "../lib/node_modules/corepack/dist/corepack.js", mode: 0o777 }
+    );
+  }
+  for (let index = 0; index < extraDependencies; index++) entries.push({ name: `externals/node24/lib/node_modules/npm/node_modules/@npmcli/fs/data-${index}.js`, bytes: Buffer.from(`// dependency ${index}\n`), mode: 0o600 });
+  for (const entry of entries) {
+    const file = path.join(runner, entry.name);
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    if (entry.type === "2") {
+      fs.symlinkSync(entry.link, file);
+      if (typeof fs.lchmodSync === "function") fs.lchmodSync(file, entry.mode);
+    } else fs.writeFileSync(file, entry.bytes, { mode: entry.mode ?? 0o700 });
+  }
+  const repository = f.state.control_repository.replace(/[^0-9a-zA-Z._-]/g, "-");
+  const service = Buffer.from(template.toString("utf8").replaceAll("{{SvcDescription}}", `GitHub Actions Runner (${repository}.${f.state.runner_label})`).replaceAll("{{SvcNameVar}}", `actions.runner.${repository}.${f.state.runner_label}`));
+  fs.writeFileSync(path.join(runner, "svc.sh"), service, { mode: 0o755 });
+  const archive = selectedPackageArchive(entries), archivePath = path.join(f.instance, "runner-package.tar.gz");
+  fs.writeFileSync(archivePath, archive, { mode: 0o600 });
+  const approval = {
+    schema_version: 1, installation_id: f.state.installation_id, instance_id: f.state.instance_id, instance_path: f.instance,
+    project: f.state.sandbox_project_key, control_repository: f.state.control_repository, sandbox_repository: f.state.sandbox_repository,
+    control_repository_id: "101", sandbox_repository_id: "202", runner_path: runner, runner_executable: executable,
+    runner_label: f.state.runner_label, launch_agent_label: f.state.launch_agent_label, browser_profile: f.state.browser_profile,
+    browser_port: f.state.browser_port, pending_wake_outbox: f.state.pending_wake_outbox, runtime_path: MACOS_RUNNER_RUNTIME_PATH,
+    source_version: "2.999.0", source_url: "https://github.com/actions/runner/releases/download/v2.999.0/actions-runner-osx-arm64-2.999.0.tar.gz",
+    source_release_id: "505", source_asset_id: "606", archive_sha256: packageHash(archive), executable_sha256: packageHash(native),
+    binary_manifest: Object.fromEntries(entries.map(entry => [entry.name, packageHash(entry.type === "2" ? Buffer.from(entry.link) : entry.bytes)])),
+    env_sha256: null, approved_action: "use-existing-official-macos-arm64-runner", approved_by: f.state.github_login,
+    approval_id: "human-synthetic-fixture", approved_at: "2026-10-22T00:00:00.000Z"
+  };
+  const packageReceipt = path.join(f.instance, candidateOnly ? "macos-runner-candidate.json" : "macos-runner-approval.json");
+  writeJson(packageReceipt, approval);
+  return { ...f, runner, entries, archivePath, packageReceipt, approval, service };
+}
+
+test("selected recovery admits only archive-bound official npm npx corepack links and generated service as inert leaves", t => {
+  for (const candidateOnly of [false, true]) {
+    const f = selectedPackageFixture(t, { candidateOnly });
+    const links = new Set(f.entries.filter(entry => entry.type === "2").map(entry => path.join(f.runner, entry.name)));
+    const dereferences = [], fsImpl = { ...fs };
+    for (const operation of ["statSync", "realpathSync", "readFileSync", "openSync", "readdirSync"]) {
+      fsImpl[operation] = (file, ...args) => {
+        if (typeof file === "string" && links.has(file)) {
+          dereferences.push({ operation, file });
+          throw new Error("archive package links must never be dereferenced");
+        }
+        if (operation === "openSync") assert.ok(args[0] & fs.constants.O_NOFOLLOW);
+        return fs[operation](file, ...args);
+      };
+    }
+    const report = inspectMacosSelectedFreshInstance({ state: f.state, home: f.home, githubApi: f.githubApi, fsImpl });
+    assert.equal(report.status, "SELECTED_FRESH_INSTANCE_VERIFIED");
+    assert.deepEqual(dereferences, []);
+    assert.equal(fs.lstatSync(path.join(f.runner, "svc.sh")).mode & 0o7777, 0o755);
+    assert.deepEqual(fs.readFileSync(path.join(f.runner, "svc.sh")), f.service);
+    assert.equal(inspectMacosExistingInstanceRecovery({ home: f.home }).status, "CONFLICT");
+  }
+});
+
+test("selected recovery budgets the separately bounded official package without expanding historical scans", t => {
+  const f = selectedPackageFixture(t, { extraDependencies: 4100 });
+  assert.equal(inspectSelected(f).status, "SELECTED_FRESH_INSTANCE_VERIFIED");
+  assert.equal(inspectMacosExistingInstanceRecovery({ home: f.home }).status, "CONFLICT");
+  const fsImpl = { ...fs, readdirSync: (directory, options) => {
+    const entries = fs.readdirSync(directory, options);
+    return directory === f.instance && options?.withFileTypes === true
+      ? [...entries, ...Array.from({ length: 4097 }, (_, index) => ({ name: `unrelated-${index}` }))]
+      : entries;
+  } };
+  assert.deepEqual(inspectMacosSelectedFreshInstance({ state: f.state, home: f.home, githubApi: f.githubApi, fsImpl }).missing_verification_gates,
+    ["safe_selected_instance_tree"], "package inventory must not lend its allowance to unrelated instance data");
+});
+
+test("selected recovery rejects unbound package links aliases names and generated executables", t => {
+  for (const kind of ["absolute-link", "escape-link", "foreign-identity", "extra-link", "credential-link", "missing-archive", "archive-digest", "manifest-digest", "scoped-name-outside-package", "service-bytes", "service-link", "service-mode", "extra-generated"]) {
+    const f = selectedPackageFixture(t), npm = path.join(f.runner, "externals", "node24", "bin", "npm"), service = path.join(f.runner, "svc.sh");
+    if (["absolute-link", "escape-link", "foreign-identity"].includes(kind)) {
+      fs.unlinkSync(npm);
+      fs.symlinkSync(kind === "absolute-link" ? path.join(f.runner, "externals/node24/lib/node_modules/npm/bin/npm-cli.js") : kind === "escape-link" ? "../../../../../outside" : "../../../../instance.json", npm);
+    }
+    if (kind === "extra-link") fs.symlinkSync("../lib/node_modules/npm/bin/npm-cli.js", path.join(f.runner, "externals/node24/bin/npm-extra"));
+    if (kind === "credential-link") fs.symlinkSync(path.join(f.control, "instance.json"), path.join(f.runner, ".credentials"));
+    if (kind === "missing-archive") fs.unlinkSync(f.archivePath);
+    if (kind === "archive-digest") fs.appendFileSync(f.archivePath, "modified archive");
+    if (kind === "manifest-digest") { f.approval.binary_manifest["externals/node24/bin/npm"] = "0".repeat(64); writeJson(f.packageReceipt, f.approval); }
+    if (kind === "scoped-name-outside-package") fs.mkdirSync(path.join(f.instance, "@npmcli"), { mode: 0o700 });
+    if (kind === "service-bytes") fs.appendFileSync(service, "# forged service\n");
+    if (kind === "service-link") { fs.unlinkSync(service); fs.symlinkSync("bin/darwin.svc.sh.template", service); }
+    if (kind === "service-mode") fs.chmodSync(service, 0o700);
+    if (kind === "extra-generated") fs.writeFileSync(path.join(f.runner, "svc-extra.sh"), f.service, { mode: 0o755 });
+    f.calls.length = 0;
+    assert.deepEqual(inspectSelected(f).missing_verification_gates, ["safe_selected_instance_tree"], kind);
+    assert.deepEqual(f.calls, [], kind);
+  }
+});
+
+test("selected recovery rechecks link and generated service inode after independent package inspection", t => {
+  for (const kind of ["link", "service"]) {
+    const f = selectedPackageFixture(t), file = path.join(f.runner, kind === "link" ? "externals/node24/bin/npm" : "svc.sh");
+    let replaced = false;
+    const fsImpl = { ...fs, readdirSync: (directory, options) => {
+      if (!replaced && directory === f.instance && options?.withFileTypes === true) {
+        replaced = true;
+        fs.renameSync(file, path.join(f.home, "retained-original-package-leaf"));
+        if (kind === "link") fs.symlinkSync("../lib/node_modules/npm/bin/npm-cli.js", file);
+        else fs.writeFileSync(file, f.service, { mode: 0o755 });
+      }
+      return fs.readdirSync(directory, options);
+    } };
+    f.calls.length = 0;
+    const report = inspectMacosSelectedFreshInstance({ state: f.state, home: f.home, githubApi: f.githubApi, fsImpl });
+    assert.equal(replaced, true, kind);
+    assert.deepEqual(report.missing_verification_gates, ["safe_selected_instance_tree"], kind);
+    assert.deepEqual(f.calls, [], kind);
+  }
 });
 

@@ -299,6 +299,23 @@ function writeInstanceMetadata(controlPath,{instanceId,installationId,trustedGit
   }
 }
 
+function requireMacosRegistrationMetadata(metadata,state){
+  // Refresh publishes the strict registrar but does not migrate its authority.
+  // Old C2 metadata has the earlier runner identity without these instance,
+  // browser, outbox and immutable repository pins. Refuse it while read-only.
+  const instanceRoot=path.join(os.homedir(),".chatgpt-codex-orchestrator","instances",state.instance_id);
+  const repositoryId=String(metadata.control_repository_id||"");
+  if(metadata.arch!=="arm64"||!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(String(metadata.installation_id||""))||
+    metadata.installation_id!==state.installation_id||metadata.instance_root!==instanceRoot||state.instance_root!==instanceRoot||
+    metadata.chat_route_file!==path.join(instanceRoot,"chat-routes.json")||metadata.chat_route_file!==state.chat_route_file||
+    metadata.pending_wake_outbox!==path.join(instanceRoot,"pending-wakes")||metadata.pending_wake_outbox!==state.pending_wake_outbox||
+    !/^[1-9][0-9]*$/.test(repositoryId)||!Number.isSafeInteger(Number(repositoryId))||repositoryId!==String(state.control_repository_id||"")||
+    metadata.browser_profile!==path.join(instanceRoot,"browser-profile")||metadata.browser_profile!==state.browser_profile||
+    !Number.isInteger(metadata.browser_port)||metadata.browser_port<1024||metadata.browser_port>65535||metadata.browser_port!==state.browser_port){
+    throw new Error("MACOS-CONTROL-MIGRATION-REQUIRED: Existing macOS Control metadata is incompatible with pinned CHAT-REGISTER identity; explicit migration is required before runtime refresh");
+  }
+}
+
 function runtimeRefreshIdentity(state){
   const {instance_platform:platform,instance_arch:arch}=state;
   requireRuntimePlatform(platform,arch);
@@ -308,6 +325,7 @@ function runtimeRefreshIdentity(state){
   const metadataPath=path.join(state.control_clone_path,"instance.json");
   assertSafeRuntimePath(metadataPath,{type:"file"});
   const metadata=JSON.parse(fs.readFileSync(metadataPath,"utf8"));
+  if(platform==="darwin") requireMacosRegistrationMetadata(metadata,state);
   if(metadata.schema_version!==1||metadata.instance_id!==state.instance_id||(platform==="darwin"&&metadata.installation_id!==state.installation_id)||metadata.platform!==platform||metadata.arch!==arch||
     metadata.trusted_github_username!==state.github_login||metadata.runner_label!==state.runner_label||metadata.control_repository!==state.control_repository||
     (platform==="darwin"&&(!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(String(state.sandbox_repository||""))||metadata.sandbox_repository!==state.sandbox_repository||metadata.role!=="control"))) throw new Error("Persisted Control instance identity does not match installation state for runtime refresh");
@@ -490,6 +508,7 @@ export function refreshControlRuntime({state,sourceRoot=process.cwd(),gitRun=run
   }
   assertSafeRuntimePath(state.control_clone_path,{type:"directory"});
   assertSafeRuntimePath(path.join(state.control_clone_path,".git"),{type:"directory"});
+  const earlyIdentity=state.instance_platform==="darwin"?runtimeRefreshIdentity(state):null;
   const fetchUrl=gitRun("git",["config","--get","remote.origin.url"],{cwd:state.control_clone_path}).stdout;
   const pushUrls=gitRun("git",["config","--get-all","remote.origin.pushurl"],{cwd:state.control_clone_path,allowFailure:true}).stdout.split(/\r?\n/).filter(Boolean);
   if(normalizedGithubRepository(fetchUrl)!==repository.toLowerCase()||
@@ -504,7 +523,7 @@ export function refreshControlRuntime({state,sourceRoot=process.cwd(),gitRun=run
   const remoteMain=gitRun("git",["ls-remote","--heads","origin","refs/heads/main"],{cwd:state.control_clone_path,allowFailure:true});
   const remoteMatch=remoteMain.stdout.match(/^([0-9a-f]{40})\trefs\/heads\/main$/i);
   if(!remoteMain.ok||!remoteMatch||remoteMatch[1].toLowerCase()!==localHead.toLowerCase()) throw new Error("Control repository local HEAD must match remote main for runtime refresh");
-  const identity=runtimeRefreshIdentity(state);
+  const identity=earlyIdentity||runtimeRefreshIdentity(state);
   const runtimeFiles=prepareControlRuntimeFiles({sourceRoot,controlRoot:state.control_clone_path});
   const workflow=prepareRuntimeWorkflow({sourceRoot,controlPath:state.control_clone_path,...identity});
   const scriptsDir=path.join(state.control_clone_path,"scripts");

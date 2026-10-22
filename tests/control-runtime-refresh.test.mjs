@@ -133,11 +133,25 @@ function fixture(t,{platform="darwin",arch=platform==="darwin"?"arm64":"x64",git
     instance_platform:platform,instance_arch:arch,
     ...(platform==="darwin"?{launch_agent_label:"com.chatgpt.codex.fixture01"}:{})
   };
+  if(platform==="darwin"){
+    // Registrar paths are synthetic identity strings; never create or inspect them.
+    const instanceRoot=path.join(os.homedir(),".chatgpt-codex-orchestrator","instances",state.instance_id);
+    Object.assign(state,{
+      installation_id:"fixture-installation",instance_root:instanceRoot,control_repository_id:"123456",
+      chat_route_file:path.join(instanceRoot,"chat-routes.json"),pending_wake_outbox:path.join(instanceRoot,"pending-wakes"),
+      browser_profile:path.join(instanceRoot,"browser-profile"),browser_port:12345
+    });
+  }
   const metadata={
     schema_version:1,instance_id:state.instance_id,trusted_github_username:state.github_login,
     platform,arch,runner_label:state.runner_label,control_repository:state.control_repository,
     launch_agent_label:platform==="darwin"?state.launch_agent_label:null,
-    ...(platform==="darwin"?{sandbox_repository:state.sandbox_repository,role:"control",codex_executable:fs.realpathSync(process.execPath)}: {})
+    ...(platform==="darwin"?{
+      sandbox_repository:state.sandbox_repository,role:"control",codex_executable:fs.realpathSync(process.execPath),
+      installation_id:state.installation_id,instance_root:state.instance_root,control_repository_id:state.control_repository_id,
+      chat_route_file:state.chat_route_file,pending_wake_outbox:state.pending_wake_outbox,
+      browser_profile:state.browser_profile,browser_port:state.browser_port
+    }: {})
   };
   const preserved={
     "instance.json":JSON.stringify(metadata,null,2)+"\n",
@@ -201,6 +215,11 @@ test("macOS runtime refresh keeps native workflow, static identity, registered r
   for(const arch of ["arm64","x64"]) await t.test(arch,t=>{
     const f=fixture(t,{arch});
     f.state.issue_author="Untrusted-Issue-Author";
+    if(arch==="x64"){
+      assertRejected(f,/MACOS-CONTROL-MIGRATION-REQUIRED: Existing macOS Control metadata is incompatible with pinned CHAT-REGISTER identity/);
+      assert.deepEqual(f.adapter.calls,[],"unsupported Darwin x64 must be rejected before any fake Git call");
+      return;
+    }
     const first=f.run();
     assert.equal(first.changed,true);
     assert.notEqual(f.adapter.head(),initialHead);

@@ -4,6 +4,7 @@ import os from "node:os";
 import crypto from "node:crypto";
 import { canonicalInstallationId, defaultLocalPaths } from "./control-render.mjs";
 import { verifyMacosGeneratedRepositoryIdentity, verifyTrustedRecoveryEvidence } from "./macos-trusted-recovery-evidence.mjs";
+import { inspectMacosRunnerPackageLeaves } from "./macos-runner-bootstrap.mjs";
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const PRIVATE_MODES = new Set([0o600, 0o700]);
@@ -91,9 +92,27 @@ function isOpaqueRuntimeBrowserProfileSingleton(relative, stat) {
     && (typeof process.getuid !== "function" || stat.uid === process.getuid());
 }
 
-function safeInstanceTree(fsImpl, root, { strictOwner = false, selectedRunnerWork = false, selectedRuntimeBrowserProfileSingletons = false } = {}) {
+function samePackageLeaf(stat, identity) {
+  return identity && ["dev", "ino", "uid", "gid", "mode", "nlink", "size", "mtimeMs", "ctimeMs"].every(key => stat[key] === identity[key]);
+}
+
+function verifiedRunnerPackageLeaf(relative, stat, packageLeaves) {
+  if (!relative.startsWith(`runner${path.sep}`)) return false;
+  const name = relative.slice("runner".length + 1).split(path.sep).join("/");
+  const leaf = packageLeaves?.leaves.get(name);
+  if (!leaf || !samePackageLeaf(stat, leaf.identity) || stat.nlink !== 1 ||
+      (typeof process.getuid === "function" && stat.uid !== process.getuid())) return false;
+  // The package inspector binds links to exact archive entries. They remain
+  // opaque leaves here; never read, resolve, enumerate, or trust their targets.
+  if (leaf.kind === "link") return stat.isSymbolicLink();
+  return leaf.kind === "generated" && name === "svc.sh" && stat.isFile() && !stat.isSymbolicLink() && (stat.mode & 0o7777) === 0o755;
+}
+
+function safeInstanceTree(fsImpl, root, { strictOwner = false, selectedRunnerWork = false, selectedRuntimeBrowserProfileSingletons = false, selectedRunnerPackage = null, selectedRunnerEnvironment = false } = {}) {
   const pending = [{ file: path.resolve(root), depth: 0 }];
-  let visited = 0;
+  // The separately bounded archive inventory may exceed the unrelated instance
+  // data budget; only its already verified names acquire this selected allowance.
+  let visited = 0, packageVisited = 0;
   while (pending.length) {
     const { file, depth } = pending.pop();
     const relative = path.relative(path.resolve(root), file);
@@ -101,7 +120,9 @@ function safeInstanceTree(fsImpl, root, { strictOwner = false, selectedRunnerWor
     const result = lstat(fsImpl, file);
     if (!result.ok) return { ok: false, reason: result.missing ? "traversal" : "unreadable" };
     const stat = result.stat;
+    const packageLeaf = verifiedRunnerPackageLeaf(relative, stat, selectedRunnerPackage);
     if (stat.isSymbolicLink()) {
+      if (packageLeaf) continue;
       if (selectedRuntimeBrowserProfileSingletons && isOpaqueRuntimeBrowserProfileSingleton(relative, stat)) continue;
       return { ok: false, reason: "symlink" };
     }
@@ -115,15 +136,17 @@ function safeInstanceTree(fsImpl, root, { strictOwner = false, selectedRunnerWor
       let entries;
       try { entries = fsImpl.readdirSync(file, { withFileTypes: true }); }
       catch { return { ok: false, reason: "traversal" }; }
-      visited += entries.length;
-      if (visited > MAX_TREE_ENTRIES) return { ok: false, reason: "tree-bound" };
       for (const entry of entries) {
         const child = path.join(file, entry.name);
         const childRelative = path.relative(path.resolve(root), child);
-        if (!safeTreeBasename(entry.name) || childRelative.startsWith(`..${path.sep}`) || path.isAbsolute(childRelative)) return { ok: false, reason: "traversal" };
+        const packageName = childRelative.startsWith(`runner${path.sep}`) && selectedRunnerPackage?.names.has(childRelative.slice("runner".length + 1).split(path.sep).join("/"));
+        if (packageName) packageVisited++; else visited++;
+        if (visited > MAX_TREE_ENTRIES || packageVisited > (selectedRunnerPackage?.names.size || 0)) return { ok: false, reason: "tree-bound" };
+        if ((!safeTreeBasename(entry.name) && !packageName) || childRelative.startsWith(`..${path.sep}`) || path.isAbsolute(childRelative)) return { ok: false, reason: "traversal" };
         pending.push({ file: child, depth: depth + 1 });
       }
-    } else if (!stat.isFile() || stat.nlink !== 1 || (!passive && !privateMode(stat, false)) || (passive && !ancestorModeAllowed(stat))) {
+    } else if (!stat.isFile() || stat.nlink !== 1 || (!passive && !privateMode(stat, false) && !packageLeaf &&
+        !(selectedRunnerEnvironment && relative === path.join("runner", ".env") && (stat.mode & 0o7777) === 0o400)) || (passive && !ancestorModeAllowed(stat))) {
       return { ok: false, reason: stat.isSymbolicLink() ? "symlink" : "unsafe-leaf" };
     }
   }
@@ -371,7 +394,10 @@ export function inspectMacosSelectedFreshInstance({ state = {}, home = os.homedi
     const stat = lstat(fsImpl, directory);
     if (!check.ok || !stat.ok || !strictOwner(stat.stat)) return selectedResult("CONFLICT", ["private_owned_selected_instance"]);
   }
-  if (!safeInstanceTree(fsImpl, root, { strictOwner: true, selectedRunnerWork: true, selectedRuntimeBrowserProfileSingletons: true }).ok) return selectedResult("CONFLICT", ["safe_selected_instance_tree"]);
+  let selectedRunnerPackage;
+  try { selectedRunnerPackage = inspectMacosRunnerPackageLeaves({ state, home: homePath, fsImpl }); }
+  catch { return selectedResult("CONFLICT", ["safe_selected_instance_tree"]); }
+  if (!safeInstanceTree(fsImpl, root, { strictOwner: true, selectedRunnerWork: true, selectedRuntimeBrowserProfileSingletons: true, selectedRunnerPackage, selectedRunnerEnvironment: true }).ok) return selectedResult("CONFLICT", ["safe_selected_instance_tree"]);
   const expectedControl = path.resolve(defaultLocalPaths({ home: homePath, installationId: state.installation_id, projectKey: state.sandbox_project_key }).control);
   if (state.control_clone_path !== expectedControl || state.chat_route_file !== path.join(root, "chat-routes.json")) return selectedResult("CONFLICT", ["canonical_selected_proof_paths"]);
   const control = selectedJson(fsImpl, path.join(expectedControl, "instance.json"));

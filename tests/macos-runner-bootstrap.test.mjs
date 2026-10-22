@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import { gzipSync } from "node:zlib";
-import { inspectMacosRunnerBootstrap, approveMacosRunnerBootstrap, MACOS_RUNNER_RUNTIME_PATH } from "../src/lib/macos-runner-bootstrap.mjs";
+import { inspectMacosRunnerBootstrap, approveMacosRunnerBootstrap, rebindMacosRunnerConfiguration, MACOS_RUNNER_RUNTIME_PATH } from "../src/lib/macos-runner-bootstrap.mjs";
 
 const hash=bytes=>crypto.createHash("sha256").update(bytes).digest("hex");
 const syntheticHomes=[];
@@ -15,8 +15,9 @@ function nativeBinary(cpu=0x0100000c,type=2) {
 }
 function syntheticArchive(entries,{endMarker=true,trailing=Buffer.alloc(0)}={}) {
   const chunks=[];
-  for(const {name,bytes=Buffer.alloc(0),mode=0o700,type="0",link="",declaredSize=bytes.length,headerPatches=[],corruptChecksum=false} of entries) {
+  for(const {name,bytes=Buffer.alloc(0),mode=0o700,type="0",link="",declaredSize=bytes.length,headerPatches=[],corruptChecksum=false,gnu=false} of entries) {
     const header=Buffer.alloc(512);header.write(name,0,100);header.write(mode.toString(8).padStart(7,"0")+"\0",100);header.write("0000000\0",108);header.write("0000000\0",116);header.write(declaredSize.toString(8).padStart(11,"0")+"\0",124);header.write("00000000000\0",136);header.fill(32,148,156);header[156]=type.charCodeAt(0);header.write(link,157,100);header.write("ustar\0",257);header.write("00",263);
+    if(gnu) { header.write("ustar  \0",257);header.write("00000000001\0",345);header.write("00000000002\0",357); }
     for(const [offset,value] of headerPatches)header[offset]=value;
     const checksum=header.reduce((sum,byte)=>sum+byte,0);header.write(checksum.toString(8).padStart(6,"0")+"\0 ",148);if(corruptChecksum)header[148]^=1;
     chunks.push(header,bytes,Buffer.alloc((512-bytes.length%512)%512));
@@ -61,9 +62,28 @@ function fixture({runtimes=["node20","node24"]}={}) {
   fsImpl.realpathSync=file=>file==="/usr/local/bin/node"?fs.realpathSync(process.execPath):file==="/usr/local/bin/gh"?path.join(home,"gh"):fs.realpathSync(file);
   const replaceArchive=(nextEntries,archiveOptions)=>{
     const nextArchive=syntheticArchive(nextEntries,archiveOptions);fs.writeFileSync(path.join(root,"runner-package.tar.gz"),nextArchive);approval.archive_sha256=hash(nextArchive);
-    approval.binary_manifest=Object.fromEntries(nextEntries.filter(entry=>!entry.type||entry.type==="0").map(entry=>[entry.name,hash(entry.bytes||Buffer.alloc(0))]));writeJson(receipt,approval);writeJson(candidate,approval);
+    approval.binary_manifest=Object.fromEntries(nextEntries.filter(entry=>!entry.type||["0","2"].includes(entry.type)).map(entry=>[entry.name,hash(entry.type==="2"?Buffer.from(entry.link):entry.bytes||Buffer.alloc(0))]));writeJson(receipt,approval);writeJson(candidate,approval);
   };
   return {home,root,runner,executable,codex,state,approval,receipt,candidate,remoteRunner,calls,writeJson,entries,replaceArchive,options:{state,home,platform:"darwin",arch:"arm64",commandRunner,fsImpl}};
+}
+const paxRecord=value=>{let length=Buffer.byteLength(value)+3;while(Buffer.byteLength(`${length} ${value}\n`)!==length)length=Buffer.byteLength(`${length} ${value}\n`);return Buffer.from(`${length} ${value}\n`);};
+const serviceTemplate=Buffer.from('#!/bin/bash\n\nSVC_NAME="{{SvcNameVar}}"\nSVC_NAME=${SVC_NAME// /_}\nSVC_DESCRIPTION="{{SvcDescription}}"\n# Synthetic bundled template; never executed.\nexit 0\n');
+function withOfficialPackage(f,{gnu=false,generated=true}={}) {
+  const entries=[...f.entries,{name:"bin/darwin.svc.sh.template",bytes:serviceTemplate,mode:0o600}];
+  for(const runtime of ["node20","node24"].filter(name=>f.entries.some(entry=>entry.name===`externals/${name}/bin/node`))) {
+    for(const [name,contents] of [["npm/bin/npm-cli.js","#!/usr/bin/env node\n// npm\n"],["npm/bin/npx-cli.js","#!/usr/bin/env node\n// npx\n"],["npm/node_modules/@npmcli/arborist/package.json",'{"name":"@npmcli/arborist"}\n'],["corepack/dist/corepack.js","#!/usr/bin/env node\n// corepack\n"]])entries.push({name:`externals/${runtime}/lib/node_modules/${name}`,bytes:Buffer.from(contents),mode:0o600});
+    for(const [name,target] of [["npm","npm/bin/npm-cli.js"],["npx","npm/bin/npx-cli.js"],["corepack","corepack/dist/corepack.js"]])entries.push({name:`externals/${runtime}/bin/${name}`,type:"2",link:`../lib/node_modules/${target}`,mode:0o777});
+  }
+  for(const entry of entries.slice(f.entries.length)) {
+    const file=path.join(f.runner,entry.name);fs.mkdirSync(path.dirname(file),{recursive:true,mode:0o700});
+    if(entry.type==="2") { fs.symlinkSync(entry.link,file);if(typeof fs.lchmodSync==="function")fs.lchmodSync(file,0o777); }else fs.writeFileSync(file,entry.bytes,{mode:entry.mode});
+  }
+  if(generated) {
+    const repository=f.state.control_repository.replace(/[^0-9a-zA-Z._-]/g,"-");
+    const contents=serviceTemplate.toString().replaceAll("{{SvcDescription}}",`GitHub Actions Runner (${repository}.${f.state.runner_label})`).replaceAll("{{SvcNameVar}}",`actions.runner.${repository}.${f.state.runner_label}`);
+    fs.writeFileSync(path.join(f.runner,"svc.sh"),contents,{mode:0o755});
+  }
+  const archiveEntries=entries.map(entry=>({...entry,gnu}));f.replaceArchive(archiveEntries);return archiveEntries;
 }
 function approveEnvironment(f,contents) {
   const file=path.join(f.runner,".env");
@@ -393,4 +413,106 @@ test("extra local runner and unsafe selected HOME ancestors are refused without 
   assert.equal(inspectMacosRunnerBootstrap({...f.options,commandRunner:extra}).error_id,"MACOS-RUNNER-PROCESS-CONFLICT");
   const linked=path.join(f.home,"linked-home");fs.symlinkSync(f.home,linked);assert.equal(inspectMacosRunnerBootstrap({...f.options,home:linked}).error_id,"MACOS-RUNNER-PATH");
   const stat=fs.lstatSync(f.home);fs.chmodSync(f.home,0o777);assert.equal(inspectMacosRunnerBootstrap(f.options).error_id,"MACOS-RUNNER-PATH");assert.equal(fs.lstatSync(f.home).mode&0o777,0o777);fs.chmodSync(f.home,stat.mode&0o777);
+});
+
+test("official GNU and PAX macOS bundles admit only archive-bound npm npx corepack leaves",()=>{
+  for(const kind of ["GNU","PAX","GNU-long-link"]) {
+    const f=fixture(),entries=withOfficialPackage(f,{gnu:kind!=="PAX"}),link=entries.find(entry=>entry.name==="externals/node24/bin/npm");
+    if(kind==="PAX")f.replaceArchive([{name:"GlobalHead",type:"g",bytes:paxRecord("mtime=1728000000.123")},...entries.flatMap(entry=>[{name:"PaxHeader",type:"x",bytes:Buffer.concat([paxRecord(`path=${entry.name}`),paxRecord("uid=1000"),paxRecord("gid=20"),paxRecord("uname=runner"),paxRecord("gname=staff"),...(entry.type==="2"?[paxRecord(`linkpath=${entry.link}`)]:[])])},entry])]);
+    if(kind==="GNU-long-link")f.replaceArchive(entries.flatMap(entry=>entry===link?[{name:"././@LongLink",type:"L",bytes:Buffer.from(entry.name+"\0"),gnu:true},{name:"././@LongLink",type:"K",bytes:Buffer.from(entry.link+"\0"),gnu:true},entry]:[entry]));
+    const fsImpl=Object.create(f.options.fsImpl),links=new Set(entries.filter(entry=>entry.type==="2").map(entry=>path.join(f.runner,entry.name)));
+    fsImpl.openSync=(file,...args)=>{assert.equal(links.has(file),false,"package links must never be opened");return fs.openSync(file,...args);};
+    fsImpl.realpathSync=file=>{assert.equal(links.has(file),false,"package links must never become canonical identity");return f.options.fsImpl.realpathSync(file);};
+    const before=fs.readFileSync(f.receipt),result=inspectMacosRunnerBootstrap({...f.options,fsImpl});
+    assert.equal(result.status,"PASS",kind);assert.deepEqual(fs.readFileSync(f.receipt),before);
+    assert.equal(f.calls.some(({command})=>command.startsWith(f.runner)),false);
+  }
+});
+
+test("package links reject absolute escaping cross-runtime aliases chains extra leaves and changed targets",()=>{
+  for(const target of ["/foreign/node","../../../../foreign","../../node20/lib/node_modules/npm/bin/npm-cli.js","../../node24/lib/node_modules/npm/bin/npm-cli.js","../bin/node","../../../bin/Runner.Listener","../lib/node_modules/npm/bin/missing.js","../lib/node_modules/npm/bin/../bin/npm-cli.js/child"]) {
+    const f=fixture(),entries=withOfficialPackage(f),name="externals/node24/bin/npm";
+    f.replaceArchive(entries.map(entry=>entry.name===name?{...entry,link:target}:entry));
+    fs.unlinkSync(path.join(f.runner,name));fs.symlinkSync(target,path.join(f.runner,name));
+    assert.equal(inspectMacosRunnerBootstrap(f.options).error_id,"MACOS-RUNNER-PACKAGE",target);
+  }
+  for(const kind of ["different-target","extra-link","target-bytes","target-hardlink","target-symlink","link-chain","link-child","metadata-on-file","global-path","dangling-long-link"]) {
+    const f=fixture(),entries=withOfficialPackage(f),link="externals/node24/bin/npm",file=path.join(f.runner,link),target=path.join(f.runner,"externals/node24/lib/node_modules/npm/bin/npm-cli.js");
+    if(kind==="different-target"){fs.unlinkSync(file);fs.symlinkSync("../lib/node_modules/npm/bin/npx-cli.js",file);}
+    if(kind==="extra-link")fs.symlinkSync("../lib/node_modules/npm/bin/npm-cli.js",path.join(f.runner,"externals/node24/bin/unapproved"));
+    if(kind==="target-bytes")fs.writeFileSync(target,"changed");
+    if(kind==="target-hardlink")fs.linkSync(target,path.join(f.home,"foreign-identity-alias"));
+    if(kind==="target-symlink"){fs.unlinkSync(target);fs.symlinkSync("npx-cli.js",target);}
+    if(kind==="link-chain")f.replaceArchive(entries.map(entry=>entry.name.endsWith("npm/bin/npm-cli.js")?{name:entry.name,type:"2",link:"npx-cli.js",mode:0o777}:entry));
+    if(kind==="link-child")f.replaceArchive([...entries,{name:`${link}/child`,bytes:Buffer.from("bad")}]);
+    if(kind==="metadata-on-file")f.replaceArchive([...entries,{name:"PaxHeader",type:"x",bytes:paxRecord("linkpath=../lib/node_modules/npm/bin/npm-cli.js")},{name:"bin/extra",bytes:Buffer.from("bad")}]);
+    if(kind==="global-path")f.replaceArchive([{name:"GlobalHead",type:"g",bytes:paxRecord("path=bin/Runner.Listener")},...entries]);
+    if(kind==="dangling-long-link")f.replaceArchive([...entries,{name:"././@LongLink",type:"K",bytes:Buffer.from("missing\0")}]);
+    assert.notEqual(inspectMacosRunnerBootstrap(f.options).status,"PASS",kind);
+  }
+});
+
+test("generated Darwin svc is exact independently verified template output with only mode755 exemption",()=>{
+  const valid=fixture();withOfficialPackage(valid);const file=path.join(valid.runner,"svc.sh"),before=fs.readFileSync(file),identity=fs.lstatSync(file);
+  assert.equal(inspectMacosRunnerBootstrap(valid.options).status,"PASS");assert.deepEqual(fs.readFileSync(file),before);assert.equal(fs.lstatSync(file).ino,identity.ino);assert.equal(fs.lstatSync(file).mode&0o7777,0o755);
+  for(const kind of ["forged","wrong-name","wrong-description","link","hardlink","mode700","mode775","template-change","extra-generated","archive-generated","no-template","late-change"]) {
+    const f=fixture(),entries=withOfficialPackage(f),svc=path.join(f.runner,"svc.sh");let commandRunner=f.options.commandRunner;
+    if(kind==="forged")fs.writeFileSync(svc,"#!/bin/sh\necho forged\n");
+    if(kind==="wrong-name")fs.writeFileSync(svc,fs.readFileSync(svc,"utf8").replace("actions.runner.owner-","actions.runner.foreign-"));
+    if(kind==="wrong-description")fs.writeFileSync(svc,fs.readFileSync(svc,"utf8").replace("GitHub Actions Runner (owner-","GitHub Actions Runner (foreign-"));
+    if(kind==="link"){fs.renameSync(svc,path.join(f.home,"svc-target"));fs.symlinkSync(path.join(f.home,"svc-target"),svc);}
+    if(kind==="hardlink")fs.linkSync(svc,path.join(f.home,"svc-alias"));
+    if(kind==="mode700")fs.chmodSync(svc,0o700);if(kind==="mode775")fs.chmodSync(svc,0o775);
+    if(kind==="template-change")fs.appendFileSync(path.join(f.runner,"bin/darwin.svc.sh.template"),"# changed\n");
+    if(kind==="extra-generated")fs.writeFileSync(path.join(f.runner,"runsvc.sh"),"#!/bin/sh\n",{mode:0o755});
+    if(kind==="archive-generated")f.replaceArchive([...entries,{name:"svc.sh",bytes:fs.readFileSync(svc),mode:0o755}]);
+    if(kind==="no-template")f.replaceArchive(entries.filter(entry=>entry.name!=="bin/darwin.svc.sh.template"));
+    if(kind==="late-change")commandRunner=(command,args)=>{const result=f.options.commandRunner(command,args);if(command===f.codex)fs.appendFileSync(svc,"# late\n");return result;};
+    assert.notEqual(inspectMacosRunnerBootstrap({...f.options,commandRunner}).status,"PASS",kind);
+    assert.equal(f.calls.some(({command})=>command===svc),false);
+  }
+});
+
+test("runner configuration is rebound after every identity callback using nofollow inode and approved bytes",()=>{
+  const good=fixture(),file=path.join(good.runner,".runner"),fsImpl=Object.create(good.options.fsImpl);let opens=0;
+  fsImpl.openSync=(target,flags,...args)=>{if(target===file){opens++;assert.ok(flags&fs.constants.O_NOFOLLOW);assert.ok(flags&fs.constants.O_NONBLOCK);}return fs.openSync(target,flags,...args);};
+  const result=inspectMacosRunnerBootstrap({...good.options,fsImpl});assert.equal(result.status,"PASS");assert.equal(result.config_identity.ino,fs.lstatSync(file).ino);assert.equal(opens,2);
+  for(const callback of ["github","codex"])for(const kind of ["bytes","same-bytes-inode","symlink","hardlink","remote-identity"]) {
+    const f=fixture(),config=path.join(f.runner,".runner"),original=fs.readFileSync(config);let changed=false;
+    const commandRunner=(command,args)=>{
+      const response=f.options.commandRunner(command,args);
+      if(!changed&&(callback==="github"&&command==="gh"&&args.at(-1).includes("/actions/runners")||callback==="codex"&&command===f.codex)) {
+        changed=true;
+        if(kind==="same-bytes-inode"||kind==="symlink"){const backup=path.join(f.home,"config-original");fs.renameSync(config,backup);if(kind==="symlink")fs.symlinkSync(backup,config);else fs.writeFileSync(config,original,{mode:0o600});}
+        if(kind==="bytes")fs.appendFileSync(config," ");
+        if(kind==="hardlink")fs.linkSync(config,path.join(f.home,"config-alias"));
+        if(kind==="remote-identity")f.writeJson(config,{...JSON.parse(original),agentId:999});
+      }
+      return response;
+    };
+    assert.notEqual(inspectMacosRunnerBootstrap({...f.options,commandRunner}).status,"PASS",`${callback}: ${kind}`);assert.equal(changed,true);
+  }
+});
+
+test("runner configuration rejects nofollow open and in-read replacement races",()=>{
+  for(const kind of ["symlink-on-open","same-bytes-during-read"]) {
+    const f=fixture(),file=path.join(f.runner,".runner"),original=fs.readFileSync(file),fsImpl=Object.create(f.options.fsImpl);let tracked,changed=false;
+    const replace=()=>{fs.renameSync(file,path.join(f.home,"old-config"));if(kind==="symlink-on-open")fs.symlinkSync(path.join(f.home,"old-config"),file);else fs.writeFileSync(file,original,{mode:0o600});changed=true;};
+    fsImpl.openSync=(target,flags,...args)=>{if(target===file){if(kind==="symlink-on-open"&&!changed)replace();tracked=fs.openSync(target,flags,...args);return tracked;}return fs.openSync(target,flags,...args);};
+    fsImpl.readSync=(fd,...args)=>{const count=fs.readSync(fd,...args);if(fd===tracked&&!changed)replace();return count;};
+    assert.equal(inspectMacosRunnerBootstrap({...f.options,fsImpl}).error_id,"MACOS-RUNNER-CONFIG",kind);assert.equal(changed,true);
+  }
+});
+
+test("final start configuration rebind has no identity callbacks and rejects same-name replacement",()=>{
+  for(const kind of ["stable","same-bytes","changed-bytes","symlink","hardlink"]) {
+    const f=fixture(),approval=inspectMacosRunnerBootstrap(f.options),file=path.join(f.runner,".runner"),bytes=fs.readFileSync(file),calls=f.calls.length;
+    assert.equal(approval.status,"PASS");
+    if(kind==="same-bytes"||kind==="symlink"){fs.renameSync(file,path.join(f.home,"old-configuration"));if(kind==="symlink")fs.symlinkSync(path.join(f.home,"old-configuration"),file);else fs.writeFileSync(file,bytes,{mode:0o600});}
+    if(kind==="changed-bytes")fs.appendFileSync(file," ");
+    if(kind==="hardlink")fs.linkSync(file,path.join(f.home,"configuration-alias"));
+    const rebind=()=>rebindMacosRunnerConfiguration({state:f.state,home:f.home,fsImpl:f.options.fsImpl,approval});
+    if(kind==="stable")assert.equal(rebind(),true);else assert.throws(rebind,error=>error.code==="MACOS-RUNNER-CONFIG",kind);
+    assert.equal(f.calls.length,calls,"the final binding must never introduce another mutable callback");
+  }
 });

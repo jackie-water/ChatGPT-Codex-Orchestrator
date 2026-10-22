@@ -99,8 +99,12 @@ const PACKAGE_FILE_BOUND=256*1024*1024, PACKAGE_TOTAL_BOUND=512*1024*1024;
 function samePackageFile(a,b) {
   return ["dev","ino","uid","gid","mode","nlink","size","mtimeMs","ctimeMs"].every(key=>a[key]===b[key]);
 }
-function readPackageFile(file,options,{bound=PACKAGE_FILE_BOUND,executable}={}) {
+function packageIdentity(stat) {
+  return Object.fromEntries(["dev","ino","uid","gid","mode","nlink","size","mtimeMs","ctimeMs"].map(key=>[key,stat[key]]));
+}
+function readPackageFile(file,options,{bound=PACKAGE_FILE_BOUND,executable,withIdentity=false}={}) {
   const fsImpl=options.fsImpl||fs;
+  if(!fs.constants.O_NOFOLLOW)reject("MACOS-RUNNER-PACKAGE","No-follow package inspection is unavailable");
   checkPath(file,{...options,executable:executable===true});
   const before=fsImpl.lstatSync(file);
   if(!Number.isSafeInteger(before.size)||before.size<0||before.size>bound)reject("MACOS-RUNNER-PACKAGE","Runner package file exceeds its inspection bound");
@@ -117,8 +121,44 @@ function readPackageFile(file,options,{bound=PACKAGE_FILE_BOUND,executable}={}) 
     }
     if(fsImpl.readSync(fd,Buffer.alloc(1),0,1,null)!==0||!samePackageFile(opened,fsImpl.fstatSync(fd))||!samePackageFile(opened,fsImpl.lstatSync(file)))reject("MACOS-RUNNER-PACKAGE","Runner package changed during inspection");
     checkPath(file,options);
-    return bytes;
+    return withIdentity?{bytes,identity:packageIdentity(opened)}:bytes;
   } finally { if(fd!==undefined)fsImpl.closeSync(fd); }
+}
+function runnerConfiguration(root,options) {
+  try {
+    const snapshot=readPackageFile(path.join(root,".runner"),options,{bound:1024*1024,executable:false,withIdentity:true});
+    return {...snapshot,config:JSON.parse(snapshot.bytes.toString("utf8")),digest:sha(snapshot.bytes)};
+  } catch { reject("MACOS-RUNNER-CONFIG","Runner configuration is not a stable private no-follow regular file"); }
+}
+export function rebindMacosRunnerConfiguration({state={},home=process.env.HOME||os.homedir(),fsImpl=fs,approval}={}) {
+  const root=macosRunnerApprovalRequest({state,home}).runner_path;
+  if(root!==state.runner_path||!approval?.config_identity||!HASH.test(String(approval.config_sha256||"")))reject("MACOS-RUNNER-CONFIG","Exact inspected configuration identity is required at the start boundary");
+  const current=runnerConfiguration(root,{home,fsImpl});
+  if(!samePackageFile(approval.config_identity,current.identity)||current.digest!==approval.config_sha256||String(current.config.agentId)!==String(approval.runner_id)||current.config.agentName!==state.runner_label||current.config.gitHubUrl!==`https://github.com/${state.control_repository}`)reject("MACOS-RUNNER-CONFIG","Runner configuration drifted at the final start boundary");
+  return true;
+}
+function packageLink(file,relative,layout,options) {
+  const fsImpl=options.fsImpl||fs,expected=layout.links.get(relative);
+  checkPath(path.dirname(file),{...options,directory:true});
+  const before=fsImpl.lstatSync(file);
+  if(!before.isSymbolicLink()||!owned(before)||before.nlink!==1||(before.mode&0o7777)!==expected.mode||fsImpl.readlinkSync(file)!==expected.target||!samePackageFile(before,fsImpl.lstatSync(file)))reject("MACOS-RUNNER-PACKAGE","Runner package link differs from its exact retained archive leaf");
+  return packageIdentity(before);
+}
+function generatedService(root,layout,state,options) {
+  const fsImpl=options.fsImpl||fs,file=path.join(root,"svc.sh");
+  try { fsImpl.lstatSync(file); } catch(error) { if(error.code==="ENOENT")return null;throw error; }
+  if(Object.hasOwn(layout.manifest,"svc.sh")||!Object.hasOwn(layout.manifest,"bin/darwin.svc.sh.template"))reject("MACOS-RUNNER-PACKAGE","Generated service must come only from the retained Darwin service template");
+  const template=readPackageFile(path.join(root,"bin","darwin.svc.sh.template"),options,{bound:1024*1024});
+  if(sha(template)!==layout.manifest["bin/darwin.svc.sh.template"])reject("MACOS-RUNNER-PACKAGE","Darwin service template differs from retained archive");
+  let text;try { text=new TextDecoder("utf-8",{fatal:true}).decode(template); }catch { reject("MACOS-RUNNER-PACKAGE","Darwin service template is not UTF-8"); }
+  const repository=String(state.control_repository||"").replace(/[^0-9a-zA-Z._-]/g,"-"),name=`actions.runner.${repository}.${state.runner_label}`;
+  // Longer official names contain a random suffix and cannot be approved as a
+  // deterministic generated leaf. No service script is executed here.
+  if(!repository||!/^[A-Za-z0-9-]+$/.test(String(state.runner_label||""))||name.length>150||!text.includes("{{SvcDescription}}")||!text.includes("{{SvcNameVar}}"))reject("MACOS-RUNNER-PACKAGE","Darwin service substitutions are not deterministic selected identities");
+  const expected=Buffer.from(text.replaceAll("{{SvcDescription}}",`GitHub Actions Runner (${repository}.${state.runner_label})`).replaceAll("{{SvcNameVar}}",name));
+  const snapshot=readPackageFile(file,{...options,privateLeaf:false},{bound:1024*1024,executable:true,withIdentity:true});
+  if((snapshot.identity.mode&0o7777)!==0o755||!snapshot.bytes.equals(expected))reject("MACOS-RUNNER-PACKAGE","Generated svc.sh is not the exact owned deterministic 755 service script");
+  return snapshot.identity;
 }
 function inspectRunnerEnvironment(root,options) {
   // Runner.Listener imports .env itself. Only these inert, exact locale values
@@ -151,8 +191,9 @@ function approvedRunnerEnvironment(root,approval,options) {
   if(environment.digest!==approval.env_sha256)reject("MACOS-RUNNER-ENV","Runner environment differs from its exact approval");
   return environment;
 }
-function verifyPackagePayload(root,layout,options) {
+function verifyPackagePayload(root,layout,options,state) {
   const {manifest,directories,executables}=layout,found=[];
+  const leaves=new Map();
   // These are generated runner state, not release payload. Never descend into
   // action workspaces or diagnostic logs when binding the installed package.
   const mutableFiles=new Set([".runner",".credentials",".credentials_rsaparams",".env",".path"]),mutableDirectories=new Set(["_work","_diag"]);
@@ -169,11 +210,17 @@ function verifyPackagePayload(root,layout,options) {
         continue;
       }
       if(dir===root&&mutableDirectories.has(entry)) { checkPath(file,{...options,directory:true});continue; }
+      if(dir===root&&entry==="svc.sh"&&!Object.hasOwn(manifest,relative)) {
+        leaves.set(relative,{kind:"generated",identity:generatedService(root,layout,state,options)});continue;
+      }
       if(directories.has(relative)) walk(file,depth+1);
       else {
         if(!Object.hasOwn(manifest,relative))reject("MACOS-RUNNER-PACKAGE","Unapproved runner package file or directory");
-        const bytes=readPackageFile(file,options,{executable:executables.has(relative)});total+=bytes.length;
-        if(total>PACKAGE_TOTAL_BOUND||sha(bytes)!==manifest[relative])reject("MACOS-RUNNER-PACKAGE","Unapproved or modified runner package dependency");
+        if(layout.links.has(relative))leaves.set(relative,{kind:"link",identity:packageLink(file,relative,layout,options)});
+        else {
+          const bytes=readPackageFile(file,options,{executable:executables.has(relative)});total+=bytes.length;
+          if(total>PACKAGE_TOTAL_BOUND||sha(bytes)!==manifest[relative])reject("MACOS-RUNNER-PACKAGE","Unapproved or modified runner package dependency");
+        }
         found.push(relative);
       }
     }
@@ -182,6 +229,7 @@ function verifyPackagePayload(root,layout,options) {
   if(found.sort().join("\n")!==Object.keys(manifest).sort().join("\n"))reject("MACOS-RUNNER-PACKAGE","Runner package manifest has missing or extra files");
   // Empty official directories also belong to the inspected archive layout.
   for(const directory of directories)checkPath(path.join(root,directory),{...options,directory:true});
+  return leaves;
 }
 function arm64MachO(bytes) {
   if(bytes.length<32) return false;
@@ -192,8 +240,8 @@ function arm64MachO(bytes) {
 function archiveBinaryManifest(archive) {
   if(archive.length>PACKAGE_FILE_BOUND) reject("MACOS-RUNNER-PACKAGE","Runner archive exceeds its inspection bound");
   let tar; try { tar=gunzipSync(archive,{maxOutputLength:PACKAGE_TOTAL_BOUND}); } catch { reject("MACOS-RUNNER-PACKAGE","Runner package is not a bounded readable official gzip archive"); }
-  const manifest=Object.create(null),directories=new Set(),executables=new Set(),nativeExecutables=new Set(),entries=new Map();
-  let offset=0,nextName=null,paxName=null,count=0,ended=false;
+  const manifest=Object.create(null),directories=new Set(),executables=new Set(),nativeExecutables=new Set(),entries=new Map(),links=new Map();
+  let offset=0,nextName=null,nextLink=null,pax=null,count=0,ended=false;
   const field=bytes=>{
     const end=bytes.indexOf(0),value=end<0?bytes:bytes.subarray(0,end);
     if(end>=0&&bytes.subarray(end).some(byte=>byte!==0))reject("MACOS-RUNNER-PACKAGE","Archive field has hidden trailing data");
@@ -207,7 +255,7 @@ function archiveBinaryManifest(archive) {
     const parts=name.split("/");
     if(name.length>4096||parts.length>32||parts.some(part=>!part||part==="."||part===".."||/[^A-Za-z0-9_.+@-]/.test(part)))reject("MACOS-RUNNER-PACKAGE","Archive path is not a canonical private package path");
     if((parts.length>1||type==="5")&&!["bin","externals"].includes(parts[0]))reject("MACOS-RUNNER-PACKAGE","Archive has an unapproved payload root");
-    if(parts[0].startsWith(".")||["_work","_diag"].includes(parts[0]))reject("MACOS-RUNNER-PACKAGE","Archive collides with generated runner state");
+    if(parts[0].startsWith(".")||["_work","_diag","svc.sh"].includes(parts[0]))reject("MACOS-RUNNER-PACKAGE","Archive collides with generated runner state");
     return name;
   };
   while(offset+512<=tar.length) {
@@ -223,48 +271,67 @@ function archiveBinaryManifest(archive) {
     const size=octal(header.subarray(124,136)),type=String.fromCharCode(header[156]||48),payload=tar.subarray(offset,offset+size);
     if(size>PACKAGE_FILE_BOUND||offset+Math.ceil(size/512)*512>tar.length) reject("MACOS-RUNNER-PACKAGE","Truncated or unbounded runner archive file");
     offset+=Math.ceil(size/512)*512;
-    if(type==="L") {
-      if(nextName!==null||paxName!==null||size>4096)reject("MACOS-RUNNER-PACKAGE","Unbounded or ambiguous archive long name");
-      nextName=field(payload);continue;
+    if(type==="L"||type==="K") {
+      if(pax!==null||size>4096||(type==="L"?nextName:nextLink)!==null)reject("MACOS-RUNNER-PACKAGE","Unbounded or ambiguous archive long name or link");
+      if(type==="L")nextName=field(payload);else nextLink=field(payload);continue;
     }
-    if(type==="x") {
-      if(nextName!==null||paxName!==null||size>16384)reject("MACOS-RUNNER-PACKAGE","Unbounded or ambiguous archive extended header");
+    if(type==="x"||type==="g") {
+      if(nextName!==null||nextLink!==null||pax!==null||size>16384)reject("MACOS-RUNNER-PACKAGE","Unbounded or ambiguous archive extended header");
       let cursor=0;
-      const keys=new Set();
+      const keys=new Set(),values=Object.create(null);
       while(cursor<payload.length) {
         const space=payload.indexOf(32,cursor),digitBytes=payload.subarray(cursor,space),digits=digitBytes.toString("ascii"),length=Number(digits);
         if(space<cursor||digitBytes.some(byte=>byte<48||byte>57)||!/^[1-9][0-9]*$/.test(digits)||!Number.isSafeInteger(length)||length<=space-cursor+2||cursor+length>payload.length||payload[cursor+length-1]!==10) reject("MACOS-RUNNER-PACKAGE","Malformed archive extended header");
         const record=field(payload.subarray(space+1,cursor+length-1)),equals=record.indexOf("="),key=record.slice(0,equals),value=record.slice(equals+1);
-        if(equals<1||keys.has(key)||!["path","mtime","atime","ctime","uid","gid","uname","gname"].includes(key)||/[\r\n\0]/.test(value))reject("MACOS-RUNNER-PACKAGE","Uninspected archive extended-header override");
-        keys.add(key);if(key==="path")paxName=value;
+        if(equals<1||keys.has(key)||!["path","linkpath","mtime","atime","ctime","uid","gid","uname","gname"].includes(key)||/[\r\n\0]/.test(value)||(type==="g"&&["path","linkpath"].includes(key)))reject("MACOS-RUNNER-PACKAGE","Uninspected archive extended-header override");
+        if(["uid","gid"].includes(key)&&!/^\d{1,16}$/.test(value)||["mtime","atime","ctime"].includes(key)&&!/^\d{1,16}(?:\.\d{1,9})?$/.test(value))reject("MACOS-RUNNER-PACKAGE","Invalid inert archive metadata");
+        keys.add(key);values[key]=value;
         cursor+=length;
       }
+      if(type==="x")pax=values;
       continue;
     }
-    const prefix=field(header.subarray(345,500));
-    if(!["0","5"].includes(type))reject("MACOS-RUNNER-PACKAGE","Archive contains a link or unapproved special file");
-    if(field(header.subarray(157,257))!=="")reject("MACOS-RUNNER-PACKAGE","Archive regular entry contains an unexpected link target");
-    const name=canonicalName(paxName??nextName??[prefix,field(header.subarray(0,100))].filter(Boolean).join("/"),type);nextName=null;paxName=null;
+    // GNU uses this part of its header for timestamps, sparse descriptors and
+    // an extension flag, rather than the POSIX ustar pathname prefix.
+    const gnu=header.subarray(257,263).equals(Buffer.from("ustar ","ascii"));
+    if(gnu&&(header.subarray(386,495).some(byte=>byte!==0)||header[482]!==0))reject("MACOS-RUNNER-PACKAGE","GNU sparse or extended payload is unapproved");
+    const prefix=gnu?"":field(header.subarray(345,500));
+    if(!["0","5","2"].includes(type))reject("MACOS-RUNNER-PACKAGE","Archive contains a hard link or unapproved special file");
+    const link=pax?.linkpath??nextLink??field(header.subarray(157,257));
+    if(type!=="2"&&link!=="")reject("MACOS-RUNNER-PACKAGE","Archive regular entry contains an unexpected link target");
+    const name=canonicalName(pax?.path??nextName??[prefix,field(header.subarray(0,100))].filter(Boolean).join("/"),type);nextName=null;nextLink=null;pax=null;
     const mode=octal(header.subarray(100,108));
-    if((mode&0o7022)!==0||mode>0o777||type==="5"&&size!==0)reject("MACOS-RUNNER-PACKAGE","Archive entry has unsafe mode or directory contents");
+    if((mode&(type==="2"?0o7000:0o7022))!==0||mode>0o777||type!=="0"&&size!==0)reject("MACOS-RUNNER-PACKAGE","Archive entry has unsafe mode or special-file contents");
     if(name==="")continue;
-    if(entries.has(name)||type==="0"&&directories.has(name))reject("MACOS-RUNNER-PACKAGE","Archive repeats or aliases a package path");
+    if(entries.has(name)||type!=="5"&&directories.has(name))reject("MACOS-RUNNER-PACKAGE","Archive repeats or aliases a package path");
     const parts=name.split("/");
     for(let index=1;index<parts.length;index++) {
       const parent=parts.slice(0,index).join("/");
-      if(entries.get(parent)==="0")reject("MACOS-RUNNER-PACKAGE","Archive path traverses a regular file");
+      if(entries.has(parent)&&entries.get(parent)!=="5")reject("MACOS-RUNNER-PACKAGE","Archive path traverses a package leaf");
       directories.add(parent);
     }
     entries.set(name,type);
     if(type==="5")directories.add(name);
-    else {
+    else if(type==="2") {
+      const runtime=name.match(/^(externals\/node[1-9][0-9]*)\/(?:bin|lib\/node_modules)\//)?.[1];
+      if(!runtime||!link||path.posix.isAbsolute(link)||link.length>4096||link.split("/").some(part=>!part||/[^A-Za-z0-9_.+@-]/.test(part)))reject("MACOS-RUNNER-PACKAGE","Archive link is not a bounded relative action-package leaf");
+      let depth=path.posix.dirname(name).split("/").length-runtime.split("/").length;
+      for(const component of link.split("/")) {
+        if(component==="..") { if(depth===0)reject("MACOS-RUNNER-PACKAGE","Archive link traverses outside its own action package");depth--; }
+        else if(component!==".")depth++;
+      }
+      const target=path.posix.normalize(path.posix.join(path.posix.dirname(name),link));
+      if(!target.startsWith(`${runtime}/lib/node_modules/`))reject("MACOS-RUNNER-PACKAGE","Archive link escapes its own action package or aliases executable identity");
+      links.set(name,{target:link,canonicalTarget:target,mode});manifest[name]=sha(Buffer.from(link));
+    } else {
       if(Object.keys(manifest).length>=8192)reject("MACOS-RUNNER-PACKAGE","Runner package file inventory exceeds its bound");
       const magic=payload.length>=4?payload.readUInt32LE(0):0;
       if([0xfeedface,0xfeedfacf,0xcefaedfe,0xcffaedfe,0xcafebabe,0xbebafeca,0xcafebabf,0xbfbafeca].includes(magic)&&(payload.length<32||magic!==0xfeedfacf||payload.readUInt32LE(4)!==0x0100000c))reject("MACOS-RUNNER-PACKAGE","Official package contains a nonnative or uninspected native dependency");
       manifest[name]=sha(payload);if(mode&0o111)executables.add(name);if(arm64MachO(payload))nativeExecutables.add(name);
     }
   }
-  if(!ended||nextName!==null||paxName!==null||!nativeExecutables.has("bin/Runner.Listener")||!executables.has("bin/Runner.Listener"))reject("MACOS-RUNNER-PACKAGE","Official archive lacks a complete native runner payload");
+  if(!ended||nextName!==null||nextLink!==null||pax!==null||Object.keys(manifest).length>8192||!nativeExecutables.has("bin/Runner.Listener")||!executables.has("bin/Runner.Listener"))reject("MACOS-RUNNER-PACKAGE","Official archive lacks a complete bounded native runner payload");
+  for(const link of links.values())if(entries.get(link.canonicalTarget)!=="0"||nativeExecutables.has(link.canonicalTarget))reject("MACOS-RUNNER-PACKAGE","Archive link target is not a direct regular nonidentity package payload");
   const runtimes=[...directories].filter(name=>/^externals\/node[1-9][0-9]*$/.test(name));
   if(runtimes.length===0)reject("MACOS-RUNNER-PACKAGE","Official archive lacks bundled JavaScript action runtimes");
   for(const runtime of runtimes) {
@@ -274,12 +341,34 @@ function archiveBinaryManifest(archive) {
     // shape too; a script or wrong-architecture replacement is not a runtime.
     if(entries.get(node)!=="0")reject("MACOS-RUNNER-PACKAGE","Official action runtime is not a regular executable");
   }
-  return {manifest,directories,executables};
+  return {manifest,directories,executables,links};
 }
 export function macosRunnerApprovalRequest({state={},home=process.env.HOME||os.homedir()}={}) {
   const root=path.join(path.resolve(home),".chatgpt-codex-orchestrator","instances",canonicalInstallationId(state.installation_id));
   return {action_id:"provision_macos_runner",receipt_path:path.join(root,"macos-runner-approval.json"),candidate_path:path.join(root,"macos-runner-candidate.json"),runner_path:path.join(root,"runner"),runner_executable:path.join(root,"runner","bin","Runner.Listener"),archive_path:path.join(root,"runner-package.tar.gz"),mutations_performed:false,
     action:"Separately approve the exact official actions/runner macOS ARM64 release, acquire and register one isolated repository runner, and record the private approval bound to this installation. This adapter never downloads, extracts, configures, or registers a runner. Install and start require further separate approvals."};
+}
+
+// A selected recovery scan can classify these inert leaves without treating a
+// package receipt, a link target, or a historical instance as execution identity.
+// Full startup approval still requires the independent remote checks below.
+export function inspectMacosRunnerPackageLeaves({state={},home=process.env.HOME||os.homedir(),fsImpl=fs}={}) {
+  const request=macosRunnerApprovalRequest({state,home}),options={home,fsImpl};
+  const present=file=>{try {fsImpl.lstatSync(file);return true;}catch(error){if(error.code==="ENOENT")return false;throw error;}};
+  const archivePresent=present(request.archive_path),receiptPresent=present(request.receipt_path),candidatePresent=present(request.candidate_path);
+  if(!archivePresent&&!receiptPresent&&!candidatePresent)return null;
+  if(!archivePresent||!receiptPresent&&!candidatePresent)reject("MACOS-RUNNER-PACKAGE","Selected package has incomplete retained archive evidence");
+  checkHomeAncestors(home,fsImpl);
+  const root=path.dirname(request.receipt_path),short=canonicalInstallationId(state.installation_id);
+  if(state.instance_id!==short||state.instance_root!==root||state.runner_path!==request.runner_path||state.runner_label!==`codex-orchestrator-${short}`||state.control_repository!==`${state.github_login}/chatgpt-codex-orchestrator-control-${short}`)reject("MACOS-RUNNER-PACKAGE","Selected package evidence is not canonical installation identity");
+  const approval=json(receiptPresent?request.receipt_path:request.candidate_path,options);
+  const exact={installation_id:state.installation_id,instance_id:short,instance_path:root,runner_path:request.runner_path,runner_executable:request.runner_executable,runner_label:state.runner_label,control_repository:state.control_repository};
+  if(approval.schema_version!==1||Object.entries(exact).some(([key,value])=>approval[key]!==value)||!/^\d+\.\d+\.\d+$/.test(String(approval.source_version||""))||approval.source_url!==`https://github.com/actions/runner/releases/download/v${approval.source_version}/actions-runner-osx-arm64-${approval.source_version}.tar.gz`||!HASH.test(String(approval.archive_sha256||"")))reject("MACOS-RUNNER-PACKAGE","Selected package evidence is not an exact retained official source binding");
+  const archive=readPackageFile(request.archive_path,options),layout=archiveBinaryManifest(archive);
+  if(sha(archive)!==approval.archive_sha256||!approval.binary_manifest||JSON.stringify(Object.entries(layout.manifest).sort())!==JSON.stringify(Object.entries(approval.binary_manifest).sort()))reject("MACOS-RUNNER-PACKAGE","Selected package differs from its exact bounded archive manifest");
+  const leaves=verifyPackagePayload(request.runner_path,layout,options,state);
+  if(sha(readPackageFile(request.archive_path,options))!==approval.archive_sha256)reject("MACOS-RUNNER-PACKAGE","Selected retained archive changed during inspection");
+  return {leaves,names:new Set([...Object.keys(layout.manifest),...layout.directories,...leaves.keys()])};
 }
 
 // This inspection never acquires a package, registers a runner, starts a process,
@@ -299,7 +388,7 @@ export function inspectMacosRunnerBootstrap({state={},home=process.env.HOME||os.
     if(state.browser_profile!==expectedProfile||!Number.isInteger(state.browser_port)||state.browser_port<1024||state.browser_port>65535||state.pending_wake_outbox!==expectedOutbox||state.browser_port_conflict===true||state.browser_profile_conflict===true||state.conflicting_runner===true) reject("MACOS-RUNNER-ISOLATION","Browser profile, port, outbox, or runner isolation is incomplete");
     checkPath(expectedProfile,{...options,directory:true}); checkPath(expectedOutbox,{...options,directory:true});
     const browser=verifyBrowser(commandRunner,home,expectedProfile,state.browser_port);
-    const approval=json(requireApproval?request.receipt_path:request.candidate_path,options), config=json(path.join(runner,".runner"),options);
+    const approval=json(requireApproval?request.receipt_path:request.candidate_path,options), configuration=runnerConfiguration(runner,options),config=configuration.config;
     const exact={installation_id:state.installation_id,instance_id:short,instance_path:root,project:state.sandbox_project_key,control_repository:state.control_repository,sandbox_repository:state.sandbox_repository,control_repository_id:String(state.control_repository_id),sandbox_repository_id:String(state.sandbox_repository_id),runner_path:runner,runner_executable:request.runner_executable,runner_label:state.runner_label,launch_agent_label:state.launch_agent_label,browser_profile:expectedProfile,browser_port:state.browser_port,pending_wake_outbox:expectedOutbox,runtime_path:MACOS_RUNNER_RUNTIME_PATH};
     if(!exact.project||approval.schema_version!==1||Object.entries(exact).some(([key,value])=>approval[key]!==value)||(requireApproval&&(approval.approved_action!=="use-existing-official-macos-arm64-runner"||approval.approved_by!==state.github_login||!/^human-[A-Za-z0-9-]{8,100}$/.test(String(approval.approval_id||""))||!Number.isFinite(Date.parse(approval.approved_at||""))))) reject("MACOS-RUNNER-APPROVAL","Separate durable exact human runner approval is missing or mismatched");
     const environment=approvedRunnerEnvironment(runner,approval,options);
@@ -312,7 +401,7 @@ export function inspectMacosRunnerBootstrap({state={},home=process.env.HOME||os.
     if(!arm64MachO(executable)||sha(executable)!==approval.executable_sha256) reject("MACOS-RUNNER-EXECUTABLE","Approved launch path must be the exact native ARM64 Runner.Listener executable");
     const listenerPid=verifyLocalRunnerProcesses(commandRunner,request.runner_executable);
     for(const credentials of [".credentials",".credentials_rsaparams"]) checkPath(path.join(runner,credentials),options);
-    const configDigest=sha(fsImpl.readFileSync(path.join(runner,".runner")));
+    const configDigest=configuration.digest;
     if(!ID.test(String(config.agentId||""))||String(config.agentId)!==String(approval.runner_id)||config.agentName!==state.runner_label||config.gitHubUrl!==`https://github.com/${state.control_repository}`||!/^https:\/\/[^/]+\.actions\.githubusercontent\.com\//.test(String(config.serverUrl||""))||config.workFolder!=="_work"||approval.config_sha256!==configDigest) reject("MACOS-RUNNER-CONFIG","Runner configuration does not match approved isolated GitHub identity");
     const user=api(commandRunner,"user");
     if(user.login!==state.github_login||String(user.id)!==String(approval.github_user_id)||!ID.test(String(user.id||""))) reject("MACOS-RUNNER-GITHUB-IDENTITY","Authenticated GitHub owner differs from the human-approved owner");
@@ -339,10 +428,12 @@ export function inspectMacosRunnerBootstrap({state={},home=process.env.HOME||os.
     const approvalDigest=requireApproval?sha(fsImpl.readFileSync(request.receipt_path)):null;
     // Inspect the extracted package after the read-only identity/auth callbacks,
     // then rebind the retained archive so late changes cannot authorize a runner.
-    verifyPackagePayload(runner,archiveLayout,options);
+    verifyPackagePayload(runner,archiveLayout,options,state);
     if(sha(readPackageFile(request.archive_path,options))!==approval.archive_sha256)reject("MACOS-RUNNER-PACKAGE","Retained official package changed before authorization");
     if(JSON.stringify(approvedRunnerEnvironment(runner,approval,options))!==JSON.stringify(environment))reject("MACOS-RUNNER-ENV","Runner environment changed before authorization");
-    return {status:requireApproval?"PASS":"NEEDS_USER_ACTION",action_id:requireApproval?undefined:"macos_runner_package_approval",mutations_performed:false,installation_id:state.installation_id,instance_path:root,runner_path:runner,runner_executable:request.runner_executable,program_arguments:["run"],runner_id:String(remote.id),runner_label:state.runner_label,runner_status:remote.status,local_listener_pid:listenerPid,control_repository_id:String(state.control_repository_id),sandbox_repository_id:String(state.sandbox_repository_id),approval_id:approval.approval_id,approval_sha256:approvalDigest,approval_challenge:requireApproval?undefined:challenge,approval_candidate:requireApproval?undefined:approval,config_sha256:configDigest,env_sha256:environment.digest,browser};
+    const finalConfiguration=runnerConfiguration(runner,options);
+    if(!samePackageFile(configuration.identity,finalConfiguration.identity)||finalConfiguration.digest!==approval.config_sha256||finalConfiguration.digest!==configDigest||String(finalConfiguration.config.agentId)!==String(remote.id)||finalConfiguration.config.agentName!==remote.name||finalConfiguration.config.gitHubUrl!==`https://github.com/${state.control_repository}`)reject("MACOS-RUNNER-CONFIG","Runner configuration changed after independent GitHub and Codex callbacks");
+    return {status:requireApproval?"PASS":"NEEDS_USER_ACTION",action_id:requireApproval?undefined:"macos_runner_package_approval",mutations_performed:false,installation_id:state.installation_id,instance_path:root,runner_path:runner,runner_executable:request.runner_executable,program_arguments:["run"],runner_id:String(remote.id),runner_label:state.runner_label,runner_status:remote.status,local_listener_pid:listenerPid,control_repository_id:String(state.control_repository_id),sandbox_repository_id:String(state.sandbox_repository_id),approval_id:approval.approval_id,approval_sha256:approvalDigest,approval_challenge:requireApproval?undefined:challenge,approval_candidate:requireApproval?undefined:approval,config_sha256:configDigest,config_identity:configuration.identity,env_sha256:environment.digest,browser};
   } catch(error) { return fail(error); }
 }
 
