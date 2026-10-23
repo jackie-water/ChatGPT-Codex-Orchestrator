@@ -544,6 +544,18 @@ function runSetup() {
     const pendingFirstRegistration=earlyTrustedEvidence.status==="NEW_INSTALL_REGISTRATION_PENDING";
     if(existingInstanceRecovery.status!=="ABSENT" && !macosBootstrapMayAdvance(state, existingInstanceRecovery, earlyTrustedEvidence) && (!macosStateBound(state, existingInstanceRecovery) || existingInstanceRecovery.status==="CONFLICT")) return emit({status:existingInstanceRecovery.status==="CONFLICT"?"ERROR":"NEEDS_USER_ACTION",error_id:"MACOS-EXISTING-INSTANCE-REVIEW",recoverable:existingInstanceRecovery.status!=="CONFLICT",preferred_language:lang,message:"An existing macOS instance was found without authoritative binding evidence. Setup/resume stopped before installer state, migration intent, Control, Sandbox, runner, or helper changes.",existing_instance_recovery:existingInstanceRecovery,mutations_performed:false},1);
     if(earlyTrustedEvidence.status==="NEEDS_HUMAN_LEGACY"&&!macosSelectedAwaitingFirstRoute(state,existingInstanceRecovery)) return emit({status:"NEEDS_HUMAN",error_id:"MACOS-TRUSTED-RECOVERY-EVIDENCE",recoverable:false,preferred_language:lang,message:"Historical macOS artifacts require a separate human-approved recovery procedure; setup/resume stopped before any mutation.",existing_instance_recovery:existingInstanceRecovery,trusted_recovery_evidence:earlyTrustedEvidence,mutations_performed:false},1);
+    const awaitingFirstRoute=earlyTrustedEvidence.status==="NEW_INSTALL_CONTROL_PREPARED_AWAITING_ROUTE";
+    if(awaitingFirstRoute){
+      const savedIssueValue=state.sandbox_chat_registration_issue;
+      const pinnedIssue=String(savedIssueValue??"").trim();
+      const firstIssueNotYetSaved=savedIssueValue===undefined||savedIssueValue===null||pinnedIssue==="";
+      const pinnedMatch=pinnedIssue.match(/^https:\/\/github\.com\/([^/]+\/[^/]+)\/issues\/(\d+)$/i);
+      const canonicalIssue=pinnedMatch && pinnedMatch[1]===state.control_repository && Number(pinnedMatch[2])>0 &&
+        String(earlyTrustedEvidence.provenance?.control_repository_id||"")===String(state.control_repository_id||"") &&
+        String(earlyTrustedEvidence.provenance?.sandbox_repository_id||"")===String(state.sandbox_repository_id||"");
+      if(!firstIssueNotYetSaved&&!canonicalIssue) return emit({status:"ERROR",error_id:"MACOS-TRUSTED-RECOVERY-EVIDENCE",recoverable:false,preferred_language:lang,message:"The pinned first registration Issue is malformed or conflicts with the verified installation identity; setup stopped before any macOS side effect.",trusted_recovery_evidence:earlyTrustedEvidence,mutations_performed:false},1);
+      if(!firstIssueNotYetSaved) return emit({status:"WAITING",action_id:"sandbox_chat_registration",recoverable:true,preferred_language:lang,message:"The first Sandbox registration Issue is pinned; queue the explicit originating-Chat route before resume.",registration_issue:pinnedIssue,trusted_recovery_evidence:earlyTrustedEvidence,mutations_performed:false});
+    }
     if(pendingFirstRegistration){
       const delivered=findRegisteredChatRoute(state,{projectKey:state.sandbox_project_key,chatUrl:state.reviewer_chat_url});
       if(!delivered || delivered.registration_issue!==earlyTrustedEvidence.provenance.registration_issue_id) return emit({status:"WAITING",action_id:"sandbox_chat_registration",recoverable:true,preferred_language:lang,message:"The first Sandbox registration is queued; its real originating Chat delivery receipt is still required before resume.",registration_issue:state.sandbox_chat_registration_issue,trusted_recovery_evidence:earlyTrustedEvidence,mutations_performed:false});
@@ -551,6 +563,18 @@ function runSetup() {
     const prerequisites=macosPrerequisites();
     const trustedEvidence=macosTrustedRecoveryEvidence(state,{requireReceipt:false});
     if((pendingFirstRegistration && trustedEvidence.status!=="NEW_INSTALL_REGISTRATION_PENDING") || (trustedEvidence.status!=="ABSENT" && trustedEvidence.status!=="NEW_INSTALL_PREPARED" && trustedEvidence.status!=="NEW_INSTALL_CONTROL_PREPARED_AWAITING_ROUTE" && trustedEvidence.status!=="NEW_INSTALL_REGISTRATION_PENDING" && trustedEvidence.status!=="NEEDS_HUMAN_LEGACY" && trustedEvidence.status!=="VERIFIED")) return emit({status:"ERROR",error_id:"MACOS-TRUSTED-RECOVERY-EVIDENCE",recoverable:false,preferred_language:lang,message:"Trusted recovery evidence is contradictory; setup stopped before any macOS side effect.",trusted_recovery_evidence:trustedEvidence,mutations_performed:false},1);
+    const latestPending=trustedEvidence.status==="NEW_INSTALL_REGISTRATION_PENDING";
+    const pinnedFirstIssue=String(state.sandbox_chat_registration_issue||"").trim();
+    if(latestPending){
+      const savedIssue=String(state.sandbox_chat_registration_issue||"");
+      const savedIssueId=Number(savedIssue.match(/\/issues\/(\d+)(?:$|[?#])/i)?.[1]||savedIssue.match(/^\d+$/)?.[0]||0);
+      const provenance=trustedEvidence.provenance||{};
+      const identityProof=String(provenance.control_repository_id||"")===String(state.control_repository_id||"") && String(provenance.sandbox_repository_id||"")===String(state.sandbox_repository_id||"") && savedIssueId>0 && Number(provenance.registration_issue_id)===savedIssueId;
+      const delivered=findRegisteredChatRoute(state,{projectKey:state.sandbox_project_key,chatUrl:state.reviewer_chat_url});
+      let routeProof=false;
+      try { routeProof=Boolean(delivered && String(delivered.installation_id)===String(state.installation_id) && Number(delivered.registration_issue)===savedIssueId && String(delivered.project)===String(state.sandbox_project_key) && normalizeChatUrl(delivered.chat_url)===normalizeChatUrl(state.reviewer_chat_url)); } catch {}
+      if(!identityProof || !routeProof) return emit({status:"WAITING",action_id:"sandbox_chat_registration",recoverable:true,preferred_language:lang,message:"The first Sandbox registration Issue is pinned; exact originating Chat delivery proof is required before resume.",registration_issue:state.sandbox_chat_registration_issue||null,trusted_recovery_evidence:trustedEvidence,mutations_performed:false});
+    }
     const migration=migrationPreflight({state});
     const ready=prerequisites.node&&prerequisites.git&&prerequisites.gh&&prerequisites.codex&&prerequisites.session_auth&&prerequisites.native_helper?.status==="PASS"&&migration.status==="READY";
     if(!ready) return emit({status:"ERROR",error_id:"MACOS-PREREQUISITE-OR-MIGRATION",recoverable:true,preferred_language:lang,mutations_performed:false,message:"macOS preflight found a prerequisite or migration conflict; no installation mutation was performed.",prerequisites,migration},1);
@@ -607,7 +631,7 @@ function runSetup() {
     // A pending first Issue is already pinned by the early gate. If its local
     // delivery proof disappears, reconciliation cannot submit another Issue.
     try{
-      if(pendingFirstRegistration){
+      if(latestPending || pinnedFirstIssue){
         registration=ensureInstallerChatRegistration(state,{projectKey:state.sandbox_project_key,commandRunner:()=>{throw new Error("First registration delivery proof changed; preserve the saved Issue and retry receipt reconciliation");}});
       }else{
         registration=ensureInstallerChatRegistration(state,{projectKey:state.sandbox_project_key});

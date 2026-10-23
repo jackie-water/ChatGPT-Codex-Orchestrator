@@ -118,6 +118,19 @@ test("official macOS installer orders all identity and native gates before first
   assert.doesNotMatch(windows,/advanceMacosFirstBootRunner|macos_runner_package_approval/);
 });
 
+test("latest macOS evidence pins a pending first Issue before registration can create one",()=>{
+  const begin=cli.indexOf("function runSetup() {");
+  const end=cli.indexOf("\n  state.installation_id ||= crypto.randomUUID();",begin);
+  const mac=cli.slice(begin,end);
+  const latest=mac.indexOf("const latestPending=trustedEvidence.status===\"NEW_INSTALL_REGISTRATION_PENDING\";");
+  const registration=mac.indexOf("registration=ensureInstallerChatRegistration");
+  assert.ok(latest>=0&&latest<registration);
+  assert.ok(mac.indexOf("savedIssueId>0",latest)<registration);
+  assert.ok(mac.indexOf("Number(delivered.registration_issue)===savedIssueId",latest)<registration);
+  assert.ok(mac.indexOf("normalizeChatUrl(delivered.chat_url)===normalizeChatUrl(state.reviewer_chat_url)",latest)<registration);
+  assert.match(mac,/ensureInstallerChatRegistration\(state,\{projectKey:state\.sandbox_project_key\}\)/);
+});
+
 test("only independently approved fresh identity can await its first route without legacy adoption",()=>{
   const start=cli.indexOf("function macosSelectedAwaitingFirstRoute(");
   const end=cli.indexOf("function macosTrustedRecoveryEvidence(",start);
@@ -157,7 +170,12 @@ function pendingRegistrationResume(t){
   const route={route:"chat-511",project:state.sandbox_project_key,status:"active",chat_url:state.reviewer_chat_url,registration_issue:511,installation_id:state.installation_id};
   const hash=crypto.createHash("sha256").update(state.reviewer_chat_url).digest("hex").slice(0,16);
   const issue={number:511,html_url:state.sandbox_chat_registration_issue,url:state.sandbox_chat_registration_issue,state:"open",title:`[CHAT-REGISTER] INSTALL-CHAT-${state.instance_id}-${state.sandbox_project_key}-${hash}`,user:{login:state.github_login,id:42},body:JSON.stringify({project:state.sandbox_project_key,chat_url:state.reviewer_chat_url,installation_id:state.installation_id})};
-  const settings={offline:false,offlineAfterFirstProof:false,removeProofBeforeConsumption:false},api={
+  const settings={offline:false,offlineAfterFirstProof:false,removeProofBeforeConsumption:false,queueDuringPrerequisites:false,issueListEmpty:false,firstEver:false},
+  queueRoute=()=>write(state.chat_route_file,{version:1,routes:[route]}),
+  deliverRoute=()=>{
+    write(outbox,{delivery_state:"DELIVERED",delivery_owner:"register-chat.mjs",callback_id:callbackId,chat_url:state.reviewer_chat_url,verified_by:"existing-user-message"});
+    write(journal,{schema_version:1,status:"DELIVERED",verified_role:"user",verified_by:"existing-user-message",callback_id:callbackId,chat_url:state.reviewer_chat_url,callback_state_sha256:crypto.createHash("sha256").update(fs.readFileSync(outbox)).digest("hex")});
+  },api={
     getAuthenticatedUser:()=>({login:state.github_login,id:42}),
     getRepository:repository=>{
       if(settings.offline)throw Error("synthetic offline");
@@ -172,8 +190,10 @@ function pendingRegistrationResume(t){
     write(journal,{schema_version:1,status:"DELIVERED",verified_role:"user",verified_by:"existing-user-message",callback_id:callbackId,chat_url:state.reviewer_chat_url,callback_state_sha256:crypto.createHash("sha256").update(fs.readFileSync(outbox)).digest("hex")});
   };
   const commandRunner=args=>{
-    calls.push("issue-"+args[1]);assert.equal(args[1],"list","resume must preserve the first registration Issue");
-    return {ok:true,stdout:JSON.stringify([{...issue,state:"OPEN"}])};
+    calls.push("issue-"+args[1]);
+    if(args[1]==="create") { assert.equal(settings.firstEver,true); settings.firstEver=false; return {ok:true,stdout:issue.html_url}; }
+    if(args[1]!=="list") return {ok:true,stdout:JSON.stringify(issue)};
+    return {ok:true,stdout:JSON.stringify(settings.issueListEmpty||settings.firstEver?[]:[{...issue,state:"OPEN"}])};
   };
   const context=vm.createContext({
     crypto,path,os:{...os,homedir:()=>f.home},process:{platform:"darwin",cwd:()=>f.home},
@@ -182,7 +202,7 @@ function pendingRegistrationResume(t){
     emit:(result,code=0)=>({result,code}),
     macosRecoveryReport:()=>({status:"NEEDS_VERIFICATION",instance_ids:[state.instance_id],instances:[{identity}]}),
     macosTrustedRecoveryEvidence:(actual,{requireReceipt})=>verifyTrustedRecoveryEvidence({state:actual,home:f.home,githubApi:api,requireReceipt}),
-    macosPrerequisites:()=>{calls.push("prerequisites");if(settings.offlineAfterFirstProof)settings.offline=true;return {node:true,git:true,gh:true,codex:true,session_auth:true,github_auth:true,native_helper:{status:"PASS"}};},
+    macosPrerequisites:()=>{calls.push("prerequisites");if(settings.queueDuringPrerequisites){queueRoute();deliverRoute();settings.queueDuringPrerequisites=false;}if(settings.offlineAfterFirstProof)settings.offline=true;return {node:true,git:true,gh:true,codex:true,session_auth:true,github_auth:true,native_helper:{status:"PASS"}};},
     migrationPreflight:()=>({status:"READY"}),authenticatedGithubLogin:()=>state.github_login,
     prepareMigrationIntent:()=>({path:path.join(state.instance_root,"migration-intent.json"),phase:"PREPARED"}),
     prepareControlEnvironment:()=>assert.fail("prepared Control must not be recreated"),
@@ -207,14 +227,26 @@ function pendingRegistrationResume(t){
   const setup=cli.slice(cli.indexOf("function runSetup() {"),cli.indexOf("function codexLogin()"));
   vm.runInContext(stateGate+bootstrapGate+setup+"\nthis.resume=runSetup;",context);
   write(state.chat_route_file,{version:1,routes:[]});
-  return {state,home:f.home,api,route,issue,calls,saved,settings,outbox,journal,write,deliver,resume:()=>context.resume(),queue:()=>write(state.chat_route_file,{version:1,routes:[route]})};
+  return {state,home:f.home,api,route,issue,calls,saved,settings,outbox,journal,write,deliver:deliverRoute,resume:()=>context.resume(),queue:queueRoute};
 }
+
+test("verified first-ever install creates exactly one Issue, then waits for receipt",t=>{
+  const f=pendingRegistrationResume(t);delete f.state.sandbox_chat_registration_issue;f.settings.firstEver=true;
+  let result=f.resume().result;
+  assert.equal(result.status,"WAITING");assert.equal(result.registration_issue,f.issue.html_url);
+  assert.equal(f.calls.filter(call=>call==="registration").length,1);
+  assert.equal(f.calls.filter(call=>call.startsWith("issue-create")).length,1);
+  assert.equal(f.state.sandbox_chat_registration_issue,f.issue.html_url);
+  f.queue();f.calls.length=0;result=f.resume().result;assert.equal(result.status,"WAITING");assert.deepEqual(f.calls,[]);
+  f.deliver();assert.equal(f.resume().result.action_id,"sandbox_verification");
+});
 
 test("ordinary first registration resumes zero routes through real delivery consumption before saving its route",t=>{
   const f=pendingRegistrationResume(t);
   assert.equal(f.resume().result.action_id,"sandbox_chat_registration");
   assert.equal(f.state.sandbox_review_route,undefined);
-  assert.deepEqual(f.calls.filter(call=>call.startsWith("issue-")),["issue-list"]);
+  assert.deepEqual(f.calls,[]);
+  assert.deepEqual(f.saved,[]);
   f.queue();f.calls.length=0;
   const before=JSON.stringify(f.state),savedBefore=f.saved.length;
   const waiting=f.resume().result;
@@ -263,6 +295,36 @@ test("first-registration proof lost after the early gate cannot create another I
   assert.equal(f.state.sandbox_chat_registration_issue,f.issue.html_url);assert.equal(f.state.sandbox_review_route,undefined);
   assert.equal(f.saved.some(state=>state.sandbox_review_route!==undefined),false);
   assert.equal(fs.existsSync(path.join(f.state.instance_root,"trusted-recovery-evidence-v1.json")),false);
+});
+
+test("interleaved second read pinned Issue cannot be recreated",t=>{
+  const f=pendingRegistrationResume(t);f.settings.issueListEmpty=true;
+  const result=f.resume().result;
+  assert.equal(result.status,"WAITING");
+  assert.equal(result.action_id,"sandbox_chat_registration");
+  assert.deepEqual(f.calls,[]);
+  assert.equal(f.calls.filter(call=>call.startsWith("issue-create")).length,0);
+  assert.equal(f.state.sandbox_chat_registration_issue,f.issue.html_url);
+  assert.equal(f.state.sandbox_review_route,undefined);
+  assert.deepEqual(f.saved,[]);
+  assert.equal(fs.existsSync(path.join(f.state.instance_root,"trusted-recovery-evidence-v1.json")),false);
+});
+
+test("saved first Issue with zero routes and an empty Issue list fails closed",t=>{
+  const f=pendingRegistrationResume(t);f.settings.issueListEmpty=true;
+  const result=f.resume().result;
+  assert.ok(result.status==="WAITING"||result.status==="ERROR");
+  assert.equal(f.calls.filter(call=>call.startsWith("issue-create")).length,0);
+  assert.equal(f.state.sandbox_chat_registration_issue,f.issue.html_url);
+  assert.equal(f.state.sandbox_review_route,undefined);
+  assert.equal(f.saved.some(state=>state.sandbox_review_route!==undefined),false);
+});
+
+for(const value of ["not-a-url","https://github.com/other/control/issues/511"])
+test(`saved non-canonical Issue ${value} fails closed`,t=>{
+  const f=pendingRegistrationResume(t);f.state.sandbox_chat_registration_issue=value;
+  const before=JSON.stringify(f.state),result=f.resume().result;
+  assert.equal(result.error_id,"MACOS-TRUSTED-RECOVERY-EVIDENCE");assert.equal(JSON.stringify(f.state),before);assert.deepEqual(f.calls,[]);assert.deepEqual(f.saved,[]);
 });
 
 
