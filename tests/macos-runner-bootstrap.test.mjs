@@ -4,8 +4,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
+import { MACOS_PERSONAL_USE_POLICY, macosPersonalUsePolicyChallenge } from "../src/lib/macos-personal-use-service.mjs";
 import { gzipSync } from "node:zlib";
-import { inspectMacosRunnerBootstrap, approveMacosRunnerBootstrap, rebindMacosRunnerConfiguration, MACOS_RUNNER_RUNTIME_PATH } from "../src/lib/macos-runner-bootstrap.mjs";
+import { inspectMacosRunnerArchive, MACOS_RUNNER_PACKAGE_LEAF_BOUND, inspectMacosRunnerBootstrap, approveMacosRunnerBootstrap, rebindMacosRunnerConfiguration, MACOS_RUNNER_RUNTIME_PATH } from "../src/lib/macos-runner-bootstrap.mjs";
 
 const hash=bytes=>crypto.createHash("sha256").update(bytes).digest("hex");
 const syntheticHomes=[];
@@ -514,5 +515,66 @@ test("final start configuration rebind has no identity callbacks and rejects sam
     const rebind=()=>rebindMacosRunnerConfiguration({state:f.state,home:f.home,fsImpl:f.options.fsImpl,approval});
     if(kind==="stable")assert.equal(rebind(),true);else assert.throws(rebind,error=>error.code==="MACOS-RUNNER-CONFIG",kind);
     assert.equal(f.calls.length,calls,"the final binding must never introduce another mutable callback");
+  }
+});
+
+
+test("public archive inspector shares the production finite leaf boundary including links",()=>{
+  assert.equal(MACOS_RUNNER_PACKAGE_LEAF_BOUND,12288);
+  const base=[{name:"bin/Runner.Listener",bytes:nativeBinary()},{name:"externals/node24/bin/node",bytes:nativeBinary()},{name:"externals/node24/lib/node_modules/npm/bin/npm-cli.js",bytes:Buffer.from("synthetic npm")},...Array.from({length:6},(_,i)=>({name:`externals/node24/bin/link${i}`,type:"2",link:"../lib/node_modules/npm/bin/npm-cli.js",mode:0o777}))];
+  for(const count of [9396,MACOS_RUNNER_PACKAGE_LEAF_BOUND,MACOS_RUNNER_PACKAGE_LEAF_BOUND+1]) {
+    const entries=[...base,...Array.from({length:count-base.length},(_,i)=>({name:`bin/file${i}`,bytes:Buffer.alloc(0),mode:0o600}))],archive=syntheticArchive(entries);
+    if(count>MACOS_RUNNER_PACKAGE_LEAF_BOUND)assert.throws(()=>inspectMacosRunnerArchive(archive),/leaf inventory/);
+    else {const layout=inspectMacosRunnerArchive(archive);assert.equal(Object.keys(layout.manifest).length,count);assert.equal(layout.leaf_count,count);assert.equal(layout.links.size,6);assert.equal(layout.compressed_bytes,archive.length);}
+  }
+  assert.throws(()=>inspectMacosRunnerArchive("not bytes"),/Buffer/);
+  assert.throws(()=>inspectMacosRunnerArchive(syntheticArchive([...base,{name:"../escape",bytes:Buffer.alloc(0)}])),/canonical|payload/);
+});
+
+function selectPersonalPolicy(f) {
+  f.state.macos_service_policy={schema_version:1,policy:MACOS_PERSONAL_USE_POLICY,selected_through:"official-installer",installation_id:f.state.installation_id,github_login:f.state.github_login,control_repository:f.state.control_repository,control_repository_id:f.state.control_repository_id,approval:macosPersonalUsePolicyChallenge(f.state),approved_at:"2026-10-22T00:00:00Z"};
+}
+function addServicePayload(f) {
+  const entries=[...f.entries,{name:"bin/runsvc.sh",bytes:Buffer.from('#!/bin/bash\n# synthetic service, never executed\nnodever="node24"\n./externals/$nodever/bin/node ./bin/RunnerService.js &\nwait $!\n'),mode:0o700},{name:"bin/RunnerService.js",bytes:Buffer.from('// synthetic supervisor, never executed\n'),mode:0o600}];
+  for(const entry of entries.slice(f.entries.length))fs.writeFileSync(path.join(f.runner,entry.name),entry.bytes,{mode:entry.mode});
+  f.replaceArchive(entries);return entries;
+}
+
+test("personal service uses only retained official runsvc and its selected bundled interpreter",()=>{
+  const f=fixture();addServicePayload(f);selectPersonalPolicy(f);
+  const commandRunner=(command,args)=>command==="/bin/ps"&&args.includes("-axo")?{ok:true,output:""}:f.options.commandRunner(command,args);
+  const result=inspectMacosRunnerBootstrap({...f.options,commandRunner});
+  assert.equal(result.status,"PASS");assert.equal(result.service_executable,path.join(f.runner,"bin/runsvc.sh"));assert.deepEqual(result.service_arguments,[]);assert.equal(result.service_node,path.join(f.runner,"externals/node24/bin/node"));
+  fs.writeFileSync(path.join(f.runner,"runsvc.sh"),fs.readFileSync(result.service_executable),{mode:0o700});
+  assert.equal(inspectMacosRunnerBootstrap({...f.options,commandRunner}).status,"PASS");
+  fs.appendFileSync(path.join(f.runner,"runsvc.sh"),"# changed\n");
+  assert.equal(inspectMacosRunnerBootstrap({...f.options,commandRunner}).status,"ERROR");
+});
+
+test("runsvc .path is absent or exactly the trusted runtime PATH",()=>{
+  for(const value of [null,MACOS_RUNNER_RUNTIME_PATH,MACOS_RUNNER_RUNTIME_PATH+"\n","/foreign/bin",MACOS_RUNNER_RUNTIME_PATH+"\nNODE_OPTIONS=evil\n"]) {
+    const f=fixture();if(value!==null)fs.writeFileSync(path.join(f.runner,".path"),value,{mode:0o600});
+    const result=inspectMacosRunnerBootstrap(f.options);
+    assert.equal(result.status,value===null||value===MACOS_RUNNER_RUNTIME_PATH||value===MACOS_RUNNER_RUNTIME_PATH+"\n"?"PASS":"ERROR");
+  }
+});
+
+test("package drift requests official update re-verification without fabricating approval",()=>{
+  const f=fixture(),before=fs.readFileSync(f.receipt);fs.appendFileSync(f.executable,"changed");
+  const result=inspectMacosRunnerBootstrap(f.options);
+  assert.equal(result.status,"ERROR");assert.equal(result.action_id,"macos_runner_update_reverification");assert.equal(result.update_reverification.provenance_verified,false);assert.deepEqual(fs.readFileSync(f.receipt),before);
+});
+
+
+test("actual new official update provenance is independently checked and never rolls the approval receipt",()=>{
+  for(const forged of [false,true]) {
+    const f=fixture(),before=fs.readFileSync(f.receipt),updatedBinary=Buffer.concat([nativeBinary(),Buffer.from("synthetic official update")]);
+    const entries=f.entries.map(entry=>entry.name==="bin/Runner.Listener"?{...entry,bytes:updatedBinary}:entry),archive=syntheticArchive(entries),version="3.0.0",archiveFile=path.join(f.root,`runner-update-${version}.tar.gz`);
+    fs.writeFileSync(archiveFile,archive,{mode:0o600});fs.writeFileSync(f.executable,updatedBinary);
+    const candidate={...f.approval,source_version:version,source_url:`https://github.com/actions/runner/releases/download/v${version}/actions-runner-osx-arm64-${version}.tar.gz`,source_release_id:"707",source_asset_id:"808",update_archive_path:archiveFile,archive_sha256:hash(archive),executable_sha256:hash(updatedBinary),binary_manifest:Object.fromEntries(entries.map(entry=>[entry.name,hash(entry.bytes)]))};
+    f.writeJson(f.candidate,candidate);
+    const commandRunner=(command,args)=>command==="gh"&&args.at(-1)===`repos/actions/runner/releases/tags/v${version}`?{ok:true,output:JSON.stringify({id:707,tag_name:`v${version}`,draft:false,prerelease:false,assets:[{id:808,name:`actions-runner-osx-arm64-${version}.tar.gz`,browser_download_url:candidate.source_url,digest:`sha256:${forged?"0".repeat(64):candidate.archive_sha256}`,state:"uploaded"}]})}:f.options.commandRunner(command,args);
+    const result=inspectMacosRunnerBootstrap({...f.options,commandRunner});
+    assert.equal(result.status,"ERROR");assert.equal(result.action_id,"macos_runner_update_reverification");assert.equal(result.update_reverification.provenance_verified,!forged);assert.deepEqual(fs.readFileSync(f.receipt),before);assert.equal(f.calls.some(call=>call.command==="launchctl"),false);
   }
 });

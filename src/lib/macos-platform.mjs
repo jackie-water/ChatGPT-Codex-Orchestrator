@@ -5,10 +5,11 @@ import crypto from "node:crypto";
 import { spawnSafeSync } from "./spawn-safe.mjs";
 import { canonicalInstallationId } from "./control-render.mjs";
 import { macosNativeHelperPreflight, verifyMacosNativeCapability } from "./macos-native-helper-install.mjs";
+import { hasMacosPersonalUsePolicy, inspectMacosPersonalUseLineage } from "./macos-personal-use-service.mjs";
 import { inspectMacosRunnerBootstrap, rebindMacosRunnerConfiguration, MACOS_RUNNER_RUNTIME_PATH } from "./macos-runner-bootstrap.mjs";
 
 const HOME = () => process.env.HOME || os.homedir();
-const cmd = (name,args=[],options={}) => { const r=spawnSafeSync(name,args,{encoding:"utf8",shell:false,timeout:15000,maxBuffer:1024*1024,...options}); return {ok:r.status===0, output:(r.stdout||r.stderr||"").trim()}; };
+const cmd = (name,args=[],options={}) => { const r=spawnSafeSync(name==="launchctl"?"/bin/launchctl":name,args,{encoding:"utf8",shell:false,timeout:15000,maxBuffer:1024*1024,...options,...(name==="launchctl"?{env:{PATH:"/usr/bin:/bin:/usr/sbin:/sbin",LC_ALL:"C"}}:{})}); return {ok:r.status===0, output:(r.stdout||r.stderr||"").trim()}; };
 const owner = () => typeof process.getuid === "function" ? process.getuid() : null;
 const homeContained = value => {
   if(!value) return false;
@@ -51,13 +52,23 @@ function readApprovedLaunchAgent(plist,expected,binding=null) {
     while(cursor<bytes.length){const count=fs.readSync(fd,bytes,cursor,bytes.length-cursor,cursor);if(!count)throw new Error("LaunchAgent changed during inspection");cursor+=count;}
     if(fs.readSync(fd,Buffer.alloc(1),0,1,bytes.length)!==0||!samePlistIdentity(opened,fs.fstatSync(fd))||!samePlistIdentity(opened,fs.lstatSync(plist)))throw new Error("LaunchAgent changed during inspection");
     // Exact canonical bytes bind all fields, including the entire argument and
-    // environment collections and RunAtLoad=false, with no XML ambiguity.
+    // environment collections and the exact consent-specific activation fields, with no XML ambiguity.
     if(!bytes.equals(Buffer.from(expected,"utf8")))throw new Error("LaunchAgent is not the exact approved rendering");
     safeLaunchAgentPath(plist);
     return {fd,identity:Object.fromEntries(plistIdentityKeys.map(key=>[key,opened[key]]))};
   } catch(error) { if(!binding&&fd!==undefined)fs.closeSync(fd);throw error; }
 }
-function proveLoadedLaunchAgent(output,{label,plist,runner,capability,runnerPath,requirePid=false}) {
+function launchAgentAbsent(result,label) {
+  if(result?.ok)return false;
+  const text=String(result?.output||"").trim();
+  return ["", "Bad request.\n"].some(prefix=>["", " "].some(space=>text===`${prefix}Could not find service "${label}" in domain for user gui:${space}${owner()||0}`));
+}
+function listedJobPid(line) {
+  const columns=String(line||"").trim().split(/\s+/);
+  if(columns.length!==3||!/^[-0-9]+$/.test(columns[1])||columns[0]!=="-"&&!/^[1-9]\d*$/.test(columns[0]))throw new Error("LaunchAgent list entry is ambiguous");
+  return columns[0]==="-"?null:Number(columns[0]);
+}
+function proveLoadedLaunchAgent(output,{label,plist,runner,capability,runnerPath,requirePid=false,personal=false,activated=false,commandRunner,identityReader}) {
   const domain=`gui/${owner()||0}`,text=String(output||"");
   if(text.length>131072||/[\x00-\x08\x0b-\x1f]/.test(text))throw new Error("Loaded LaunchAgent output is invalid or exceeds its bound");
   const lines=text.trim().split("\n").map(line=>line.trim());
@@ -67,22 +78,26 @@ function proveLoadedLaunchAgent(output,{label,plist,runner,capability,runnerPath
     if(!line)continue;
     if(closed)throw new Error("Ambiguous loaded LaunchAgent output");
     if(line==="}"){if(--depth===0)closed=true;continue;}
-    const nested=line.match(/^(.+) = \{$/);
+    const nested=line.match(/^(.+?) (?:=|=>) \{$/);
     if(nested){if(depth===1){block=nested[1];if(values.has(block)||blocks.has(block))throw new Error("Duplicate loaded LaunchAgent field");blocks.set(block,[]);}else if(depth===2&&["arguments","environment"].includes(block))throw new Error("Ambiguous loaded LaunchAgent collection");depth++;continue;}
+    if(depth===1&&values.has("properties")&&!line.includes("=")&&/^(?:\|\s*)?[a-z][a-z |_-]*$/.test(line)){values.set("properties",values.get("properties")+" | "+line.replace(/^\|\s*/,""));continue;}
     if(depth===1){const scalar=line.match(/^([^=]+) = (.*)$/);if(!scalar||values.has(scalar[1])||blocks.has(scalar[1]))throw new Error("Ambiguous loaded LaunchAgent field");values.set(scalar[1],scalar[2]);}
     else if(depth===2&&["arguments","environment"].includes(block))blocks.get(block).push(line);
   }
-  if(!closed||depth!==0||values.get("path")!==plist||values.get("type")!=="LaunchAgent"||values.get("program")!==runner.runner_executable||values.get("working directory")!==runnerPath||!new RegExp(`^gui/${owner()||0} \\[\\d+\\]$`).test(values.get("domain")||""))throw new Error("Loaded LaunchAgent executable, path or owned domain is not exact");
-  if(JSON.stringify(blocks.get("arguments"))!==JSON.stringify([runner.runner_executable,...runner.program_arguments]))throw new Error("Loaded LaunchAgent arguments are not exact");
+  if(!closed||depth!==0||values.get("path")!==plist||values.get("type")!=="LaunchAgent"||values.get("program")!==(personal?runner.service_executable:runner.runner_executable)||values.get("working directory")!==runnerPath||!new RegExp(`^gui/${owner()||0} \\[\\d+\\]$`).test(values.get("domain")||""))throw new Error("Loaded LaunchAgent executable, path or owned domain is not exact");
+  if(JSON.stringify(blocks.get("arguments"))!==JSON.stringify(personal?[runner.service_executable,...runner.service_arguments]:[runner.runner_executable,...runner.program_arguments]))throw new Error("Loaded LaunchAgent arguments are not exact");
   const environment=new Map();
   for(const line of blocks.get("environment")||[]){const entry=line.match(/^([A-Za-z_][A-Za-z0-9_]*) => (.*)$/);if(!entry||environment.has(entry[1]))throw new Error("Ambiguous loaded LaunchAgent environment");environment.set(entry[1],entry[2]);}
   const expectedEnvironment=new Map([["PATH",MACOS_RUNNER_RUNTIME_PATH],["ORCHESTRATOR_MACOS_NATIVE_HELPER",capability.helper_path],["ORCHESTRATOR_MACOS_NATIVE_PROCESS_IDENTITY","1"]]);
+  if(personal)expectedEnvironment.set("ACTIONS_RUNNER_SVC","1");
   if(environment.has("XPC_SERVICE_NAME")){if(environment.get("XPC_SERVICE_NAME")!==label)throw new Error("Loaded LaunchAgent service identity is foreign");environment.delete("XPC_SERVICE_NAME");}
   if(environment.size!==expectedEnvironment.size||[...expectedEnvironment].some(([key,value])=>environment.get(key)!==value))throw new Error("Loaded LaunchAgent environment is not exact");
-  if(!values.has("properties")||/(?:^|[|\s])runatload(?:$|[|\s])/i.test(values.get("properties")))throw new Error("Loaded LaunchAgent has ambiguous or unsafe RunAtLoad authority");
+  const runAtLoad=/(?:^|[|\s])runatload(?:$|[|\s])/i.test(values.get("properties")||""),keepAlive=/(?:^|[|\s])keepalive(?:$|[|\s])/i.test(values.get("properties")||"");
+  if(!values.has("properties")||runAtLoad!==activated||keepAlive)throw new Error("Loaded LaunchAgent activation properties do not match explicit consent");
   const rawPid=values.get("pid"),pid=rawPid===undefined?null:Number(rawPid),approvedPid=runner.local_listener_pid??null;
-  if((rawPid!==undefined&&(!/^[1-9]\d*$/.test(rawPid)||!Number.isSafeInteger(pid)||pid<=1))||(pid!==null&&values.get("state")!=="running")||(pid===null&&!["not running","waiting"].includes(values.get("state")))||(requirePid&&pid===null)||pid!==approvedPid)throw new Error("Loaded LaunchAgent PID is not the independently observed native listener");
-  return {pid};
+  if((rawPid!==undefined&&(!/^[1-9]\d*$/.test(rawPid)||!Number.isSafeInteger(pid)||pid<=1))||(pid!==null&&values.get("state")!=="running")||(pid===null&&!["not running","waiting"].includes(values.get("state")))||(requirePid&&pid===null)||!personal&&pid!==approvedPid)throw new Error("Loaded LaunchAgent PID is not the independently observed native listener");
+  const lineage=personal?inspectMacosPersonalUseLineage({jobPid:pid,runner,helperPath:capability.helper_path,commandRunner,identityReader}):{listener_running:false,job_identity:null,listener_identity:null};
+  return {pid,...lineage};
 }
 function prepareLaunchAgentDirectory() {
   const home=path.resolve(HOME()), uid=owner();
@@ -187,18 +202,24 @@ export function migrationPreflight({state={},home=HOME(),commandRunner=cmd}={}) 
   return {status:conflicts.length?"CONFLICT":"READY",inventory,conflicts,mutations_performed:false,rollback:{available:true,automatic:false}};
 }
 
-export function renderLaunchAgent({label,runnerPath,instanceRoot,workingDirectory=instanceRoot,programArguments=[],nativeHelperPath=null,nativeProcessIdentity=false}={}) {
+export function renderLaunchAgent({label,runnerPath,instanceRoot,workingDirectory=instanceRoot,programArguments=[],nativeHelperPath=null,nativeProcessIdentity=false,activated=false,officialService=false}={}) {
   if(!/^com\.[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/.test(label)) throw new Error("LaunchAgent label must be reverse-DNS");
   if(!runnerPath||!instanceRoot||![runnerPath,instanceRoot].every(privatePath)) throw new Error("LaunchAgent paths must be private HOME-scoped paths");
   const executable=fs.lstatSync(runnerPath),root=fs.lstatSync(instanceRoot);
   if(!executable.isFile()||executable.isSymbolicLink()||executable.nlink!==1||executable.uid!==owner()||(executable.mode&0o077)!==0||(executable.mode&0o100)===0) throw new Error("LaunchAgent executable must be a private, owned, singly linked executable file; a runner directory is not executable authority");
   if(!root.isDirectory()||root.isSymbolicLink()||root.uid!==owner()||(root.mode&0o077)!==0||!path.resolve(runnerPath).startsWith(path.resolve(instanceRoot)+path.sep)) throw new Error("LaunchAgent executable must belong to the private selected instance");
   if(!privatePath(workingDirectory)||!fs.lstatSync(workingDirectory).isDirectory()||(path.resolve(workingDirectory)!==path.resolve(instanceRoot)&&!path.resolve(workingDirectory).startsWith(path.resolve(instanceRoot)+path.sep))) throw new Error("LaunchAgent working directory must belong to the private selected instance");
-  const environment = `<key>EnvironmentVariables</key><dict><key>PATH</key><string>${xmlEscape(MACOS_RUNNER_RUNTIME_PATH)}</string>${nativeHelperPath && nativeProcessIdentity ? `<key>ORCHESTRATOR_MACOS_NATIVE_HELPER</key><string>${xmlEscape(nativeHelperPath)}</string><key>ORCHESTRATOR_MACOS_NATIVE_PROCESS_IDENTITY</key><string>1</string>` : ""}</dict>`;
-  return `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict><key>Label</key><string>${xmlEscape(label)}</string><key>ProgramArguments</key><array>${[runnerPath,...programArguments].map(x=>`<string>${xmlEscape(x)}</string>`).join("")}</array><key>WorkingDirectory</key><string>${xmlEscape(workingDirectory)}</string>${environment}<key>RunAtLoad</key><false/></dict></plist>`;
+  const environment = `<key>EnvironmentVariables</key><dict><key>PATH</key><string>${xmlEscape(MACOS_RUNNER_RUNTIME_PATH)}</string>${officialService?"<key>ACTIONS_RUNNER_SVC</key><string>1</string>":""}${nativeHelperPath && nativeProcessIdentity ? `<key>ORCHESTRATOR_MACOS_NATIVE_HELPER</key><string>${xmlEscape(nativeHelperPath)}</string><key>ORCHESTRATOR_MACOS_NATIVE_PROCESS_IDENTITY</key><string>1</string>` : ""}</dict>`;
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict><key>Label</key><string>${xmlEscape(label)}</string><key>ProgramArguments</key><array>${[runnerPath,...programArguments].map(x=>`<string>${xmlEscape(x)}</string>`).join("")}</array><key>WorkingDirectory</key><string>${xmlEscape(workingDirectory)}</string>${environment}<key>RunAtLoad</key>${activated?"<true/>":"<false/>"}${officialService?"<key>ProcessType</key><string>Interactive</string><key>SessionCreate</key><true/>":""}</dict></plist>`;
 }
 
-export function macosRuntimeAction(action,{state={},commandRunner=cmd,home=HOME(),platform=process.platform,arch=process.arch,capabilityVerifier=verifyMacosNativeCapability,runnerInspector=inspectMacosRunnerBootstrap}={}) {
+// Only a return from a path that made no filesystem/service action is a proven
+// rejection. Once activation writes or launchctl runs, an error is uncertain.
+export function macosRuntimeAction(action,options={}) {
+  const result=macosRuntimeActionImpl(action,options);
+  return result.status!=="PASS"&&result.mutations_performed===false?{...result,pre_mutation_rejection:true,service_action_state:"NOT_ATTEMPTED"}:result;
+}
+function macosRuntimeActionImpl(action,{state={},commandRunner=cmd,home=HOME(),platform=process.platform,arch=process.arch,capabilityVerifier=verifyMacosNativeCapability,runnerInspector=inspectMacosRunnerBootstrap,identityReader,preflightOnly=false}={}) {
   if(!["status","doctor","install","start","stop","repair"].includes(action)) return {status:"ERROR",mutations_performed:false,action};
   const readonly=action==="status"||action==="doctor";
   const preflight=migrationPreflight({state,home,commandRunner});
@@ -210,7 +231,7 @@ export function macosRuntimeAction(action,{state={},commandRunner=cmd,home=HOME(
   try { runner=runnerInspector({state,home,platform,arch,commandRunner,requireOnline:false}); }
   catch(error) { return {status:"ERROR",error_id:"MACOS-RUNNER-VERIFY",mutations_performed:false,details:String(error.message||error)}; }
   if(runner?.status!=="PASS") return {...runner,status:runner?.status||"ERROR",mutations_performed:false,preflight,plist_verified:false};
-  const authorizationKeys=["runner_executable","program_arguments","runner_id","approval_sha256","config_sha256","config_identity","env_sha256"];
+  const authorizationKeys=["runner_executable","program_arguments","service_executable","service_arguments","service_node","service_script","service_sha256","runner_id","approval_sha256","config_sha256","config_identity","env_sha256","path_sha256"];
   const approvedRunnerAuthorization=JSON.stringify(authorizationKeys.map(key=>runner[key]));
   const label=state.launch_agent_label, plist=path.join(home,"Library","LaunchAgents",`${label}.plist`),job=`gui/${owner()||0}/${label}`;
   const listed=commandRunner("launchctl",["list"]);
@@ -218,16 +239,23 @@ export function macosRuntimeAction(action,{state={},commandRunner=cmd,home=HOME(
   const ownEntries=String(listed.output||"").split("\n").filter(line=>line.trim().split(/\s+/).at(-1)===label);
   if(ownEntries.length>1)return {status:"ERROR",error_id:"MACOS-LAUNCHCTL-IDENTITY",mutations_performed:false,launchctl_state:"unknown",details:"Ambiguous same-label LaunchAgents."};
   const active=ownEntries.length===1,proof=commandRunner("launchctl",["print",job]);
+  if(hasMacosPersonalUsePolicy(state)&&!active&&!launchAgentAbsent(proof,label))return {status:"ERROR",error_id:"MACOS-LAUNCHCTL-ABSENCE-UNKNOWN",mutations_performed:false,launchctl_state:"unknown",details:proof.output};
   if(active!==proof.ok) return {status:"ERROR",error_id:"MACOS-LAUNCHCTL-002",mutations_performed:false,launchctl_state:"unknown",details:proof.output,preflight};
-  if(runner.local_listener_pid&&!active) return {status:"ERROR",error_id:"MACOS-RUNNER-UNMANAGED",mutations_performed:false,action,details:"The approved listener is already running outside its verified LaunchAgent; no second listener will be started."};
+  if((runner.local_listener_pid||runner.local_service_pids?.length)&&!active) return {status:"ERROR",error_id:"MACOS-RUNNER-UNMANAGED",mutations_performed:false,action,details:"The approved listener is already running outside its verified LaunchAgent; no second listener will be started."};
   let capability;
   try { capability=capabilityVerifier({state,home,platform,parentPid:state.parent_pid}); }
   catch(error) { return {status:"ERROR",error_id:"MACOS-NATIVE-CAPABILITY-VERIFY",mutations_performed:false,action,details:String(error.message||error)}; }
   const root=state.instance_root;
   const validCapability=capability?.status==="PASS"&&capability.installation_id===state.installation_id&&capability.instance_path===root&&capability.helper_path===path.join(root,"runtime","native","macos","process-identity")&&capability.receipt_path===path.join(root,"macos-native-helper-capability.json");
   if(!validCapability) return {status:"ERROR",error_id:capability?.error_id||"MACOS-NATIVE-CAPABILITY-INVALID",mutations_performed:false,action,capability:{status:capability?.status||"ERROR",error_id:capability?.error_id||"MACOS-NATIVE-CAPABILITY-INVALID"}};
+  const personal=hasMacosPersonalUsePolicy(state);
+  const activation=state.macos_runner_activation;
+  const activated=personal&&activation?.installation_id===state.installation_id&&activation?.approval_sha256===runner.approval_sha256&&activation?.runner_id===runner.runner_id&&activation?.login_restart_approved===true&&typeof activation?.challenge==="string"&&/^start:[a-f0-9]{64}$/.test(activation.challenge)&&(activation.challenge===state.macos_runner_action_approval||activation.challenge===state.macos_runner_bootstrap?.start_challenge)&&Number.isFinite(Date.parse(activation.approved_at||""));
+  if(personal&&(!runner.service_executable||runner.service_executable!==path.join(state.runner_path,"bin","runsvc.sh")||!Array.isArray(runner.service_arguments)||runner.service_arguments.length!==0))return {status:"ERROR",error_id:"MACOS-RUNNER-SERVICE-MODEL",mutations_performed:false};
+  const rendering=enabled=>renderLaunchAgent({label,runnerPath:personal?runner.service_executable:runner.runner_executable,programArguments:personal?runner.service_arguments:runner.program_arguments,instanceRoot:root,workingDirectory:state.runner_path,nativeHelperPath:capability.helper_path,nativeProcessIdentity:true,activated:enabled,officialService:personal});
+  const activeRendering=activated&&["START_INTENT","STARTED","ERROR"].includes(state.macos_runner_bootstrap?.phase);
   let expectedPlist;
-  try { expectedPlist=renderLaunchAgent({label,runnerPath:runner.runner_executable,programArguments:runner.program_arguments,instanceRoot:root,workingDirectory:state.runner_path,nativeHelperPath:capability.helper_path,nativeProcessIdentity:true}); }
+  try { expectedPlist=rendering(action==="start"?false:activeRendering); }
   catch(error) { return {status:"ERROR",error_id:"MACOS-RUNNER-EXECUTABLE",mutations_performed:false,action,details:String(error.message||error)}; }
   let plistBinding=null;
   try {
@@ -235,17 +263,21 @@ export function macosRuntimeAction(action,{state={},commandRunner=cmd,home=HOME(
     catch(error) { if(error.code!=="ENOENT")return {status:"ERROR",error_id:/exact approved rendering/.test(error.message)?"MACOS-PLIST-NATIVE-PATH-MISMATCH":"MACOS-PLIST-UNSAFE",mutations_performed:false,action,details:String(error.message||error),plist_verified:false}; }
     const plistVerified=plistBinding!==null;
     if(active&&!plistVerified) return {status:"ERROR",error_id:"MACOS-PLIST-MISSING",mutations_performed:false,launchctl_state:"unknown",plist_verified:false};
-    const prove=(output,current=runner,requirePid=false)=>proveLoadedLaunchAgent(output,{label,plist,runner:current,capability,runnerPath:state.runner_path,requirePid});
+    const prove=(output,current=runner,requirePid=false)=>proveLoadedLaunchAgent(output,{label,plist,runner:current,capability,runnerPath:state.runner_path,requirePid,personal,activated:action==="start"?activated:activeRendering,commandRunner,identityReader});
+    let serviceProof={listener_running:false,listener_identity:null,job_identity:null};
     if(active)try{
       const currentProof=commandRunner("launchctl",["print",job]);
       if(!currentProof.ok)throw new Error("Loaded LaunchAgent disappeared during capability inspection");
-      prove(currentProof.output);readApprovedLaunchAgent(plist,expectedPlist,plistBinding);
+      serviceProof=prove(currentProof.output);if(personal&&listedJobPid(ownEntries[0])!==serviceProof.pid)throw new Error("Listed job PID differs from the native inspected imported job");readApprovedLaunchAgent(plist,expectedPlist,plistBinding);
     }catch(error){return {status:"ERROR",error_id:"MACOS-LAUNCHCTL-IDENTITY",mutations_performed:false,action,launchctl_state:"unknown",details:String(error.message||error)};}
-    if(readonly) return {status:"PASS",mutations_performed:false,launchctl_checked:true,launchctl_state:active?"loaded":"not-loaded",plist_exists:plistVerified,plist_verified:plistVerified,runner,preflight};
+    if(readonly&&personal)try{rebindMacosRunnerConfiguration({state,home,approval:runner});}catch(error){return {status:"ERROR",error_id:error.code||"MACOS-RUNNER-CONFIG",details:String(error.message||error),mutations_performed:false,plist_verified:false};}
+    if(readonly) return {status:"PASS",mutations_performed:false,launchctl_checked:true,launchctl_state:active?"loaded":"not-loaded",plist_exists:plistVerified,plist_verified:plistVerified,listener_running:serviceProof.listener_running,listener_identity:serviceProof.listener_identity,job_identity:serviceProof.job_identity,runner_state:serviceProof.listener_running?"listener-running":active?"loaded-idle":"not-loaded",github_online:runner.runner_status==="online",runner,preflight};
     if(state.macos_setup_approved!==true||state.macos_action_approval!==action) return {status:"NEEDS_USER_ACTION",error_id:"MACOS-ACTION-APPROVAL",mutations_performed:false,action:"Approve this exact macOS action: "+action};
     if(active&&(action==="install"||action==="repair"||action==="start")) return {status:"ERROR",error_id:"MACOS-RUNNER-ACTIVE",mutations_performed:false,action,launchctl_state:"loaded",plist_verified:plistVerified,preflight};
+    if((action==="install"||action==="repair")&&activated)return {status:"ERROR",error_id:"MACOS-ACTIVATION-ALREADY-APPROVED",mutations_performed:false};
     if(action==="install"||action==="repair") {
       if(plistVerified) return {status:"ERROR",error_id:"MACOS-PLIST-COLLISION",mutations_performed:false,action,details:"Existing LaunchAgent is preserved. Inspect status; do not reinstall or overwrite it automatically."};
+      if(preflightOnly)return {status:"PASS",preflight_only:true,mutations_performed:false};
       const temp=path.join(path.dirname(plist),`.${label}.${process.pid}.${crypto.randomUUID()}.tmp`);
       let fd,committed=false;
       try {
@@ -258,7 +290,7 @@ export function macosRuntimeAction(action,{state={},commandRunner=cmd,home=HOME(
       } catch(error) {
         if(fd!==undefined) try { fs.closeSync(fd); } catch {}
         try { fs.unlinkSync(temp); } catch {}
-        return {status:"ERROR",error_id:"MACOS-PLIST-COMMIT",mutations_performed:committed,action,details:String(error.message||error),recovery_status:"PRESERVE_AND_INSPECT_INSTALLED_PLIST"};
+        return {status:"ERROR",error_id:"MACOS-PLIST-COMMIT",mutations_performed:committed?true:"UNKNOWN",action,details:String(error.message||error),recovery_status:"PRESERVE_AND_INSPECT_INSTALLED_PLIST"};
       }
     }
     if(!plistVerified) return {status:"ERROR",error_id:"MACOS-PLIST-MISSING",mutations_performed:false,action,plist_verified:false};
@@ -274,7 +306,7 @@ export function macosRuntimeAction(action,{state={},commandRunner=cmd,home=HOME(
     if(action==="start") {
       const checked=recheckRunnerAuthorization();if(checked.error)return checked.error;
       const boundary=migrationPreflight({state,home,commandRunner}),existing=commandRunner("launchctl",["print",job]);
-      if(boundary.status!=="READY"||boundary.inventory.runner.ownership!=="NONE_DETECTED"||existing.ok)return unknown("MACOS-LAUNCHCTL-IDENTITY","A loaded or ambiguous LaunchAgent appeared before bootstrap.");
+      if(boundary.status!=="READY"||boundary.inventory.runner.ownership!=="NONE_DETECTED"||existing.ok||personal&&!launchAgentAbsent(existing,label))return unknown("MACOS-LAUNCHCTL-IDENTITY","A loaded or ambiguous LaunchAgent appeared before bootstrap.");
     } else {
       const existing=commandRunner("launchctl",["print",job]);
       if(!existing.ok)return unknown("MACOS-LAUNCHCTL-IDENTITY",existing.output);
@@ -284,15 +316,48 @@ export function macosRuntimeAction(action,{state={},commandRunner=cmd,home=HOME(
     // and descriptor-bound plist checks before the fail-closed start decision.
     if(action==="start")try{rebindMacosRunnerConfiguration({state,home,approval:runner});}catch(error){return unknown(error.code||"MACOS-RUNNER-CONFIG",String(error.message||error));}
     try{readApprovedLaunchAgent(plist,expectedPlist,plistBinding);}catch(error){return unknown("MACOS-PLIST-DRIFT",String(error.message||error));}
-    // launchctl bootstrap hands a pathname to launchd. A held descriptor and
-    // a final comparison cannot prevent replacement before launchd consumes it;
-    // post-import checks would be too late for a tampered RunAtLoad=true job.
-    // Refuse startup until an independently verified immutable import exists.
-    if(action==="start")return unknown("MACOS-LAUNCHCTL-IMMUTABLE-IMPORT-REQUIRED","Runner start is blocked: launchctl cannot bind the approved plist inode and bytes atomically. An independently verified immutable LaunchAgent import is required before any bootstrap or kickstart.");
+    // Unapproved installations retain the immutable-import refusal. Personal
+    // policy trusts the owning account, accepting launchd's pathname import;
+    // it makes no claim against an attacker already controlling that account.
+    if(action==="start") {
+      if(!personal)return unknown("MACOS-LAUNCHCTL-IMMUTABLE-IMPORT-REQUIRED","Select the explicit personal-account policy through the official installer; no default pathname-import bypass is authorized.");
+      if(!activated||state.macos_activation_challenge!==activation.challenge)return unknown("MACOS-ACTIVATION-APPROVAL","Separate exact activation and normal user-login restart consent is required.");
+      if(preflightOnly)return {status:"PASS",preflight_only:true,mutations_performed:false};
+      const activatedPlist=rendering(true),temp=`${plist}.${process.pid}.${crypto.randomUUID()}.activation.tmp`;
+      let fd,changed=false;
+      try {
+        fd=fs.openSync(temp,"wx",0o600);fs.writeFileSync(fd,activatedPlist);fs.fsyncSync(fd);fs.closeSync(fd);fd=undefined;
+        readApprovedLaunchAgent(plist,expectedPlist,plistBinding);
+        fs.renameSync(temp,plist);changed=true;
+        fs.closeSync(plistBinding.fd);plistBinding=null;
+        const dfd=fs.openSync(path.dirname(plist),"r");try{fs.fsyncSync(dfd);}finally{fs.closeSync(dfd);}
+        expectedPlist=activatedPlist;plistBinding=readApprovedLaunchAgent(plist,expectedPlist);
+        // No external callback occurs between the final byte check and import.
+        const imported=commandRunner("launchctl",["bootstrap",`gui/${owner()||0}`,plist]);
+        if(!imported.ok)return {...unknown("MACOS-LAUNCHCTL-ACTION",imported.output,true),mutations_performed:"UNKNOWN"};
+        readApprovedLaunchAgent(plist,expectedPlist,plistBinding);
+        const afterRunner=recheckRunnerAuthorization();if(afterRunner.error)return {...afterRunner.error,mutations_performed:"UNKNOWN",recovery_status:"INSPECT_ONLY_NO_AUTOMATIC_RETRY"};
+        const inventory=migrationPreflight({state,home,commandRunner}),after=commandRunner("launchctl",["print",job]),listing=commandRunner("launchctl",["list"]);
+        if(inventory.status!=="READY"||!after.ok||!listing.ok||String(listing.output||"").split("\n").filter(line=>line.trim().split(/\s+/).at(-1)===label).length!==1)throw new Error("Imported LaunchAgent label is missing, duplicate or foreign");
+        const observed=prove(after.output,afterRunner.current);
+        const listedEntry=String(listing.output||"").split("\n").find(line=>line.trim().split(/\s+/).at(-1)===label);
+        if(listedJobPid(listedEntry)!==observed.pid)throw new Error("Imported list/print/native job identities disagree");
+        const final=commandRunner("launchctl",["print",job]);
+        if(!final.ok||JSON.stringify(prove(final.output,afterRunner.current))!==JSON.stringify(observed))throw new Error("Imported job identity changed after activation");
+        rebindMacosRunnerConfiguration({state,home,approval:afterRunner.current});
+        readApprovedLaunchAgent(plist,expectedPlist,plistBinding);
+        return {status:"PASS",mutations_performed:true,action,launchctl_state:"loaded",launchctl_checked:true,plist_verified:true,...observed,runner_state:observed.listener_running?"listener-running":"loaded-idle",github_online:afterRunner.current.runner_status==="online",runner:afterRunner.current};
+      }catch(error){
+        if(fd!==undefined)try{fs.closeSync(fd);}catch{}
+        // A committed activation or attempted import can never be retried here.
+        return {...unknown("MACOS-LAUNCHCTL-VERIFY",String(error.message||error),true),mutations_performed:changed?"UNKNOWN":true,recovery_status:"INSPECT_ONLY_NO_AUTOMATIC_RETRY"};
+      }
+    }
+    if(preflightOnly)return {status:"PASS",preflight_only:true,mutations_performed:false};
     const result=commandRunner("launchctl",["bootout",job]);
     if(!result.ok) return {...unknown("MACOS-LAUNCHCTL-ACTION",result.output),mutations_performed:"UNKNOWN",recovery_status:"INSPECT_ONLY_NO_AUTOMATIC_RETRY"};
     const after=commandRunner("launchctl",["print",job]);
-    if(after.ok)return unknown("MACOS-LAUNCHCTL-VERIFY",after.output,true);
+    if(after.ok||personal&&!launchAgentAbsent(after,label))return unknown("MACOS-LAUNCHCTL-VERIFY",after.output,true);
     return {status:"PASS",mutations_performed:true,action,launchctl_state:"not-loaded",plist_verified:true,runner,details:after.output};
   } finally { if(plistBinding)fs.closeSync(plistBinding.fd); }
 }
