@@ -49,6 +49,10 @@ function macosStateFile({create=false}={}){
   return file;
 }
 
+const macosStateOwners=new WeakMap();
+function macosStateRevision(state){const revision=Number(state?.state_revision);return Number.isSafeInteger(revision)&&revision>=0?revision:0;}
+function macosReadRevision(file){let fd;try{fd=fs.openSync(file,fs.constants.O_RDONLY|(fs.constants.O_NOFOLLOW||0));const value=JSON.parse(fs.readFileSync(fd,"utf8"));if(!value||typeof value!=="object"||Array.isArray(value))throw new Error("macOS installer state is contradictory");return macosStateRevision(value);}finally{if(fd!==undefined)fs.closeSync(fd);}}
+
 function loadState(options={}){
   if(process.platform==="darwin"){
     const empty=()=>({schema_version:1,preferred_language:null,current_step:"not_started",completed:[],ready:false});
@@ -63,6 +67,7 @@ function loadState(options={}){
       const state=JSON.parse(fs.readFileSync(fd,"utf8"));
       const after=fs.lstatSync(file);
       if(after.isSymbolicLink()||after.ino!==opened.ino||after.dev!==opened.dev||after.nlink!==1||(after.mode&0o777)!==0o600||!state||typeof state!=="object"||Array.isArray(state)) throw new Error("macOS installer state is contradictory");
+      macosStateOwners.set(state,macosStateRevision(state));
       return state;
     }catch(error){if(error.code==="ENOENT")return empty();throw error;}
     finally{if(fd!==undefined)fs.closeSync(fd);}
@@ -73,13 +78,41 @@ function loadState(options={}){
 function saveState(state){
   if(process.platform!=="darwin") return writeInstallerState(state);
   const file=macosStateFile({create:true});
+  const lock=`${file}.lock`;
+  try{fs.mkdirSync(lock,{mode:0o700});}catch(error){if(error.code==="EEXIST"){const conflict=new Error("macOS installer state lock is occupied; stale writer rejected");conflict.code="MACOS-STATE-CONFLICT";throw conflict;}throw error;}
+  const ownerRevision=macosStateOwners.has(state)?macosStateOwners.get(state):macosStateRevision(state);
+  let baselineExists=true,currentRevision=0;
+  try{currentRevision=macosReadRevision(file);}
+  catch(error){
+    if(error.code!=="ENOENT") {try{fs.rmdirSync(lock);}catch{}throw error;}
+    baselineExists=false;
+    if(ownerRevision!==0){try{fs.rmdirSync(lock);}catch{}const conflict=new Error("macOS installer state changed; stale writer rejected");conflict.code="MACOS-STATE-CONFLICT";throw conflict;}
+  }
+  if(currentRevision!==ownerRevision){try{fs.rmdirSync(lock);}catch{}const error=new Error("macOS installer state changed; stale writer rejected");error.code="MACOS-STATE-CONFLICT";throw error;}
   const temporary=`${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
-  const fd=fs.openSync(temporary,"wx",0o600);
-  try{fs.writeFileSync(fd,JSON.stringify(state,null,2)+"\n");fs.fsyncSync(fd);}finally{fs.closeSync(fd);}
-  macosStateFile();
-  fs.renameSync(temporary,file);
-  const directory=fs.openSync(path.dirname(file),"r");
-  try{fs.fsyncSync(directory);}finally{fs.closeSync(directory);}
+  const nextState={...state,state_revision:ownerRevision+1};
+  let fd,renamed=false;
+  try{
+    fd=fs.openSync(temporary,"wx",0o600);
+    try{fs.writeFileSync(fd,JSON.stringify(nextState,null,2)+"\n");fs.fsyncSync(fd);}finally{fs.closeSync(fd);fd=undefined;}
+    if(baselineExists){
+      if(macosReadRevision(file)!==ownerRevision){const error=new Error("macOS installer state changed; stale writer rejected");error.code="MACOS-STATE-CONFLICT";throw error;}
+    }else{
+      try{fs.lstatSync(file);const error=new Error("macOS installer state changed; stale writer rejected");error.code="MACOS-STATE-CONFLICT";throw error;}
+      catch(error){if(error.code!=="ENOENT")throw error;}
+    }
+    macosStateFile();
+    fs.renameSync(temporary,file);renamed=true;
+    const directory=fs.openSync(path.dirname(file),"r");
+    try{fs.fsyncSync(directory);}finally{fs.closeSync(directory);}
+    Object.assign(state,nextState);macosStateOwners.set(state,ownerRevision+1);
+    fs.rmdirSync(lock);
+  }catch(error){
+    if(fd!==undefined)try{fs.closeSync(fd);}catch{}
+    if(!renamed){try{fs.unlinkSync(temporary);}catch{}try{fs.rmdirSync(lock);}catch{}
+    }
+    throw error;
+  }
 }
 
 function valueOf(flag) {
@@ -638,11 +671,13 @@ function runSetup() {
       }
     }
     catch(error){
+      if(error.code==="MACOS-STATE-CONFLICT") return emit({status:"ERROR",error_id:"MACOS-STATE-CONFLICT",recoverable:true,preferred_language:lang,message:"Installer state advanced in another macOS setup process; reload and resume to preserve the canonical registration.",details:String(error.message||error),mutations_performed:"UNKNOWN"},1);
       state.last_error={error_id:"MACOS-CHAT-REGISTRATION",message:String(error.message||error),at:new Date().toISOString()};
-      state.current_step="sandbox_chat_registration";saveState(state);
+      state.current_step="sandbox_chat_registration";
+      try{saveState(state);}catch(saveError){if(saveError.code==="MACOS-STATE-CONFLICT") return emit({status:"ERROR",error_id:"MACOS-STATE-CONFLICT",recoverable:true,preferred_language:lang,message:"Installer state advanced in another macOS setup process; reload and resume to preserve the canonical registration.",details:String(saveError.message||saveError),mutations_performed:"UNKNOWN"},1);throw saveError;}
       return emit({status:"ERROR",error_id:"MACOS-CHAT-REGISTRATION",recoverable:true,preferred_language:lang,message:"Exact Chat registration could not be established. Preserve the issue and callback evidence; no Sandbox run was requested.",details:String(error.message||error),mutations_performed:"UNKNOWN"},1);
     }
-    if(registration.status!=="READY"){ state.sandbox_chat_registration_issue=registration.issue?.url||null; state.current_step="sandbox_chat_registration"; saveState(state); return emit({status:"WAITING",action_id:"sandbox_chat_registration",recoverable:true,preferred_language:lang,message:"Register the explicit Sandbox callback in the originating Chat before CODEX-RUN.",registration_issue:registration.issue?.url||null,mutations_performed:true}); }
+    if(registration.status!=="READY"){ state.sandbox_chat_registration_issue=registration.issue?.url||null; state.current_step="sandbox_chat_registration"; try{saveState(state);}catch(error){if(error.code==="MACOS-STATE-CONFLICT") return emit({status:"ERROR",error_id:"MACOS-STATE-CONFLICT",recoverable:true,preferred_language:lang,message:"Installer state advanced in another macOS setup process; reload and resume to preserve the canonical registration.",details:String(error.message||error),mutations_performed:"UNKNOWN"},1);throw error;} return emit({status:"WAITING",action_id:"sandbox_chat_registration",recoverable:true,preferred_language:lang,message:"Register the explicit Sandbox callback in the originating Chat before CODEX-RUN.",registration_issue:registration.issue?.url||null,mutations_performed:true}); }
     const registered=registration.record;
     const shortId=String(state.installation_id||"").replace(/[^A-Za-z0-9]/g,"").slice(0,8).toLowerCase()||"default";
     const expectedSandboxProject="sandbox-"+shortId;

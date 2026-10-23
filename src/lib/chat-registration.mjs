@@ -104,6 +104,45 @@ function listRegistrationIssues(state,projectKey,chatUrl,commandRunner=runGh){
   try{return JSON.parse(r.stdout);}catch{return [];}
 }
 
+function atomicPrivateJson(file,value){
+  const tmp=`${file}.tmp-${process.pid}-${crypto.randomBytes(8).toString("hex")}`;
+  const fd=fs.openSync(tmp,"wx",0o600);
+  try{fs.writeFileSync(fd,JSON.stringify(value,null,2)+"\n");fs.fsyncSync(fd);}finally{fs.closeSync(fd);}
+  fs.renameSync(tmp,file);
+  const directory=fs.openSync(path.dirname(file),"r");
+  try{fs.fsyncSync(directory);}finally{fs.closeSync(directory);}
+}
+function macRegistrationGuard(state,projectKey,chatUrl){
+  if(state?.instance_platform!=="darwin") return null;
+  const base=state.instance_root;
+  if(!base||!privateInstanceAncestors(base)||path.basename(base)!==String(state.instance_id)) throw new Error("Unsafe macOS registration identity");
+  const identityKey=crypto.createHash("sha256").update(`${String(projectKey)}\n${chatUrl}`).digest("hex").slice(0,24);
+  const intent=path.join(base,`registration-intent-${identityKey}`),lock=path.join(base,`registration-intent-${identityKey}.lock`); let saved=null;
+  // The claim is deliberately per project/Chat.  Different legitimate Chats
+  // must not serialize through, or overwrite, one installation-wide record.
+  try{fs.mkdirSync(lock,{mode:0o700});}catch(e){if(e.code==="EEXIST") throw new Error("macOS registration claim is occupied");throw e;}
+  if(fs.existsSync(intent)){
+    try{
+      const stat=fs.lstatSync(intent);
+      if(stat.isSymbolicLink()||!stat.isFile()||stat.nlink!==1||stat.uid!==process.getuid()||(stat.mode&0o777)!==0o600) throw new Error("Unsafe macOS registration claim");
+      saved=JSON.parse(fs.readFileSync(intent,"utf8"));
+    }catch(e){try{fs.rmdirSync(lock);}catch{};if(e.message?.startsWith("Unsafe")) throw e;throw new Error("Malformed macOS registration intent; refusing a duplicate submission");}
+  }
+  const identity={installation_id:String(state.installation_id),instance_id:String(state.instance_id),instance_root:path.resolve(base),control_repository:String(state.control_repository),project:String(projectKey),chat_url:chatUrl};
+  if(saved) for(const k of Object.keys(identity)) if(String(saved[k])!==identity[k]) {try{fs.rmdirSync(lock);}catch{};throw new Error("Conflicting macOS registration identity");}
+  try{if(!saved){saved={schema_version:1,status:"INTENT",...identity};atomicPrivateJson(intent,saved);}
+    return {saved,commit(issue){atomicPrivateJson(intent,{...saved,status:"COMMITTED",issue:{number:issue.number||null,url:issue.url||issue.html_url||null,title:issue.title||null}});},release(){try{fs.rmdirSync(lock);}catch{}},retain(){}};
+  }catch(e){try{fs.rmdirSync(lock);}catch{};throw e;}
+}
+function exactMacIssues(state,projectKey,chatUrl,issues){return issues.filter(x=>String(x.state||"").toUpperCase()==="OPEN"&&String(x.title||"")==="[CHAT-REGISTER] "+registrationMarker(state,projectKey,chatUrl)&&(()=>{try{const b=JSON.parse(x.body);return b.project===projectKey&&normalizeChatUrl(b.chat_url)===chatUrl&&String(b.installation_id)===String(state.installation_id);}catch{return false;}})());}
+function hasPendingMacReceipt(state,projectKey,chatUrl){
+  const base=state?.instance_root;if(!base)return false;
+  for(const dir of ["pending-wakes","registration-delivery"]){
+    const folder=path.join(base,dir);let names;try{names=fs.readdirSync(folder);}catch{continue;}
+    for(const name of names){if(!name.endsWith(".json"))continue;try{const value=JSON.parse(fs.readFileSync(path.join(folder,name),"utf8"));if(String(value.chat_url||"")===chatUrl&&String(value.callback_id||"").startsWith(`chat-register-${String(projectKey).toLowerCase()}-`))return true;}catch{}}
+  } return false;
+}
+
 export function ensureInstallerChatRegistration(state,{projectKey,commandRunner=runGh}){
   if(!state?.control_repository) throw new Error("Control repository is not configured");
   if(!projectKey) throw new Error("projectKey is required");
@@ -115,13 +154,31 @@ export function ensureInstallerChatRegistration(state,{projectKey,commandRunner=
   }
 
   const marker=registrationMarker(state,projectKey,chatUrl);
-  const candidates=listRegistrationIssues(state,projectKey,chatUrl,commandRunner).filter(x=>{
+  // A verified canonical Issue is a read-only answer: do not create an intent
+  // or lock merely to observe it.
+  if(state?.instance_platform==="darwin"){
+    const initial=listRegistrationIssues(state,projectKey,chatUrl,commandRunner);
+    const initialCandidates=exactMacIssues(state,projectKey,chatUrl,initial);
+    if(initialCandidates.length>1) throw new Error("Multiple registration issues match this exact Chat; refusing ambiguous submission");
+    if(initialCandidates.length===1) return {status:"WAITING",route:null,issue:initialCandidates[0]};
+    if(hasPendingMacReceipt(state,projectKey,chatUrl)) return {status:"WAITING",route:null,issue:null};
+  }
+  const guard=macRegistrationGuard(state,projectKey,chatUrl);
+  let createAttempted=false;
+  try{
+  const listed=listRegistrationIssues(state,projectKey,chatUrl,commandRunner);
+  const candidates=listed.filter(x=>{
     if(state?.instance_platform!=="darwin") return String(x.title||"").includes(marker);
     if(String(x.state||"").toUpperCase()!=="OPEN"||String(x.title||"")!=="[CHAT-REGISTER] "+marker) return false;
     try{const body=JSON.parse(x.body);return body.project===projectKey&&normalizeChatUrl(body.chat_url)===chatUrl&&body.installation_id===state.installation_id;}catch{return false;}
   });
-  if(state?.instance_platform==="darwin"&&candidates.length>1) throw new Error("Multiple registration issues match this exact Chat; refusing ambiguous submission");
-  let issue=candidates[0];
+  const macCandidates=state?.instance_platform==="darwin"?exactMacIssues(state,projectKey,chatUrl,listed):candidates;
+  const selected=state?.instance_platform==="darwin"?macCandidates:candidates;
+  if(state?.instance_platform==="darwin"&&selected.length>1) throw new Error("Multiple registration issues match this exact Chat; refusing ambiguous submission");
+  let issue=selected[0];
+  if(!issue&&guard?.saved?.status&&guard.saved.status!=="INTENT"){
+    throw new Error("Registration outcome is uncertain; refusing an unverified duplicate submission");
+  }
   if(!issue){
     const title="[CHAT-REGISTER] "+marker;
     const body=JSON.stringify({
@@ -129,10 +186,14 @@ export function ensureInstallerChatRegistration(state,{projectKey,commandRunner=
       chat_url:chatUrl,
       installation_id:state.installation_id
     },null,2);
-    const r=commandRunner(["issue","create","--repo",state.control_repository,"--title",title,"--body",body]);
+    let r;
+    createAttempted=true;
+    try{r=commandRunner(["issue","create","--repo",state.control_repository,"--title",title,"--body",body]);}
+    catch(e){guard?.retain();throw e;}
     const url=r.stdout.split(/\s+/).find(x=>/^https:\/\/github\.com\//.test(x))||r.stdout;
     issue={title,url};
   }
 
-  return {status:"WAITING",route:null,issue};
+  guard?.commit(issue);guard?.release();return {status:"WAITING",route:null,issue};
+  }catch(e){if(createAttempted) guard?.retain(); else guard?.release();throw e;}
 }
