@@ -266,10 +266,59 @@ function verifyNewInstallPrepared({ local, state, githubApi }) {
       const provenance = independentlyVerifiedProvenanceWithoutIssue({ state, githubApi });
       return diagnostic("NEW_INSTALL_CONTROL_PREPARED_AWAITING_ROUTE", ["active_unique_route", "trusted_manifest"], { provenance: { control_repository_id: provenance.control_repository_id, sandbox_repository_id: provenance.sandbox_repository_id } });
     }
+    if (!state.sandbox_review_route && routes.length === 1) {
+      return verifyPendingFirstRegistration({ local, state, githubApi, route: routes[0] });
+    }
     if (!hasRoute) return null;
     const provenance = independentlyVerifiedProvenance({ state, githubApi, routeFile: local.routeFile, issueId: selected[0].registration_issue });
     return diagnostic("NEW_INSTALL_PREPARED", ["trusted_manifest"], { provenance: { control_repository_id: provenance.control_repository_id, sandbox_repository_id: provenance.sandbox_repository_id, registration_issue_id: provenance.registration_issue_id } });
   } catch { return null; }
+}
+
+function verifyPendingFirstRegistration({ local, state, githubApi, route }) {
+  const short = canonicalInstallationId(state.installation_id);
+  const chatUrl = canonicalUrl(state.reviewer_chat_url);
+  const issuePrefix = `https://github.com/${state.control_repository}/issues/`;
+  const savedIssue = state.sandbox_chat_registration_issue;
+  const issueNumber = typeof savedIssue === "string" && savedIssue.startsWith(issuePrefix)
+    ? Number(savedIssue.slice(issuePrefix.length)) : 0;
+  const identity = { instance_id: state.instance_id, installation_id: state.installation_id, control_repository: state.control_repository, sandbox_repository: state.sandbox_repository };
+  const control = local.control.value;
+  const registry = local.routeFile.value;
+  if (![undefined, null, ""].includes(state.sandbox_review_route) || state.review_route || state.selected_fresh_instance === true ||
+      state.instance_id === "1832f0bb" || state.instance_platform !== "darwin" || state.instance_arch !== "arm64" ||
+      state.instance_id !== short || state.sandbox_project_key !== `sandbox-${short}` ||
+      state.instance_root !== local.instanceRoot || state.chat_route_file !== path.join(local.instanceRoot, "chat-routes.json") ||
+      (control.instance_root !== undefined && control.instance_root !== local.instanceRoot) ||
+      (control.chat_route_file !== undefined && control.chat_route_file !== state.chat_route_file) ||
+      (local.intent.value.destination?.path !== undefined && local.intent.value.destination.path !== local.instanceRoot) ||
+      state.sandbox_only !== true || state.target_environment_ready !== false ||
+      !chatUrl || !Number.isSafeInteger(issueNumber) || issueNumber <= 0 || savedIssue !== issuePrefix + issueNumber ||
+      registry.version !== 1 || !Array.isArray(registry.routes) ||
+      route.route !== `chat-${issueNumber}` || route.registration_issue !== issueNumber || route.status !== "active" ||
+      route.project !== state.sandbox_project_key || route.installation_id !== state.installation_id || route.chat_url !== chatUrl ||
+      control.schema_version !== 1 || control.platform !== "darwin" || control.arch !== "arm64" ||
+      control.trusted_github_username !== state.github_login ||
+      !validRepositoryId(state.control_repository_id) || !validRepositoryId(state.sandbox_repository_id) || !validRepositoryId(state.github_owner_id) ||
+      String(control.github_owner_id || "") !== String(state.github_owner_id) ||
+      (state.github_user_id !== undefined && String(state.github_user_id) !== String(state.github_owner_id)) ||
+      ["control_repository_id", "sandbox_repository_id"].some(key => String(control[key] || "") !== String(state[key])) ||
+      [registry, route, control, local.intent.value].some(record =>
+        Object.entries(identity).some(([key, expected]) => record[key] !== undefined && record[key] !== expected) ||
+        ["control_repository_id", "sandbox_repository_id", "github_owner_id"].some(key => record[key] !== undefined && String(record[key]) !== String(state[key])))) return null;
+  const provenance = verifyMacosGeneratedRepositoryIdentity({ state: { ...state, github_user_id: state.github_owner_id }, githubApi });
+  const issue = remoteIssue(githubApi, state.control_repository, issueNumber);
+  const body = issueBody(issue);
+  const chatHash = crypto.createHash("sha256").update(chatUrl).digest("hex").slice(0, 16);
+  const title = `[CHAT-REGISTER] INSTALL-CHAT-${short}-${state.sandbox_project_key}-${chatHash}`;
+  if (issue?.number !== issueNumber || issue?.html_url !== savedIssue || issue?.state !== "open" || issue?.pull_request ||
+      issue?.title !== title || issue?.user?.login !== state.github_login || String(issue?.user?.id || "") !== String(state.github_owner_id) ||
+      body?.project !== state.sandbox_project_key || body?.installation_id !== state.installation_id || body?.chat_url !== chatUrl) return null;
+  // This only admits receipt reconciliation. Registry/GitHub provenance cannot
+  // establish delivery, select the state route, or issue a trusted manifest.
+  return diagnostic("NEW_INSTALL_REGISTRATION_PENDING", ["registration_delivery_receipt", "trusted_manifest"], {
+    provenance: { control_repository_id: provenance.control_repository_id, sandbox_repository_id: provenance.sandbox_repository_id, registration_issue_id: issueNumber }
+  });
 }
 
 function independentlyVerifiedProvenanceWithoutIssue({ state, githubApi }) {

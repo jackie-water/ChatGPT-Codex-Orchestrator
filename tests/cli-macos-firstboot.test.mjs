@@ -6,7 +6,9 @@ import path from "node:path";
 import crypto from "node:crypto";
 import vm from "node:vm";
 import { MACOS_PERSONAL_USE_POLICY, hasMacosPersonalUsePolicy, macosPersonalUsePolicyChallenge } from "../src/lib/macos-personal-use-service.mjs";
-import {canonicalInstallationId} from "../src/lib/control-render.mjs";
+import {canonicalInstallationId, defaultLocalPaths} from "../src/lib/control-render.mjs";
+import {ensureInstallerChatRegistration, findRegisteredChatRoute, normalizeChatUrl} from "../src/lib/chat-registration.mjs";
+import {githubReadOnlyApi, issueTrustedRecoveryEvidence, verifyTrustedRecoveryEvidence} from "../src/lib/macos-trusted-recovery-evidence.mjs";
 
 const cli=fs.readFileSync(new URL("../src/cli.mjs",import.meta.url),"utf8");
 const helpers=cli.slice(cli.indexOf("function macosRunnerActionChallenge("),cli.indexOf("function dryRun()"));
@@ -128,6 +130,139 @@ test("only independently approved fresh identity can await its first route witho
   assert.equal(context.awaiting({}, {...approved,route_count:1}),false);
   assert.equal(context.awaiting({}, {...approved,route_count:1,first_route_pending:true}),true);
   assert.equal(context.awaiting({sandbox_review_route:"chat-408"},approved),false);
+});
+
+function pendingRegistrationResume(t){
+  const f=fixture(t),state=f.state,calls=[],saved=[];
+  Object.assign(state,{
+    instance_platform:"darwin",instance_arch:"arm64",github_owner_id:"42",macos_setup_approved:true,
+    github_plugin_authorized:true,github_plugin_authorization_verified:true,generated_repo_authorized:true,
+    control_environment_ready:true,sandbox_only:true,target_environment_ready:false,sandbox_verified:false,
+    reviewer_chat_url:"https://chatgpt.com/c/firstboot-pending",target_repository:"owner/target",completed:[],
+    codex_trust_sandbox:true,reviewer_browser_ready:true,
+    control_clone_path:defaultLocalPaths({home:f.home,installationId:state.installation_id,projectKey:state.sandbox_project_key}).control,
+    chat_route_file:path.join(state.instance_root,"chat-routes.json")
+  });
+  Object.assign(state,{
+    github_plugin_authorization_installation_id:state.installation_id,
+    github_plugin_authorization_control_repository:state.control_repository,
+    github_plugin_authorization_sandbox_repository:state.sandbox_repository,
+    github_plugin_authorization_chat_url:state.reviewer_chat_url,
+    sandbox_chat_registration_issue:`https://github.com/${state.control_repository}/issues/511`
+  });
+  const write=(file,value)=>{fs.mkdirSync(path.dirname(file),{recursive:true,mode:0o700});fs.writeFileSync(file,JSON.stringify(value)+"\n",{mode:0o600});};
+  const identity={instance_id:state.instance_id,installation_id:state.installation_id,control_repository:state.control_repository,sandbox_repository:state.sandbox_repository};
+  write(path.join(state.control_clone_path,"instance.json"),{schema_version:1,...identity,role:"control",platform:"darwin",arch:"arm64",trusted_github_username:state.github_login,github_owner_id:state.github_owner_id,control_repository_id:state.control_repository_id,sandbox_repository_id:state.sandbox_repository_id});
+  write(path.join(state.instance_root,"migration-intent.json"),{schema_version:1,phase:"PREPARED",installation_id:state.installation_id,generated_repositories:{control:state.control_repository,sandbox:state.sandbox_repository}});
+  const route={route:"chat-511",project:state.sandbox_project_key,status:"active",chat_url:state.reviewer_chat_url,registration_issue:511,installation_id:state.installation_id};
+  const hash=crypto.createHash("sha256").update(state.reviewer_chat_url).digest("hex").slice(0,16);
+  const issue={number:511,html_url:state.sandbox_chat_registration_issue,url:state.sandbox_chat_registration_issue,state:"open",title:`[CHAT-REGISTER] INSTALL-CHAT-${state.instance_id}-${state.sandbox_project_key}-${hash}`,user:{login:state.github_login,id:42},body:JSON.stringify({project:state.sandbox_project_key,chat_url:state.reviewer_chat_url,installation_id:state.installation_id})};
+  const settings={offline:false,offlineAfterFirstProof:false,removeProofBeforeConsumption:false},api={
+    getAuthenticatedUser:()=>({login:state.github_login,id:42}),
+    getRepository:repository=>{
+      if(settings.offline)throw Error("synthetic offline");
+      const role=repository===state.control_repository?"control":"sandbox";
+      return {id:role==="control"?101:202,private:true,visibility:"private",name:repository.split("/")[1],full_name:repository,owner:{login:state.github_login,id:42},description:`ChatGPT Codex Orchestrator ${role} installation ${state.installation_id}`};
+    },
+    getIssue:(repository,number)=>{assert.equal(repository,state.control_repository);assert.equal(number,511);return issue;}
+  };
+  const callbackId=`chat-register-${state.sandbox_project_key}-511`,outbox=path.join(state.instance_root,"pending-wakes",callbackId+".json"),journal=path.join(state.instance_root,"registration-delivery",callbackId+".json");
+  const deliver=()=>{
+    write(outbox,{delivery_state:"DELIVERED",delivery_owner:"register-chat.mjs",callback_id:callbackId,chat_url:state.reviewer_chat_url,verified_by:"existing-user-message"});
+    write(journal,{schema_version:1,status:"DELIVERED",verified_role:"user",verified_by:"existing-user-message",callback_id:callbackId,chat_url:state.reviewer_chat_url,callback_state_sha256:crypto.createHash("sha256").update(fs.readFileSync(outbox)).digest("hex")});
+  };
+  const commandRunner=args=>{
+    calls.push("issue-"+args[1]);assert.equal(args[1],"list","resume must preserve the first registration Issue");
+    return {ok:true,stdout:JSON.stringify([{...issue,state:"OPEN"}])};
+  };
+  const context=vm.createContext({
+    crypto,path,os:{...os,homedir:()=>f.home},process:{platform:"darwin",cwd:()=>f.home},
+    canonicalInstallationId,findRegisteredChatRoute,normalizeChatUrl,githubReadOnlyApi,issueTrustedRecoveryEvidence,
+    loadState:()=>state,ensureStateLanguage:()=>"en",saveState:actual=>{assert.equal(actual.target_environment_ready,false);saved.push(JSON.parse(JSON.stringify(actual)));},
+    emit:(result,code=0)=>({result,code}),
+    macosRecoveryReport:()=>({status:"NEEDS_VERIFICATION",instance_ids:[state.instance_id],instances:[{identity}]}),
+    macosTrustedRecoveryEvidence:(actual,{requireReceipt})=>verifyTrustedRecoveryEvidence({state:actual,home:f.home,githubApi:api,requireReceipt}),
+    macosPrerequisites:()=>{calls.push("prerequisites");if(settings.offlineAfterFirstProof)settings.offline=true;return {node:true,git:true,gh:true,codex:true,session_auth:true,github_auth:true,native_helper:{status:"PASS"}};},
+    migrationPreflight:()=>({status:"READY"}),authenticatedGithubLogin:()=>state.github_login,
+    prepareMigrationIntent:()=>({path:path.join(state.instance_root,"migration-intent.json"),phase:"PREPARED"}),
+    prepareControlEnvironment:()=>assert.fail("prepared Control must not be recreated"),
+    verifyMacosGeneratedRepositories:()=>({control_repository_id:"101",sandbox_repository_id:"202",github_owner_id:"42"}),
+    prepareMacosNativeHelper:()=>{calls.push("native-mock");if(settings.removeProofBeforeConsumption)fs.rmSync(journal);return {status:"PASS",instance_path:state.instance_root};},
+    advanceMacosFirstBootRunner:()=>{calls.push("runner-mock");return {status:"READY"};},
+    ensureInstallerChatRegistration:(actual,options)=>{calls.push("registration");assert.equal(actual.sandbox_review_route,undefined);return ensureInstallerChatRegistration(actual,{...options,commandRunner:options.commandRunner||commandRunner});},
+    spawnSafeSync:(executable,args)=>{
+      assert.equal(executable,"gh");assert.deepEqual(Array.from(args).slice(0,3),["api","--hostname","github.com"]);
+      const endpoint=args[3];let value;
+      if(endpoint===`repos/${state.control_repository}/issues/511`)value=api.getIssue(state.control_repository,511);
+      else if(endpoint===`repos/${state.control_repository}`)value=api.getRepository(state.control_repository);
+      else if(endpoint===`repos/${state.sandbox_repository}`)value=api.getRepository(state.sandbox_repository);
+      else assert.fail("unexpected synthetic GitHub endpoint");
+      return {status:0,stdout:JSON.stringify(value)};
+    },
+    sandboxSmokeStatus:()=>{calls.push("sandbox-status");assert.equal(state.trusted_recovery_evidence_status,"VERIFIED");return {status:"WAITING",stage:"RUNNING"};},
+    startSandboxSmoke:()=>assert.fail("fixture must never dispatch Sandbox"),action:()=>assert.fail("unexpected installer action")
+  });
+  const stateGate=cli.slice(cli.indexOf("function macosStateBound("),cli.indexOf("function macosGithubApi("));
+  const bootstrapGate=cli.slice(cli.indexOf("function macosBootstrapMayAdvance("),cli.indexOf("function macosTrustedRecoveryEvidence("));
+  const setup=cli.slice(cli.indexOf("function runSetup() {"),cli.indexOf("function codexLogin()"));
+  vm.runInContext(stateGate+bootstrapGate+setup+"\nthis.resume=runSetup;",context);
+  write(state.chat_route_file,{version:1,routes:[]});
+  return {state,home:f.home,api,route,issue,calls,saved,settings,outbox,journal,write,deliver,resume:()=>context.resume(),queue:()=>write(state.chat_route_file,{version:1,routes:[route]})};
+}
+
+test("ordinary first registration resumes zero routes through real delivery consumption before saving its route",t=>{
+  const f=pendingRegistrationResume(t);
+  assert.equal(f.resume().result.action_id,"sandbox_chat_registration");
+  assert.equal(f.state.sandbox_review_route,undefined);
+  assert.deepEqual(f.calls.filter(call=>call.startsWith("issue-")),["issue-list"]);
+  f.queue();f.calls.length=0;
+  const before=JSON.stringify(f.state),savedBefore=f.saved.length;
+  const waiting=f.resume().result;
+  assert.equal(waiting.status,"WAITING");assert.equal(waiting.trusted_recovery_evidence.status,"NEW_INSTALL_REGISTRATION_PENDING");
+  assert.equal(JSON.stringify(f.state),before);assert.equal(f.saved.length,savedBefore);assert.deepEqual(f.calls,[]);
+  f.deliver();
+  const result=f.resume().result;
+  assert.equal(result.action_id,"sandbox_verification");
+  assert.ok(f.calls.includes("registration"));assert.equal(f.calls.some(call=>call.startsWith("issue-")),false,"delivered proof avoids another Issue lookup/submission");
+  assert.equal(f.state.sandbox_review_route,"chat-511");assert.equal(f.saved.at(-1).sandbox_review_route,"chat-511");
+  assert.equal(f.state.trusted_recovery_evidence_status,"VERIFIED");
+  assert.equal(verifyTrustedRecoveryEvidence({state:f.state,home:f.home,githubApi:f.api}).status,"VERIFIED");
+  assert.equal(f.state.sandbox_verified,false);assert.equal(f.state.target_environment_ready,false);
+});
+
+for(const [name,mutate] of [
+  ["missing outbox",f=>fs.rmSync(f.outbox)],
+  ["missing journal",f=>fs.rmSync(f.journal)],
+  ["forged terminal outbox",f=>{const value=JSON.parse(fs.readFileSync(f.outbox));value.delivery_owner="other";f.write(f.outbox,value);}],
+  ["forged user role",f=>{const value=JSON.parse(fs.readFileSync(f.journal));value.verified_role="assistant";f.write(f.journal,value);}],
+  ["forged delivery hash",f=>{const value=JSON.parse(fs.readFileSync(f.journal));value.callback_state_sha256="0".repeat(64);f.write(f.journal,value);}]
+])test(`pending first-route CLI gate preserves the first Issue on ${name}`,t=>{
+  const f=pendingRegistrationResume(t);f.queue();f.deliver();mutate(f);
+  const before=JSON.stringify(f.state),routes=fs.readFileSync(f.state.chat_route_file);
+  const result=f.resume().result;
+  assert.equal(result.status,"WAITING");assert.equal(result.registration_issue,f.issue.html_url);
+  assert.equal(result.mutations_performed,false);assert.deepEqual(f.calls,[]);assert.deepEqual(f.saved,[]);
+  assert.equal(JSON.stringify(f.state),before);assert.deepEqual(fs.readFileSync(f.state.chat_route_file),routes);
+  assert.equal(fs.existsSync(path.join(f.state.instance_root,"trusted-recovery-evidence-v1.json")),false);
+});
+
+test("pending first-route CLI gate rejects offline or changed evidence before native or Runner steps",t=>{
+  const f=pendingRegistrationResume(t);f.queue();f.deliver();
+  f.settings.offline=true;
+  assert.equal(f.resume().result.error_id,"MACOS-EXISTING-INSTANCE-REVIEW");assert.deepEqual(f.calls,[]);assert.deepEqual(f.saved,[]);
+  f.settings.offline=false;f.settings.offlineAfterFirstProof=true;
+  assert.equal(f.resume().result.error_id,"MACOS-TRUSTED-RECOVERY-EVIDENCE");assert.deepEqual(f.calls,["prerequisites"]);assert.deepEqual(f.saved,[]);
+  assert.equal(f.state.sandbox_review_route,undefined);
+});
+
+test("first-registration proof lost after the early gate cannot create another Issue or save a route",t=>{
+  const f=pendingRegistrationResume(t);f.queue();f.deliver();f.settings.removeProofBeforeConsumption=true;
+  const result=f.resume().result;
+  assert.equal(result.error_id,"MACOS-CHAT-REGISTRATION");assert.ok(f.calls.includes("registration"));
+  assert.equal(f.calls.some(call=>call.startsWith("issue-")),false);
+  assert.equal(f.state.sandbox_chat_registration_issue,f.issue.html_url);assert.equal(f.state.sandbox_review_route,undefined);
+  assert.equal(f.saved.some(state=>state.sandbox_review_route!==undefined),false);
+  assert.equal(fs.existsSync(path.join(f.state.instance_root,"trusted-recovery-evidence-v1.json")),false);
 });
 
 

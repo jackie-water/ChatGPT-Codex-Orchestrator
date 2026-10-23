@@ -11,7 +11,7 @@ import { sanitizeObject } from "./lib/sanitize.mjs";
 import { submitDiagnosticReport } from "./lib/reporting.mjs";
 import { prepareControlEnvironment, activateTargetProject, upgradeControlEnvironment, refreshControlRuntime, verifyMacosGeneratedRepositories, githubLogin as authenticatedGithubLogin } from "./lib/control-env.mjs";
 import { renderProjectInstructions } from "./lib/project-instructions.mjs";
-import { ensureInstallerChatRegistration, normalizeChatUrl } from "./lib/chat-registration.mjs";
+import { ensureInstallerChatRegistration, findRegisteredChatRoute, normalizeChatUrl } from "./lib/chat-registration.mjs";
 import { pendingCallbackCount, doctorHealth, repairHealth } from "./lib/runtime-health.mjs";
 import { macosPrerequisites, migrationPreflight, macosRuntimeAction, prepareMigrationIntent } from "./lib/macos-platform.mjs";
 import { macosNativeHelperPreflight, prepareMacosNativeHelper, verifyMacosNativeCapability } from "./lib/macos-native-helper-install.mjs";
@@ -188,7 +188,7 @@ function macosRecoveryReport(state={}) {
 function macosBootstrapMayAdvance(state, recovery, evidence) {
   if(recovery?.status==="SELECTED_FRESH_INSTANCE_VERIFIED") return true;
   if (!recovery || recovery.status !== "NEEDS_VERIFICATION" || recovery.instances?.length !== 1) return false;
-  if (!["VERIFIED", "NEW_INSTALL_PREPARED", "NEW_INSTALL_CONTROL_PREPARED_AWAITING_ROUTE"].includes(evidence?.status)) return false;
+  if (!["VERIFIED", "NEW_INSTALL_PREPARED", "NEW_INSTALL_CONTROL_PREPARED_AWAITING_ROUTE", "NEW_INSTALL_REGISTRATION_PENDING"].includes(evidence?.status)) return false;
   const identity = recovery.instances[0]?.identity || {};
   const instanceIdMatches = recovery.instance_ids?.length === 1 && recovery.instance_ids[0] === state?.instance_id;
   const root = path.join(path.resolve(os.homedir()), ".chatgpt-codex-orchestrator", "instances", String(state?.instance_id || ""));
@@ -541,11 +541,16 @@ function runSetup() {
     const existingInstanceRecovery=macosRecoveryReport(state);
     if(existingInstanceRecovery.selection_mode&&existingInstanceRecovery.status!=="SELECTED_FRESH_INSTANCE_VERIFIED") return emit({status:existingInstanceRecovery.status==="CONFLICT"?"ERROR":"NEEDS_USER_ACTION",action_id:"macos_selected_fresh_instance_approval",error_id:"MACOS-SELECTED-FRESH-INSTANCE",preferred_language:lang,existing_instance_recovery:existingInstanceRecovery,approval_challenge:existingInstanceRecovery.approval_challenge,mutations_performed:false,message:"A separate exact approval of this independently verified fresh instance is required; historical instances confer no authority."},1);
     const earlyTrustedEvidence=macosTrustedRecoveryEvidence(state,{requireReceipt:false});
+    const pendingFirstRegistration=earlyTrustedEvidence.status==="NEW_INSTALL_REGISTRATION_PENDING";
     if(existingInstanceRecovery.status!=="ABSENT" && !macosBootstrapMayAdvance(state, existingInstanceRecovery, earlyTrustedEvidence) && (!macosStateBound(state, existingInstanceRecovery) || existingInstanceRecovery.status==="CONFLICT")) return emit({status:existingInstanceRecovery.status==="CONFLICT"?"ERROR":"NEEDS_USER_ACTION",error_id:"MACOS-EXISTING-INSTANCE-REVIEW",recoverable:existingInstanceRecovery.status!=="CONFLICT",preferred_language:lang,message:"An existing macOS instance was found without authoritative binding evidence. Setup/resume stopped before installer state, migration intent, Control, Sandbox, runner, or helper changes.",existing_instance_recovery:existingInstanceRecovery,mutations_performed:false},1);
     if(earlyTrustedEvidence.status==="NEEDS_HUMAN_LEGACY"&&!macosSelectedAwaitingFirstRoute(state,existingInstanceRecovery)) return emit({status:"NEEDS_HUMAN",error_id:"MACOS-TRUSTED-RECOVERY-EVIDENCE",recoverable:false,preferred_language:lang,message:"Historical macOS artifacts require a separate human-approved recovery procedure; setup/resume stopped before any mutation.",existing_instance_recovery:existingInstanceRecovery,trusted_recovery_evidence:earlyTrustedEvidence,mutations_performed:false},1);
+    if(pendingFirstRegistration){
+      const delivered=findRegisteredChatRoute(state,{projectKey:state.sandbox_project_key,chatUrl:state.reviewer_chat_url});
+      if(!delivered || delivered.registration_issue!==earlyTrustedEvidence.provenance.registration_issue_id) return emit({status:"WAITING",action_id:"sandbox_chat_registration",recoverable:true,preferred_language:lang,message:"The first Sandbox registration is queued; its real originating Chat delivery receipt is still required before resume.",registration_issue:state.sandbox_chat_registration_issue,trusted_recovery_evidence:earlyTrustedEvidence,mutations_performed:false});
+    }
     const prerequisites=macosPrerequisites();
     const trustedEvidence=macosTrustedRecoveryEvidence(state,{requireReceipt:false});
-    if(trustedEvidence.status!=="ABSENT" && trustedEvidence.status!=="NEW_INSTALL_PREPARED" && trustedEvidence.status!=="NEW_INSTALL_CONTROL_PREPARED_AWAITING_ROUTE" && trustedEvidence.status!=="NEEDS_HUMAN_LEGACY" && trustedEvidence.status!=="VERIFIED") return emit({status:"ERROR",error_id:"MACOS-TRUSTED-RECOVERY-EVIDENCE",recoverable:false,preferred_language:lang,message:"Trusted recovery evidence is contradictory; setup stopped before any macOS side effect.",trusted_recovery_evidence:trustedEvidence,mutations_performed:false},1);
+    if((pendingFirstRegistration && trustedEvidence.status!=="NEW_INSTALL_REGISTRATION_PENDING") || (trustedEvidence.status!=="ABSENT" && trustedEvidence.status!=="NEW_INSTALL_PREPARED" && trustedEvidence.status!=="NEW_INSTALL_CONTROL_PREPARED_AWAITING_ROUTE" && trustedEvidence.status!=="NEW_INSTALL_REGISTRATION_PENDING" && trustedEvidence.status!=="NEEDS_HUMAN_LEGACY" && trustedEvidence.status!=="VERIFIED")) return emit({status:"ERROR",error_id:"MACOS-TRUSTED-RECOVERY-EVIDENCE",recoverable:false,preferred_language:lang,message:"Trusted recovery evidence is contradictory; setup stopped before any macOS side effect.",trusted_recovery_evidence:trustedEvidence,mutations_performed:false},1);
     const migration=migrationPreflight({state});
     const ready=prerequisites.node&&prerequisites.git&&prerequisites.gh&&prerequisites.codex&&prerequisites.session_auth&&prerequisites.native_helper?.status==="PASS"&&migration.status==="READY";
     if(!ready) return emit({status:"ERROR",error_id:"MACOS-PREREQUISITE-OR-MIGRATION",recoverable:true,preferred_language:lang,mutations_performed:false,message:"macOS preflight found a prerequisite or migration conflict; no installation mutation was performed.",prerequisites,migration},1);
@@ -599,7 +604,15 @@ function runSetup() {
       return emit({...runnerBootstrap,preferred_language:lang,runner_bootstrap:state.macos_runner_bootstrap||null},runnerBootstrap.status==="ERROR"?1:0);
     }
     let registration;
-    try{registration=ensureInstallerChatRegistration(state,{projectKey:state.sandbox_project_key});}
+    // A pending first Issue is already pinned by the early gate. If its local
+    // delivery proof disappears, reconciliation cannot submit another Issue.
+    try{
+      if(pendingFirstRegistration){
+        registration=ensureInstallerChatRegistration(state,{projectKey:state.sandbox_project_key,commandRunner:()=>{throw new Error("First registration delivery proof changed; preserve the saved Issue and retry receipt reconciliation");}});
+      }else{
+        registration=ensureInstallerChatRegistration(state,{projectKey:state.sandbox_project_key});
+      }
+    }
     catch(error){
       state.last_error={error_id:"MACOS-CHAT-REGISTRATION",message:String(error.message||error),at:new Date().toISOString()};
       state.current_step="sandbox_chat_registration";saveState(state);
