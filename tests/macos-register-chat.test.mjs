@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import crypto from "node:crypto";
 import {execFileSync} from "node:child_process";
 import {canInsertCallbackDraft, selectSafeSendButton, deliverCallback} from "../runtime/scripts/callback-delivery.mjs";
 import {registerChat} from "../runtime/scripts/register-chat.mjs";
@@ -111,6 +112,16 @@ test("installer lookup failures and ambiguous issues cannot trigger duplicate re
     const marker=args[args.indexOf("--search")+1].replace(/ in:title$/,"");
     return {ok:true,stdout:JSON.stringify([1,2].map(number=>({number,title:`[CHAT-REGISTER] ${marker}`,state:"OPEN",body:JSON.stringify({project:"alpha",chat_url:state.reviewer_chat_url,installation_id:state.installation_id})})))};
   }}),/Multiple registration issues/);assert.equal(creates,0);
+});
+test("proven-dead untouched INTENT is reclaimed and rechecked before create",()=>{
+  const f=macFixture(),chatUrl="https://chatgpt.com/c/chat-165",state={...f.metadata,instance_platform:"darwin",reviewer_chat_url:chatUrl};
+  const key=crypto.createHash("sha256").update("alpha\n"+chatUrl).digest("hex").slice(0,24),intent=path.join(f.base,`registration-intent-${key}`),lock=path.join(f.base,`registration-intent-${key}.lock`);
+  privateJson(intent,{schema_version:1,status:"INTENT",installation_id:state.installation_id,instance_id:state.instance_id,instance_root:path.resolve(f.base),control_repository:state.control_repository,project:"alpha",chat_url:chatUrl});
+  fs.mkdirSync(lock,{mode:0o700});privateJson(path.join(lock,"owner"),{schema_version:1,nonce:"dead-owner",pid:999999,start:"never"});
+  let lookups=0,creates=0;
+  const commandRunner=args=>{if(args[1]==="create"){creates++;return {ok:true,stdout:"https://github.com/owner/control-new/issues/501"};}lookups++;return {ok:true,stdout:"[]"};};
+  assert.equal(ensureInstallerChatRegistration(state,{projectKey:"alpha",commandRunner}).status,"WAITING");
+  assert.equal(lookups,2);assert.equal(creates,1);assert.equal(readJson(intent).status,"COMMITTED");assert.equal(fs.existsSync(lock),false);
 });
 test("installer does not reuse closed #409 or an issue belonging to a different Chat",()=>{
   const f=macFixture(),state={...f.metadata,instance_platform:"darwin",reviewer_chat_url:"https://chatgpt.com/c/chat-165"};const created=[];

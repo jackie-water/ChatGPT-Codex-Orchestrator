@@ -152,7 +152,34 @@ function macRegistrationGuard(state,projectKey,chatUrl){
   }
   const identity={installation_id:String(state.installation_id),instance_id:String(state.instance_id),instance_root:path.resolve(base),control_repository:String(state.control_repository),project:String(projectKey),chat_url:chatUrl};
   if(saved) for(const k of Object.keys(identity)) if(String(saved[k])!==identity[k]) {releaseClaim();throw new Error("Conflicting macOS registration identity");}
-  if(occupied) return {saved,occupied,ownerStatus:macOwnerIdentity(occupiedOwner)};
+  if(occupied){
+    const ownerStatus=macOwnerIdentity(occupiedOwner);
+    if(saved?.status==="INTENT"&&ownerStatus==="dead"){
+      const quarantine=`${lock}.reclaiming-${process.pid}-${crypto.randomUUID()}`;
+      let moved=false;
+      try{
+        const lockStat=fs.lstatSync(lock);
+        const ownerFile=path.join(lock,"owner"),ownerStat=fs.lstatSync(ownerFile);
+        if(lockStat.isSymbolicLink()||!lockStat.isDirectory()||lockStat.uid!==process.getuid()||(lockStat.mode&0o777)!==0o700||
+          ownerStat.isSymbolicLink()||!ownerStat.isFile()||ownerStat.nlink!==1||ownerStat.uid!==process.getuid()||(ownerStat.mode&0o777)!==0o600||
+          ownerStat.ino===undefined||lockStat.ino===undefined) throw new Error("Unsafe macOS registration claim");
+        const owner=JSON.parse(fs.readFileSync(ownerFile,"utf8"));
+        if(owner.schema_version!==1||owner.nonce!==occupiedOwner?.nonce||owner.pid!==occupiedOwner?.pid||owner.start!==occupiedOwner?.start||
+          macOwnerIdentity(owner)!=="dead") throw new Error("macOS registration claim owner is not proven dead");
+        fs.renameSync(lock,quarantine);moved=true;
+        const movedLock=fs.lstatSync(quarantine),movedOwner=fs.lstatSync(path.join(quarantine,"owner"));
+        if(movedLock.dev!==lockStat.dev||movedLock.ino!==lockStat.ino||movedOwner.dev!==ownerStat.dev||movedOwner.ino!==ownerStat.ino) throw new Error("macOS registration claim changed during reclaim");
+        const movedOwnerValue=JSON.parse(fs.readFileSync(path.join(quarantine,"owner"),"utf8"));
+        if(movedOwnerValue.schema_version!==1||movedOwnerValue.nonce!==owner.nonce||movedOwnerValue.pid!==owner.pid||movedOwnerValue.start!==owner.start||macOwnerIdentity(movedOwnerValue)!=="dead") throw new Error("macOS registration claim changed during reclaim");
+        fs.unlinkSync(path.join(quarantine,"owner"));fs.rmdirSync(quarantine);
+        return macRegistrationGuard(state,projectKey,chatUrl);
+      }catch(e){
+        if(moved){try{fs.lstatSync(lock);return {saved,occupied:true,ownerStatus:"indeterminate"};}catch(error){if(error.code!=="ENOENT")return {saved,occupied:true,ownerStatus:"indeterminate"};}try{fs.renameSync(quarantine,lock);}catch{}}
+        if(e.message?.startsWith("Unsafe")) throw e;
+        return {saved,occupied:true,ownerStatus:"indeterminate"};
+      }
+    }else return {saved,occupied,ownerStatus};
+  }
   try{if(!saved){saved={schema_version:1,status:"INTENT",...identity};if(!occupied) atomicPrivateJson(intent,saved);}
     return {saved,occupied,commit(issue){if(!ownsClaim()) throw new Error("macOS registration claim is not owned");atomicPrivateJson(intent,{...saved,status:"COMMITTED",issue:{number:issue.number||null,url:issue.url||issue.html_url||null,title:issue.title||null}});},markAttempted(){if(!ownsClaim()) throw new Error("macOS registration claim is not owned");saved={...saved,status:"CREATE_ATTEMPTED",attempt:{generation:ownerNonce,creator_pid:process.pid,creator_start:ownerStart,marker:registrationMarker(state,projectKey,chatUrl),installation_id:identity.installation_id,control_repository:identity.control_repository,project:identity.project,chat_url:identity.chat_url}};atomicPrivateJson(intent,saved);},markUnknown(){if(!ownsClaim()) throw new Error("macOS registration claim is not owned");saved={...saved,status:"OUTCOME_UNKNOWN",attempt:{...(saved.attempt||{}),generation:ownerNonce,creator_pid:process.pid,creator_start:ownerStart,marker:registrationMarker(state,projectKey,chatUrl),installation_id:identity.installation_id,control_repository:identity.control_repository,project:identity.project,chat_url:identity.chat_url}};atomicPrivateJson(intent,saved);},release:releaseClaim,retain(){}};
   }catch(e){releaseClaim();throw e;}
