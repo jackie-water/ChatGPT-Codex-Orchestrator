@@ -120,10 +120,12 @@ function macProcessStart(pid){
     return value||null;
   }catch{return null;}
 }
-function macOwnerIsLive(owner){
-  if(!owner||!Number.isSafeInteger(owner.pid)||owner.pid<=0||typeof owner.start!=="string"||!owner.start) return false;
-  try{process.kill(owner.pid,0);}catch{return false;}
-  return macProcessStart(owner.pid)===owner.start;
+function macOwnerIdentity(owner){
+  if(!owner||!Number.isSafeInteger(owner.pid)||owner.pid<=0||typeof owner.start!=="string"||!owner.start) return "indeterminate";
+  try{process.kill(owner.pid,0);}catch(error){return error?.code==="ESRCH"?"dead":"indeterminate";}
+  const start=macProcessStart(owner.pid);
+  if(start===owner.start) return "live";
+  return start===null?"indeterminate":"dead";
 }
 function macRegistrationGuard(state,projectKey,chatUrl){
   if(state?.instance_platform!=="darwin") return null;
@@ -133,13 +135,14 @@ function macRegistrationGuard(state,projectKey,chatUrl){
   const intent=path.join(base,`registration-intent-${identityKey}`),lock=path.join(base,`registration-intent-${identityKey}.lock`); let saved=null;
   // The claim is deliberately per project/Chat.  Different legitimate Chats
   // must not serialize through, or overwrite, one installation-wide record.
-  let occupied=false, ownerNonce=null;
-  try{fs.mkdirSync(lock,{mode:0o700});ownerNonce=crypto.randomUUID();const start=macProcessStart(process.pid);if(!start) throw new Error("Unable to establish macOS registration owner identity");atomicPrivateJson(path.join(lock,"owner"),{schema_version:1,nonce:ownerNonce,pid:process.pid,start});}
-  catch(e){if(e.code==="EEXIST") occupied=true;else throw e;}
+  let occupied=false, ownerNonce=null, ownerStart=null;
+  let ownerWritten=false;
+  try{fs.mkdirSync(lock,{mode:0o700});ownerNonce=crypto.randomUUID();const start=macProcessStart(process.pid);if(!start) throw new Error("Unable to establish macOS registration owner identity");ownerStart=start;atomicPrivateJson(path.join(lock,"owner"),{schema_version:1,nonce:ownerNonce,pid:process.pid,start});ownerWritten=true;}
+  catch(e){if(e.code==="EEXIST") occupied=true;else {if(!ownerWritten)try{const st=fs.lstatSync(lock);if(st.isDirectory()&&st.uid===process.getuid()&&(st.mode&0o777)===0o700&&!fs.readdirSync(lock).length)fs.rmdirSync(lock);}catch{}throw e;}}
   let occupiedOwner=null;
   if(occupied){try{occupiedOwner=JSON.parse(fs.readFileSync(path.join(lock,"owner"),"utf8"));}catch{}}
   const ownsClaim=()=>!occupied&&ownerNonce&&(()=>{try{return JSON.parse(fs.readFileSync(path.join(lock,"owner"),"utf8")).nonce===ownerNonce;}catch{return false;}})();
-  const releaseClaim=()=>{if(ownsClaim())try{fs.rmSync(lock,{recursive:true});}catch{}};
+  const releaseClaim=()=>{if(!ownsClaim())return;const quarantine=`${lock}.releasing-${process.pid}-${crypto.randomUUID()}`;let moved=false;try{const before=fs.lstatSync(lock);if(!before.isDirectory()||before.uid!==process.getuid()||(before.mode&0o777)!==0o700)return;fs.renameSync(lock,quarantine);moved=true;const ownerStat=fs.lstatSync(path.join(quarantine,"owner"));if(ownerStat.isSymbolicLink()||!ownerStat.isFile()||ownerStat.nlink!==1||ownerStat.uid!==process.getuid()||(ownerStat.mode&0o777)!==0o600)throw new Error("macOS registration claim owner is not private");const owner=JSON.parse(fs.readFileSync(path.join(quarantine,"owner"),"utf8"));if(owner.schema_version!==1||owner.nonce!==ownerNonce||owner.pid!==process.pid||owner.start!==ownerStart)throw new Error("macOS registration claim ownership changed");fs.unlinkSync(path.join(quarantine,"owner"));fs.rmdirSync(quarantine);}catch{if(moved){try{fs.lstatSync(lock);return;}catch(error){if(error.code!=="ENOENT")return;}try{fs.renameSync(quarantine,lock);}catch{}}}};
   if(fs.existsSync(intent)){
     try{
       const stat=fs.lstatSync(intent);
@@ -149,9 +152,9 @@ function macRegistrationGuard(state,projectKey,chatUrl){
   }
   const identity={installation_id:String(state.installation_id),instance_id:String(state.instance_id),instance_root:path.resolve(base),control_repository:String(state.control_repository),project:String(projectKey),chat_url:chatUrl};
   if(saved) for(const k of Object.keys(identity)) if(String(saved[k])!==identity[k]) {releaseClaim();throw new Error("Conflicting macOS registration identity");}
-  if(occupied) return {saved,occupied,ownerLive:macOwnerIsLive(occupiedOwner)};
+  if(occupied) return {saved,occupied,ownerStatus:macOwnerIdentity(occupiedOwner)};
   try{if(!saved){saved={schema_version:1,status:"INTENT",...identity};if(!occupied) atomicPrivateJson(intent,saved);}
-    return {saved,occupied,commit(issue){if(!ownsClaim()) throw new Error("macOS registration claim is not owned");atomicPrivateJson(intent,{...saved,status:"COMMITTED",issue:{number:issue.number||null,url:issue.url||issue.html_url||null,title:issue.title||null}});},markAttempted(){if(!ownsClaim()) throw new Error("macOS registration claim is not owned");saved={...saved,status:"CREATE_ATTEMPTED",attempt:{generation:ownerNonce,marker:registrationMarker(state,projectKey,chatUrl),installation_id:identity.installation_id,control_repository:identity.control_repository,project:identity.project,chat_url:identity.chat_url}};atomicPrivateJson(intent,saved);},markUnknown(){if(!ownsClaim()) throw new Error("macOS registration claim is not owned");saved={...saved,status:"OUTCOME_UNKNOWN",attempt:{...(saved.attempt||{}),generation:ownerNonce,marker:registrationMarker(state,projectKey,chatUrl),installation_id:identity.installation_id,control_repository:identity.control_repository,project:identity.project,chat_url:identity.chat_url}};atomicPrivateJson(intent,saved);},release:releaseClaim,retain(){}};
+    return {saved,occupied,commit(issue){if(!ownsClaim()) throw new Error("macOS registration claim is not owned");atomicPrivateJson(intent,{...saved,status:"COMMITTED",issue:{number:issue.number||null,url:issue.url||issue.html_url||null,title:issue.title||null}});},markAttempted(){if(!ownsClaim()) throw new Error("macOS registration claim is not owned");saved={...saved,status:"CREATE_ATTEMPTED",attempt:{generation:ownerNonce,creator_pid:process.pid,creator_start:ownerStart,marker:registrationMarker(state,projectKey,chatUrl),installation_id:identity.installation_id,control_repository:identity.control_repository,project:identity.project,chat_url:identity.chat_url}};atomicPrivateJson(intent,saved);},markUnknown(){if(!ownsClaim()) throw new Error("macOS registration claim is not owned");saved={...saved,status:"OUTCOME_UNKNOWN",attempt:{...(saved.attempt||{}),generation:ownerNonce,creator_pid:process.pid,creator_start:ownerStart,marker:registrationMarker(state,projectKey,chatUrl),installation_id:identity.installation_id,control_repository:identity.control_repository,project:identity.project,chat_url:identity.chat_url}};atomicPrivateJson(intent,saved);},release:releaseClaim,retain(){}};
   }catch(e){releaseClaim();throw e;}
 }
 function exactMacIssues(state,projectKey,chatUrl,issues){return issues.filter(x=>String(x.state||"").toUpperCase()==="OPEN"&&String(x.title||"")==="[CHAT-REGISTER] "+registrationMarker(state,projectKey,chatUrl)&&(()=>{try{const b=JSON.parse(x.body);return b.project===projectKey&&normalizeChatUrl(b.chat_url)===chatUrl&&String(b.installation_id)===String(state.installation_id);}catch{return false;}})());}
@@ -167,7 +170,12 @@ function readDurableMacAttempt(state,projectKey,chatUrl){
     const key=crypto.createHash("sha256").update(`${String(projectKey)}\n${chatUrl}`).digest("hex").slice(0,24);
     const value=JSON.parse(fs.readFileSync(path.join(state.instance_root,`registration-intent-${key}`),"utf8"));
     if(!["CREATE_ATTEMPTED","OUTCOME_UNKNOWN"].includes(value.status)||String(value.installation_id)!==String(state.installation_id)||String(value.control_repository)!==String(state.control_repository)||String(value.project)!==String(projectKey)||String(value.chat_url)!==chatUrl) return null;
-    return {status:value.status,attempt:value.attempt||null};
+    const attempt=value.attempt||null;
+    if(!attempt||typeof attempt.generation!=="string") return {status:value.status,attempt:null,ownerStatus:"indeterminate"};
+    const lock=path.join(state.instance_root,`registration-intent-${key}.lock`);
+    const owner=JSON.parse(fs.readFileSync(path.join(lock,"owner"),"utf8"));
+    if(owner.schema_version!==1||owner.nonce!==attempt.generation||!Number.isSafeInteger(owner.pid)||owner.pid<=0||typeof owner.start!=="string"||!owner.start) return {status:value.status,attempt:null,ownerStatus:"indeterminate"};
+    return {status:value.status,attempt,ownerStatus:macOwnerIdentity(owner)};
   }catch{return null;}
 }
 
@@ -187,7 +195,7 @@ export function ensureInstallerChatRegistration(state,{projectKey,commandRunner=
   if(state?.instance_platform==="darwin"){
     let initial;
     try{initial=listRegistrationIssues(state,projectKey,chatUrl,commandRunner);}
-    catch(e){const durable=readDurableMacAttempt(state,projectKey,chatUrl);if(durable)return {status:durable.status==="OUTCOME_UNKNOWN"?"NEEDS_HUMAN":"WAITING",route:null,issue:null,attempt:durable.attempt};throw e;}
+    catch(e){const durable=readDurableMacAttempt(state,projectKey,chatUrl);if(durable){return {status:durable.status==="OUTCOME_UNKNOWN"||durable.ownerStatus==="dead"?"NEEDS_HUMAN":"WAITING",route:null,issue:null,attempt:durable.attempt};}throw e;}
     const initialCandidates=exactMacIssues(state,projectKey,chatUrl,initial);
     if(initialCandidates.length>1) throw new Error("Multiple registration issues match this exact Chat; refusing ambiguous submission");
     if(initialCandidates.length===1) return {status:"WAITING",route:null,issue:initialCandidates[0]};
@@ -196,7 +204,7 @@ export function ensureInstallerChatRegistration(state,{projectKey,commandRunner=
   const guard=macRegistrationGuard(state,projectKey,chatUrl);
   if(guard?.occupied){
     if(guard.saved?.status==="OUTCOME_UNKNOWN") return {status:"NEEDS_HUMAN",route:null,issue:null,attempt:guard.saved.attempt||null};
-    return {status:guard.ownerLive&&["INTENT","CREATE_ATTEMPTED"].includes(guard.saved?.status)?"WAITING":"NEEDS_HUMAN",route:null,issue:null,attempt:guard.saved?.attempt||null};
+    return {status:guard.ownerStatus!=="dead"&&["INTENT","CREATE_ATTEMPTED"].includes(guard.saved?.status)?"WAITING":"NEEDS_HUMAN",route:null,issue:null,attempt:guard.saved?.attempt||null};
   }
   let createAttempted=false;
   try{

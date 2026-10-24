@@ -52,6 +52,17 @@ function macosStateFile({create=false}={}){
 const macosStateOwners=new WeakMap();
 function macosStateRevision(state){const revision=Number(state?.state_revision);return Number.isSafeInteger(revision)&&revision>=0?revision:0;}
 function macosReadRevision(file){let fd;try{fd=fs.openSync(file,fs.constants.O_RDONLY|(fs.constants.O_NOFOLLOW||0));const value=JSON.parse(fs.readFileSync(fd,"utf8"));if(!value||typeof value!=="object"||Array.isArray(value))throw new Error("macOS installer state is contradictory");return macosStateRevision(value);}finally{if(fd!==undefined)fs.closeSync(fd);}}
+function macosProcessStart(pid){try{const r=spawnSafeSync("ps",["-p",String(pid),"-o","lstart="],{encoding:"utf8"});if(r.status!==0)return null;const value=String(r.stdout||"").trim();return value||null;}catch{return null;}}
+function macosStateOwnerStatus(owner){
+  if(!owner||owner.schema_version!==1||typeof owner.nonce!=="string"||!owner.nonce||!Number.isSafeInteger(owner.pid)||owner.pid<=0||typeof owner.start!=="string"||!owner.start)return "unknown";
+  try{process.kill(owner.pid,0);}catch(error){return error?.code==="ESRCH"?"dead":"unknown";}
+  const start=macosProcessStart(owner.pid);
+  return start===owner.start?"live":start===null?"unknown":"dead";
+}
+function macosStateLockOwner(lock){try{const file=path.join(lock,"owner"),st=fs.lstatSync(file);if(st.isSymbolicLink()||!st.isFile()||st.nlink!==1||(typeof process.getuid==="function"&&st.uid!==process.getuid())||(st.mode&0o777)!==0o600)return null;return JSON.parse(fs.readFileSync(file,"utf8"));}catch{return null;}}
+function macosWriteStateLockOwner(lock,start=macosProcessStart(process.pid)){const file=path.join(lock,"owner"),tmp=`${file}.tmp-${process.pid}-${crypto.randomUUID()}`,owner={schema_version:1,nonce:crypto.randomUUID(),pid:process.pid,start};if(!owner.start)throw new Error("Unable to establish macOS installer state owner identity");const fd=fs.openSync(tmp,"wx",0o600);try{fs.writeFileSync(fd,JSON.stringify(owner)+"\n");fs.fsyncSync(fd);}finally{fs.closeSync(fd);}fs.renameSync(tmp,file);const directory=fs.openSync(lock,"r");try{fs.fsyncSync(directory);}finally{fs.closeSync(directory);}return owner;}
+function macosStateLockClaim(lock,owner){try{const ds=fs.lstatSync(lock),file=path.join(lock,"owner"),st=fs.lstatSync(file),actual=JSON.parse(fs.readFileSync(file,"utf8"));if(ds.isSymbolicLink()||!ds.isDirectory()||st.isSymbolicLink()||!st.isFile()||st.nlink!==1||(typeof process.getuid==="function"&&(ds.uid!==process.getuid()||st.uid!==process.getuid()))||(ds.mode&0o777)!==0o700||(st.mode&0o777)!==0o600||actual.schema_version!==1||actual.nonce!==owner.nonce||actual.pid!==owner.pid||actual.start!==owner.start)return false;return true;}catch{return false;}}
+function macosReleaseStateLock(lock,owner){if(!macosStateLockClaim(lock,owner))return false;const quarantine=`${lock}.releasing-${process.pid}-${crypto.randomUUID()}`;let moved=false;try{fs.renameSync(lock,quarantine);moved=true;if(!macosStateLockClaim(quarantine,owner))throw new Error("macOS installer state lock ownership changed");fs.unlinkSync(path.join(quarantine,"owner"));fs.rmdirSync(quarantine);return true;}catch{if(moved){try{fs.lstatSync(lock);return false;}catch(error){if(error.code!=="ENOENT")return false;}try{fs.renameSync(quarantine,lock);}catch{} }return false;}}
 
 function loadState(options={}){
   if(process.platform==="darwin"){
@@ -79,16 +90,18 @@ function saveState(state){
   if(process.platform!=="darwin") return writeInstallerState(state);
   const file=macosStateFile({create:true});
   const lock=`${file}.lock`;
-  try{fs.mkdirSync(lock,{mode:0o700});}catch(error){if(error.code==="EEXIST"){const conflict=new Error("macOS installer state lock is occupied; stale writer rejected");conflict.code="MACOS-STATE-CONFLICT";throw conflict;}throw error;}
+  let owner,createdLock=null;
+  const currentStart=macosProcessStart(process.pid); if(!currentStart) throw new Error("Unable to establish macOS installer state owner identity");
+  try{fs.mkdirSync(lock,{mode:0o700});createdLock=fs.lstatSync(lock);owner=macosWriteStateLockOwner(lock,currentStart);}catch(error){if(error.code==="EEXIST"){const old=macosStateLockOwner(lock);const status=macosStateOwnerStatus(old);const successor={schema_version:1,nonce:crypto.randomUUID(),pid:process.pid,start:currentStart};if(status==="dead"&&old&&successor.start&&macosStateLockClaim(lock,old)&&macosReleaseStateLock(lock,old)){try{fs.mkdirSync(lock,{mode:0o700});createdLock=fs.lstatSync(lock);owner=macosWriteStateLockOwner(lock,currentStart);}catch{const conflict=new Error("macOS installer state lock is occupied; stale writer rejected");conflict.code="MACOS-STATE-CONFLICT";throw conflict;}}else{const conflict=new Error("macOS installer state lock is occupied; stale writer rejected");conflict.code="MACOS-STATE-CONFLICT";throw conflict;}}else{if(createdLock)try{const now=fs.lstatSync(lock);if(now.dev===createdLock.dev&&now.ino===createdLock.ino&&now.uid===createdLock.uid&&(now.mode&0o777)===0o700&&fs.readdirSync(lock).length===0)fs.rmdirSync(lock);}catch{}throw error;}}
   const ownerRevision=macosStateOwners.has(state)?macosStateOwners.get(state):macosStateRevision(state);
   let baselineExists=true,currentRevision=0;
   try{currentRevision=macosReadRevision(file);}
   catch(error){
-    if(error.code!=="ENOENT") {try{fs.rmdirSync(lock);}catch{}throw error;}
+    if(error.code!=="ENOENT") {macosReleaseStateLock(lock,owner);throw error;}
     baselineExists=false;
-    if(ownerRevision!==0){try{fs.rmdirSync(lock);}catch{}const conflict=new Error("macOS installer state changed; stale writer rejected");conflict.code="MACOS-STATE-CONFLICT";throw conflict;}
+    if(ownerRevision!==0){macosReleaseStateLock(lock,owner);const conflict=new Error("macOS installer state changed; stale writer rejected");conflict.code="MACOS-STATE-CONFLICT";throw conflict;}
   }
-  if(currentRevision!==ownerRevision){try{fs.rmdirSync(lock);}catch{}const error=new Error("macOS installer state changed; stale writer rejected");error.code="MACOS-STATE-CONFLICT";throw error;}
+  if(currentRevision!==ownerRevision){macosReleaseStateLock(lock,owner);const error=new Error("macOS installer state changed; stale writer rejected");error.code="MACOS-STATE-CONFLICT";throw error;}
   const temporary=`${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
   const nextState={...state,state_revision:ownerRevision+1};
   let fd,renamed=false;
@@ -106,10 +119,10 @@ function saveState(state){
     const directory=fs.openSync(path.dirname(file),"r");
     try{fs.fsyncSync(directory);}finally{fs.closeSync(directory);}
     Object.assign(state,nextState);macosStateOwners.set(state,ownerRevision+1);
-    fs.rmdirSync(lock);
+    if(!macosReleaseStateLock(lock,owner)) throw new Error("macOS installer state lock ownership changed");
   }catch(error){
     if(fd!==undefined)try{fs.closeSync(fd);}catch{}
-    if(!renamed){try{fs.unlinkSync(temporary);}catch{}try{fs.rmdirSync(lock);}catch{}
+    if(!renamed){try{fs.unlinkSync(temporary);}catch{}macosReleaseStateLock(lock,owner);
     }
     throw error;
   }
