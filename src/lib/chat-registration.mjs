@@ -98,6 +98,7 @@ function listRegistrationIssues(state,projectKey,chatUrl,commandRunner=runGh){
     if(!r.ok||!r.stdout) throw new Error("Registration issue lookup failed; refusing a duplicate submission");
     let issues;try{issues=JSON.parse(r.stdout);}catch{throw new Error("Registration issue lookup returned malformed JSON; refusing a duplicate submission");}
     if(!Array.isArray(issues)) throw new Error("Registration issue lookup is not an array; refusing a duplicate submission");
+    if(issues.length>=100) throw new Error("Registration issue lookup is incomplete at the 100-issue limit; refusing a duplicate submission");
     return issues;
   }
   if(!r.ok||!r.stdout) return [];

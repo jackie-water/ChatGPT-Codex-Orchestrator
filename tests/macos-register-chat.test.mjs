@@ -103,7 +103,7 @@ test("selected Mac callback writes leave historical instance bytes unchanged and
 });
 test("installer lookup failures and ambiguous issues cannot trigger duplicate registration submissions",()=>{
   const f=macFixture(),state={...f.metadata,instance_platform:"darwin",reviewer_chat_url:"https://chatgpt.com/c/chat-165"};
-  for(const result of [{ok:false,stdout:"",stderr:"offline"},{ok:true,stdout:"bad-json"},{ok:true,stdout:"{}"},{ok:true,stdout:""}]){
+  for(const result of [{ok:false,stdout:"",stderr:"offline"},{ok:true,stdout:"bad-json"},{ok:true,stdout:"{}"},{ok:true,stdout:""},{ok:true,stdout:JSON.stringify(Array.from({length:100},(_,number)=>({number,title:"unrelated",state:"OPEN",body:"{}"})))}]){
     let creates=0;assert.throws(()=>ensureInstallerChatRegistration(state,{projectKey:"alpha",commandRunner:args=>{if(args[1]==="create")creates++;return result;}}),/lookup/);assert.equal(creates,0);
   }
   let creates=0;
@@ -112,6 +112,16 @@ test("installer lookup failures and ambiguous issues cannot trigger duplicate re
     const marker=args[args.indexOf("--search")+1].replace(/ in:title$/,"");
     return {ok:true,stdout:JSON.stringify([1,2].map(number=>({number,title:`[CHAT-REGISTER] ${marker}`,state:"OPEN",body:JSON.stringify({project:"alpha",chat_url:state.reviewer_chat_url,installation_id:state.installation_id})})))};
   }}),/Multiple registration issues/);assert.equal(creates,0);
+});
+test("Mac issue lookup saturation refuses both pre-lock and post-claim duplicate creation",()=>{
+  const f=macFixture(),state={...f.metadata,instance_platform:"darwin",reviewer_chat_url:"https://chatgpt.com/c/chat-165"};
+  const saturated=JSON.stringify(Array.from({length:100},(_,number)=>({number,title:"unrelated",state:"OPEN",body:"{}"})));
+  let creates=0;
+  assert.throws(()=>ensureInstallerChatRegistration(state,{projectKey:"alpha",commandRunner:args=>{if(args[1]==="create"){creates++;return {ok:true,stdout:"https://github.com/owner/control-new/issues/1"};}return {ok:true,stdout:saturated};}}),/incomplete.*100/);
+  assert.equal(creates,0);
+  let lookups=0;
+  assert.throws(()=>ensureInstallerChatRegistration(state,{projectKey:"alpha",commandRunner:args=>{if(args[1]==="create"){creates++;return {ok:true,stdout:"https://github.com/owner/control-new/issues/2"};}lookups++;return {ok:true,stdout:lookups===1?"[]":saturated};}}),/incomplete.*100/);
+  assert.equal(lookups,2);assert.equal(creates,0);
 });
 test("proven-dead untouched INTENT is reclaimed and rechecked before create",()=>{
   const f=macFixture(),chatUrl="https://chatgpt.com/c/chat-165",state={...f.metadata,instance_platform:"darwin",reviewer_chat_url:chatUrl};
