@@ -15,7 +15,7 @@ import { ensureInstallerChatRegistration, findRegisteredChatRoute, normalizeChat
 import { pendingCallbackCount, doctorHealth, repairHealth } from "./lib/runtime-health.mjs";
 import { macosPrerequisites, migrationPreflight, macosRuntimeAction, prepareMigrationIntent } from "./lib/macos-platform.mjs";
 import { macosNativeHelperPreflight, prepareMacosNativeHelper, verifyMacosNativeCapability } from "./lib/macos-native-helper-install.mjs";
-import { inspectMacosExistingInstanceRecovery, inspectMacosSelectedFreshInstance, approveMacosSelectedFreshInstance } from "./lib/macos-existing-instance-recovery.mjs";
+import { inspectMacosExistingInstanceRecovery, inspectMacosSelectedFreshInstance, approveMacosSelectedFreshInstance, isMacosFreshFirstInstallBootstrap } from "./lib/macos-existing-instance-recovery.mjs";
 import { MACOS_PERSONAL_USE_POLICY, hasMacosPersonalUsePolicy, macosPersonalUsePolicyChallenge } from "./lib/macos-personal-use-service.mjs";
 import { inspectMacosRunnerBootstrap, approveMacosRunnerBootstrap } from "./lib/macos-runner-bootstrap.mjs";
 import { verifyTrustedRecoveryEvidence, issueTrustedRecoveryEvidence, githubReadOnlyApi } from "./lib/macos-trusted-recovery-evidence.mjs";
@@ -66,7 +66,7 @@ function macosReleaseStateLock(lock,owner){if(!macosStateLockClaim(lock,owner))r
 
 function loadState(options={}){
   if(process.platform==="darwin"){
-    const empty=()=>({schema_version:1,preferred_language:null,current_step:"not_started",completed:[],ready:false});
+    const empty=()=>{const value={schema_version:1,preferred_language:null,current_step:"not_started",completed:[],ready:false};Object.defineProperty(value,"__macos_install_state_missing",{value:true,enumerable:false});return value;};
     let file;
     try{file=macosStateFile();}catch(error){if(error.code!=="ENOENT")throw error;return empty();}
     let fd;
@@ -504,7 +504,12 @@ function answer() {
     state.current_step=actionId;
   } else if (actionId === "macos_setup_approval") {
     if (!bool(value)) return emit({status:"ERROR",error_id:"MACOS-APPROVAL-001",recoverable:false,preferred_language:lang,message:"macOS setup approval was not confirmed."},1);
+    if(process.platform!=="darwin") return emit({status:"ERROR",error_id:"MACOS-APPROVAL-001",recoverable:false,preferred_language:lang,message:"macOS setup approval is only valid on macOS."},1);
+    const recovery=macosRecoveryReport(state);
+    if(!isMacosFreshFirstInstallBootstrap({state,recovery,installStateMissing:state.__macos_install_state_missing===true})) return emit({status:"ERROR",error_id:"MACOS-APPROVAL-001",recoverable:false,preferred_language:lang,message:"The approved fresh-install identity could not be independently corroborated."},1);
     state.macos_setup_approved=true;
+    state.fresh_first_install_bootstrap=true;
+    state.fresh_first_install_legacy_instance_id="1832f0bb";
     state.current_step="macos_native_activation";
   } else if (actionId === "github_plugin_authorization" || actionId === "github_authorization") {
     if (!bool(value)) return emit({status:"ERROR",error_id:"AUTH-001",recoverable:true,preferred_language:lang,message:t(lang,"answer.github.invalid")},1);
@@ -585,11 +590,13 @@ function runSetup() {
   const lang = ensureStateLanguage(state);
   if(process.platform==="darwin") {
     const existingInstanceRecovery=macosRecoveryReport(state);
+    const freshFirstInstall=isMacosFreshFirstInstallBootstrap({state,recovery:existingInstanceRecovery,installStateMissing:state.__macos_install_state_missing===true});
     if(existingInstanceRecovery.selection_mode&&existingInstanceRecovery.status!=="SELECTED_FRESH_INSTANCE_VERIFIED") return emit({status:existingInstanceRecovery.status==="CONFLICT"?"ERROR":"NEEDS_USER_ACTION",action_id:"macos_selected_fresh_instance_approval",error_id:"MACOS-SELECTED-FRESH-INSTANCE",preferred_language:lang,existing_instance_recovery:existingInstanceRecovery,approval_challenge:existingInstanceRecovery.approval_challenge,mutations_performed:false,message:"A separate exact approval of this independently verified fresh instance is required; historical instances confer no authority."},1);
+    if(freshFirstInstall&&!state.macos_setup_approved)return emit({status:"NEEDS_USER_ACTION",action_id:"macos_setup_approval",preferred_language:lang,message_key:"setup.macos.approval",message:t(lang,"setup.macos.approval"),resume_command:"node src/cli.mjs resume --json",mutations_performed:false,details:"Approval is required before native setup can write instance state or a LaunchAgent."});
     const earlyTrustedEvidence=macosTrustedRecoveryEvidence(state,{requireReceipt:false});
     const pendingFirstRegistration=earlyTrustedEvidence.status==="NEW_INSTALL_REGISTRATION_PENDING";
-    if(existingInstanceRecovery.status!=="ABSENT" && !macosBootstrapMayAdvance(state, existingInstanceRecovery, earlyTrustedEvidence) && (!macosStateBound(state, existingInstanceRecovery) || existingInstanceRecovery.status==="CONFLICT")) return emit({status:existingInstanceRecovery.status==="CONFLICT"?"ERROR":"NEEDS_USER_ACTION",error_id:"MACOS-EXISTING-INSTANCE-REVIEW",recoverable:existingInstanceRecovery.status!=="CONFLICT",preferred_language:lang,message:"An existing macOS instance was found without authoritative binding evidence. Setup/resume stopped before installer state, migration intent, Control, Sandbox, runner, or helper changes.",existing_instance_recovery:existingInstanceRecovery,mutations_performed:false},1);
-    if(earlyTrustedEvidence.status==="NEEDS_HUMAN_LEGACY"&&!macosSelectedAwaitingFirstRoute(state,existingInstanceRecovery)) return emit({status:"NEEDS_HUMAN",error_id:"MACOS-TRUSTED-RECOVERY-EVIDENCE",recoverable:false,preferred_language:lang,message:"Historical macOS artifacts require a separate human-approved recovery procedure; setup/resume stopped before any mutation.",existing_instance_recovery:existingInstanceRecovery,trusted_recovery_evidence:earlyTrustedEvidence,mutations_performed:false},1);
+    if(!freshFirstInstall&&existingInstanceRecovery.status!=="ABSENT" && !macosBootstrapMayAdvance(state, existingInstanceRecovery, earlyTrustedEvidence) && (!macosStateBound(state, existingInstanceRecovery) || existingInstanceRecovery.status==="CONFLICT")) return emit({status:existingInstanceRecovery.status==="CONFLICT"?"ERROR":"NEEDS_USER_ACTION",error_id:"MACOS-EXISTING-INSTANCE-REVIEW",recoverable:existingInstanceRecovery.status!=="CONFLICT",preferred_language:lang,message:"An existing macOS instance was found without authoritative binding evidence. Setup/resume stopped before installer state, migration intent, Control, Sandbox, runner, or helper changes.",existing_instance_recovery:existingInstanceRecovery,mutations_performed:false},1);
+    if(!freshFirstInstall&&earlyTrustedEvidence.status==="NEEDS_HUMAN_LEGACY"&&!macosSelectedAwaitingFirstRoute(state,existingInstanceRecovery)) return emit({status:"NEEDS_HUMAN",error_id:"MACOS-TRUSTED-RECOVERY-EVIDENCE",recoverable:false,preferred_language:lang,message:"Historical macOS artifacts require a separate human-approved recovery procedure; setup/resume stopped before any mutation.",existing_instance_recovery:existingInstanceRecovery,trusted_recovery_evidence:earlyTrustedEvidence,mutations_performed:false},1);
     const awaitingFirstRoute=earlyTrustedEvidence.status==="NEW_INSTALL_CONTROL_PREPARED_AWAITING_ROUTE";
     if(awaitingFirstRoute){
       const savedIssueValue=state.sandbox_chat_registration_issue;

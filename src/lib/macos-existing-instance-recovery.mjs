@@ -153,6 +153,25 @@ function safeInstanceTree(fsImpl, root, { strictOwner = false, selectedRunnerWor
   return { ok: true };
 }
 
+function safeLegacyFreshTree(fsImpl, root) {
+  const pending = [{ file: path.resolve(root), depth: 0 }]; let visited = 0;
+  while (pending.length) {
+    const { file, depth } = pending.pop(), result = lstat(fsImpl, file);
+    if (!result.ok || result.stat.isSymbolicLink() || !uidAllowed(result.stat)) return false;
+    const relative = path.relative(path.resolve(root), file);
+    if (relative && !relative.split(path.sep).every(safeTreeBasename)) return false;
+    if (result.stat.isDirectory()) {
+      if (!ancestorModeAllowed(result.stat) || depth >= MAX_TREE_DEPTH || ++visited > MAX_TREE_ENTRIES) return false;
+      let entries; try { entries = fsImpl.readdirSync(file, { withFileTypes: true }); } catch { return false; }
+      for (const entry of entries) {
+        if (!safeTreeBasename(entry.name)) return false;
+        pending.push({ file: path.join(file, entry.name), depth: depth + 1 });
+      }
+    } else if (!result.stat.isFile() || result.stat.nlink !== 1 || (result.stat.mode & 0o022) !== 0 || ![0o600, 0o644].includes(result.stat.mode & 0o777)) return false;
+  }
+  return true;
+}
+
 function readJson(fsImpl, file) {
   const safe = safeFile(fsImpl, file);
   if (!safe.ok) return safe.missing ? { present: false } : { present: true, valid: false, reason: safe.reason };
@@ -280,12 +299,17 @@ export function inspectMacosExistingInstanceRecovery({ home = os.homedir(), fsIm
     const check = safeDirectory(fsImpl, dir, { privateDirectory: true });
     if (!check.ok) report.instances.push({ instance_id: id, status: "CONFLICT", missing_verification_gates: ["safe_instance_directory"] });
     else {
-      try { report.instances.push(candidate(fsImpl, instancesRoot, id)); }
+      try {
+        const item = candidate(fsImpl, instancesRoot, id);
+        if (item.status === "CONFLICT" && id === "1832f0bb" && safeLegacyFreshTree(fsImpl, dir)) item.fresh_first_install_candidate = true;
+        report.instances.push(item);
+      }
       catch { report.instances.push({ instance_id: id, status: "CONFLICT", missing_verification_gates: ["readable_instance_metadata"] }); }
     }
   }
   report.instance_ids = report.instances.map(item => item.instance_id).sort();
   report.status = report.instances.length === 1 && report.instances[0].status === "NEEDS_VERIFICATION" ? "NEEDS_VERIFICATION" : report.instances.length > 1 ? "CONFLICT" : report.instances[0]?.status || "ABSENT";
+  report.fresh_first_install_candidate = report.instances.length === 1 && report.instances[0]?.fresh_first_install_candidate === true;
   report.missing_verification_gates = [...new Set(report.instances.flatMap(item => item.missing_verification_gates || []))].sort();
   return report;
 }
@@ -296,6 +320,25 @@ const strictOwner = stat => typeof process.getuid !== "function" || stat.uid ===
 
 function selectedResult(status, gates = [], extra = {}) {
   return { status, selection_mode: "explicit-selected-fresh-instance-v1", mutations_performed: false, historical_instances_are_authority: false, missing_verification_gates: [...new Set(gates)].sort(), ...extra };
+}
+
+// A missing installer journal is the only authority for the fresh-first-install
+// exception.  It is deliberately narrower than recovery: one already safe,
+// untrusted historical instance may trigger the normal setup approval, but no
+// selected or partially-created instance may use this path.
+export function isMacosFreshFirstInstallBootstrap({ state = {}, recovery, installStateMissing = false } = {}) {
+  const approvedLegacyIntent = state.fresh_first_install_bootstrap === true
+    && state.fresh_first_install_legacy_instance_id === "1832f0bb";
+  return Boolean((installStateMissing || approvedLegacyIntent)
+    && state.installation_id === undefined
+    && state.instance_id === undefined
+    && (recovery?.status === "NEEDS_VERIFICATION" || recovery?.fresh_first_install_candidate === true)
+    && recovery.instances?.length === 1
+    && (recovery.instances[0]?.status === "NEEDS_VERIFICATION" || recovery.instances[0]?.fresh_first_install_candidate === true)
+    && recovery.instance_ids?.length === 1
+    && recovery.instances[0]?.instance_id === "1832f0bb"
+    && (recovery.instances[0]?.identity?.instance_id === undefined || recovery.instances[0]?.identity?.instance_id === "1832f0bb")
+    && (recovery.instances[0]?.identity?.installation_id === undefined || typeof recovery.instances[0]?.identity?.installation_id === "string"));
 }
 
 function selectedJson(fsImpl, file, { allowMissing = false, passive = false } = {}) {

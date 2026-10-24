@@ -6,7 +6,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { gzipSync } from "node:zlib";
 import { spawnSync } from "node:child_process";
-import { inspectMacosExistingInstanceRecovery, inspectMacosSelectedFreshInstance, approveMacosSelectedFreshInstance } from "../src/lib/macos-existing-instance-recovery.mjs";
+import { inspectMacosExistingInstanceRecovery, inspectMacosSelectedFreshInstance, approveMacosSelectedFreshInstance, isMacosFreshFirstInstallBootstrap } from "../src/lib/macos-existing-instance-recovery.mjs";
 import { canonicalInstallationId, defaultLocalPaths } from "../src/lib/control-render.mjs";
 import { MACOS_RUNNER_RUNTIME_PATH } from "../src/lib/macos-runner-bootstrap.mjs";
 
@@ -26,6 +26,14 @@ function writeJson(file, value, mode = 0o600) {
   fs.writeFileSync(file, JSON.stringify(value), { mode });
   fs.chmodSync(file, mode);
 }
+
+test("fresh-first-install bootstrap is limited to one untrusted historical instance and missing journal", () => {
+  const recovery = { status: "NEEDS_VERIFICATION", instance_ids: ["1832f0bb"], instances: [{ instance_id: "1832f0bb", status: "NEEDS_VERIFICATION", identity: { instance_id: "1832f0bb", installation_id: "old-install" } }] };
+  assert.equal(isMacosFreshFirstInstallBootstrap({ state: {}, recovery, installStateMissing: true }), true);
+  assert.equal(isMacosFreshFirstInstallBootstrap({ state: { installation_id: "new" }, recovery, installStateMissing: true }), false);
+  assert.equal(isMacosFreshFirstInstallBootstrap({ state: {}, recovery: { ...recovery, instances: [recovery.instances[0], recovery.instances[0]] }, installStateMissing: true }), false);
+  assert.equal(isMacosFreshFirstInstallBootstrap({ state: {}, recovery, installStateMissing: false }), false);
+});
 
 test("empty canonical instance tree is ABSENT and read-only", t => {
   const f = fixture(t);

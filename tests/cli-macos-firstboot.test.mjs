@@ -9,6 +9,7 @@ import { MACOS_PERSONAL_USE_POLICY, hasMacosPersonalUsePolicy, macosPersonalUseP
 import {canonicalInstallationId, defaultLocalPaths} from "../src/lib/control-render.mjs";
 import {ensureInstallerChatRegistration, findRegisteredChatRoute, normalizeChatUrl} from "../src/lib/chat-registration.mjs";
 import {githubReadOnlyApi, issueTrustedRecoveryEvidence, verifyTrustedRecoveryEvidence} from "../src/lib/macos-trusted-recovery-evidence.mjs";
+import {isMacosFreshFirstInstallBootstrap} from "../src/lib/macos-existing-instance-recovery.mjs";
 
 const cli=fs.readFileSync(new URL("../src/cli.mjs",import.meta.url),"utf8");
 const helpers=cli.slice(cli.indexOf("function macosRunnerActionChallenge("),cli.indexOf("function dryRun()"));
@@ -22,7 +23,7 @@ function fixture(t){
   const runner={local_listener_identity:identity,status:"PASS",runner_id:"303",runner_executable:path.join(state.instance_root,"runner","bin","Runner.Listener"),approval_sha256:"a".repeat(64)};
   const calls=[],snapshots=[];
   const settings={online:false,fail:null,plist:true,idle:false,rejectPreflight:false,rejectFinal:false};
-  const context=vm.createContext({crypto,os,fs,path,process,canonicalInstallationId,hasMacosPersonalUsePolicy,macosPersonalUsePolicyChallenge,inspectMacosRunnerBootstrap:()=>{throw Error("No real inspector in synthetic test");},macosRuntimeAction:()=>{throw Error("No real service in synthetic test");},saveState:()=>{throw Error("No real installer state in synthetic test");}});
+  const context=vm.createContext({crypto,os,fs,path,process,canonicalInstallationId,hasMacosPersonalUsePolicy,macosPersonalUsePolicyChallenge,isMacosFreshFirstInstallBootstrap,inspectMacosRunnerBootstrap:()=>{throw Error("No real inspector in synthetic test");},macosRuntimeAction:()=>{throw Error("No real service in synthetic test");},saveState:()=>{throw Error("No real installer state in synthetic test");}});
   vm.runInContext(helpers+"\nthis.advance=advanceMacosFirstBootRunner;this.challenge=macosRunnerActionChallenge;this.claim=claimMacosFirstBootOperation;",context);
   const inspect=({requireOnline})=>{calls.push(requireOnline?"inspect-online":"inspect-package");return requireOnline&&!settings.online?{status:"NEEDS_USER_ACTION",error_id:"MACOS-RUNNER-OFFLINE"}:{...runner};};
   const runtime=(operation,{state:actual,preflightOnly})=>{
@@ -118,6 +119,15 @@ test("official macOS installer orders all identity and native gates before first
   assert.doesNotMatch(windows,/advanceMacosFirstBootRunner|macos_runner_package_approval/);
 });
 
+test("official setup presents scoped approval before legacy evidence in fresh-first bootstrap",()=>{
+  const begin=cli.indexOf("function runSetup() {");
+  const end=cli.indexOf("\n  state.installation_id ||= crypto.randomUUID();",begin);
+  const mac=cli.slice(begin,end);
+  assert.ok(mac.indexOf("isMacosFreshFirstInstallBootstrap") < mac.indexOf("macos_setup_approval"));
+  assert.ok(mac.indexOf("freshFirstInstall&&!state.macos_setup_approved") < mac.indexOf("macosTrustedRecoveryEvidence(state"));
+  assert.match(mac,/!freshFirstInstall&&earlyTrustedEvidence\.status===\"NEEDS_HUMAN_LEGACY\"/);
+});
+
 test("latest macOS evidence pins a pending first Issue before registration can create one",()=>{
   const begin=cli.indexOf("function runSetup() {");
   const end=cli.indexOf("\n  state.installation_id ||= crypto.randomUUID();",begin);
@@ -198,6 +208,7 @@ function pendingRegistrationResume(t){
   const context=vm.createContext({
     crypto,path,os:{...os,homedir:()=>f.home},process:{platform:"darwin",cwd:()=>f.home},
     canonicalInstallationId,findRegisteredChatRoute,normalizeChatUrl,githubReadOnlyApi,issueTrustedRecoveryEvidence,
+    isMacosFreshFirstInstallBootstrap,
     loadState:()=>state,ensureStateLanguage:()=>"en",saveState:actual=>{assert.equal(actual.target_environment_ready,false);saved.push(JSON.parse(JSON.stringify(actual)));},
     emit:(result,code=0)=>({result,code}),
     macosRecoveryReport:()=>({status:"NEEDS_VERIFICATION",instance_ids:[state.instance_id],instances:[{identity}]}),
