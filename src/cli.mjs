@@ -677,7 +677,7 @@ function runSetup() {
       try{saveState(state);}catch(saveError){if(saveError.code==="MACOS-STATE-CONFLICT") return emit({status:"ERROR",error_id:"MACOS-STATE-CONFLICT",recoverable:true,preferred_language:lang,message:"Installer state advanced in another macOS setup process; reload and resume to preserve the canonical registration.",details:String(saveError.message||saveError),mutations_performed:"UNKNOWN"},1);throw saveError;}
       return emit({status:"ERROR",error_id:"MACOS-CHAT-REGISTRATION",recoverable:true,preferred_language:lang,message:"Exact Chat registration could not be established. Preserve the issue and callback evidence; no Sandbox run was requested.",details:String(error.message||error),mutations_performed:"UNKNOWN"},1);
     }
-    if(registration.status!=="READY"){ state.sandbox_chat_registration_issue=registration.issue?.url||null; state.current_step="sandbox_chat_registration"; try{saveState(state);}catch(error){if(error.code==="MACOS-STATE-CONFLICT") return emit({status:"ERROR",error_id:"MACOS-STATE-CONFLICT",recoverable:true,preferred_language:lang,message:"Installer state advanced in another macOS setup process; reload and resume to preserve the canonical registration.",details:String(error.message||error),mutations_performed:"UNKNOWN"},1);throw error;} return emit({status:"WAITING",action_id:"sandbox_chat_registration",recoverable:true,preferred_language:lang,message:"Register the explicit Sandbox callback in the originating Chat before CODEX-RUN.",registration_issue:registration.issue?.url||null,mutations_performed:true}); }
+    if(registration.status!=="READY"){ if(registration.issue?.url) state.sandbox_chat_registration_issue=registration.issue.url; state.current_step="sandbox_chat_registration"; try{saveState(state);}catch(error){if(error.code==="MACOS-STATE-CONFLICT") return emit({status:"ERROR",error_id:"MACOS-STATE-CONFLICT",recoverable:true,preferred_language:lang,message:"Installer state advanced in another macOS setup process; reload and resume to preserve the canonical registration.",details:String(error.message||error),mutations_performed:"UNKNOWN"},1);throw error;} const needsHuman=registration.status==="NEEDS_HUMAN"; return emit({status:needsHuman?"NEEDS_HUMAN":"WAITING",action_id:"sandbox_chat_registration",recoverable:true,preferred_language:lang,message:needsHuman?"The registration outcome cannot be proven automatically; preserve the pinned Issue and complete manual recovery with the originating Chat.":"Register the explicit Sandbox callback in the originating Chat before CODEX-RUN.",registration_issue:state.sandbox_chat_registration_issue||null,attempt:registration.attempt||null,mutations_performed:false}); }
     const registered=registration.record;
     const shortId=String(state.installation_id||"").replace(/[^A-Za-z0-9]/g,"").slice(0,8).toLowerCase()||"default";
     const expectedSandboxProject="sandbox-"+shortId;
@@ -965,14 +965,15 @@ function runSetup() {
       const sandboxRegistration=ensureInstallerChatRegistration(state,{projectKey:state.sandbox_project_key});
       if(sandboxRegistration.status!=="READY"){
         state.current_step="sandbox_chat_registration_waiting";
-        state.sandbox_chat_registration_issue=sandboxRegistration.issue?.url||null;
+        if(sandboxRegistration.issue?.url) state.sandbox_chat_registration_issue=sandboxRegistration.issue.url;
         saveState(state);
         return emit({
-          status:"WAITING",
+          status:sandboxRegistration.status==="NEEDS_HUMAN"?"NEEDS_HUMAN":"WAITING",
           preferred_language:lang,
-          message:t(lang,"setup.chat_registration.waiting"),
+          message:sandboxRegistration.status==="NEEDS_HUMAN"?"The registration outcome cannot be proven automatically; preserve the pinned Issue and complete manual recovery with the originating Chat.":t(lang,"setup.chat_registration.waiting"),
           project_key:state.sandbox_project_key,
-          registration_issue:sandboxRegistration.issue?.url||null,
+          registration_issue:state.sandbox_chat_registration_issue||null,
+          attempt:sandboxRegistration.attempt||null,
           note:t(lang,"setup.chat_registration.no_fallback")
         });
       }
