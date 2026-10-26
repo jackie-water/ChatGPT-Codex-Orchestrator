@@ -182,7 +182,15 @@ function routeRecords(value) {
 function validatedRouteRecords(routeFile) {
   if (!routeFile?.present) return { records: null };
   if (!routeFile.ok) return { error: new Error("route registry file is malformed") };
-  try { return { records: routeRecords(routeFile.value) }; } catch (error) { return { error }; }
+  try {
+    const records = routeRecords(routeFile.value);
+    const routes = new Set();
+    for (const record of records) {
+      if (routes.has(record.route)) throw new Error("route registry contains a duplicate route");
+      routes.add(record.route);
+    }
+    return { records };
+  } catch (error) { return { error }; }
 }
 
 function canonicalLocalPaths({ state, home, instanceRoot }) {
@@ -242,12 +250,41 @@ function verifyLocalIdentity(local, state) {
   return gates;
 }
 
-function verifyNewInstallPrepared({ local, state, githubApi }) {
-  if (state.macos_setup_approved !== true || state.github_plugin_authorized === false || state.github_plugin_authorization_verified !== true ||
-      (state.github_plugin_authorization_installation_id !== undefined && state.github_plugin_authorization_installation_id !== state.installation_id) ||
-      (state.github_plugin_authorization_control_repository !== undefined && state.github_plugin_authorization_control_repository !== state.control_repository) ||
-      (state.github_plugin_authorization_sandbox_repository !== undefined && state.github_plugin_authorization_sandbox_repository !== state.sandbox_repository) ||
-      (state.github_plugin_authorization_chat_url !== undefined && canonicalUrl(state.github_plugin_authorization_chat_url) !== canonicalUrl(state.reviewer_chat_url)) ||
+function hasRegistrationDeliveryProof({ local, state, route, fsImpl = fs }) {
+  const issueNumber = Number(route?.registration_issue);
+  const instanceRoot = local?.instanceRoot;
+  if (!Number.isSafeInteger(issueNumber) || issueNumber <= 0 || !instanceRoot) return false;
+  const callbackId = `chat-register-${String(state.sandbox_project_key).toLowerCase()}-${issueNumber}`;
+  const outbox = path.join(instanceRoot, "pending-wakes", `${callbackId}.json`);
+  const journal = path.join(instanceRoot, "registration-delivery", `${callbackId}.json`);
+  try {
+    for (const directory of [path.dirname(outbox), path.dirname(journal)]) {
+      const directoryStat = fsImpl.lstatSync(directory);
+      if (directoryStat.isSymbolicLink() || !directoryStat.isDirectory() || !own(directoryStat) || mode(directoryStat) !== 0o700) return false;
+    }
+    const outboxStat = fsImpl.lstatSync(outbox);
+    const journalStat = fsImpl.lstatSync(journal);
+    if (outboxStat.isSymbolicLink() || journalStat.isSymbolicLink() || !outboxStat.isFile() || !journalStat.isFile() ||
+        !own(outboxStat) || !own(journalStat) || mode(outboxStat) !== 0o600 || mode(journalStat) !== 0o600 ||
+        outboxStat.nlink !== 1 || journalStat.nlink !== 1) return false;
+    const receipt = JSON.parse(fsImpl.readFileSync(outbox, "utf8"));
+    const proof = JSON.parse(fsImpl.readFileSync(journal, "utf8"));
+    const chatUrl = canonicalUrl(state.reviewer_chat_url);
+    return receipt.delivery_state === "DELIVERED" && receipt.delivery_owner === "register-chat.mjs" &&
+      receipt.callback_id === callbackId && receipt.chat_url === chatUrl &&
+      ["committed-user-turn", "existing-user-message"].includes(receipt.verified_by) &&
+      proof.schema_version === 1 && proof.status === "DELIVERED" && proof.verified_role === "user" &&
+      proof.verified_by === receipt.verified_by && proof.callback_id === callbackId && proof.chat_url === chatUrl &&
+      proof.callback_state_sha256 === crypto.createHash("sha256").update(fsImpl.readFileSync(outbox)).digest("hex");
+  } catch { return false; }
+}
+
+function verifyNewInstallPrepared({ local, state, githubApi, fsImpl = fs }) {
+  if (state.macos_setup_approved !== true || state.github_plugin_authorized !== true || state.generated_repo_authorized !== true || state.github_plugin_authorization_verified !== true ||
+      state.github_plugin_authorization_installation_id !== state.installation_id ||
+      state.github_plugin_authorization_control_repository !== state.control_repository ||
+      state.github_plugin_authorization_sandbox_repository !== state.sandbox_repository ||
+      canonicalUrl(state.github_plugin_authorization_chat_url) !== canonicalUrl(state.reviewer_chat_url) ||
       state.control_environment_ready !== true || state.target_environment_ready === true ||
       !local.control?.ok || !local.intent?.ok || !local.routeFile?.ok) return null;
   const control = local.control.value;
@@ -269,9 +306,53 @@ function verifyNewInstallPrepared({ local, state, githubApi }) {
     if (!state.sandbox_review_route && routes.length === 1) {
       return verifyPendingFirstRegistration({ local, state, githubApi, route: routes[0] });
     }
-    if (!hasRoute) return null;
+    if (!hasRoute || !hasRegistrationDeliveryProof({ local, state, route: selected[0], fsImpl })) return null;
     const provenance = independentlyVerifiedProvenance({ state, githubApi, routeFile: local.routeFile, issueId: selected[0].registration_issue });
     return diagnostic("NEW_INSTALL_PREPARED", ["trusted_manifest"], { provenance: { control_repository_id: provenance.control_repository_id, sandbox_repository_id: provenance.sandbox_repository_id, registration_issue_id: provenance.registration_issue_id } });
+  } catch { return null; }
+}
+
+// Pre-connector state is intentionally lower authority than the route/receipt
+// states below.  It proves only that this process prepared one canonical,
+// target-disabled instance; it never accepts local booleans as GitHub proof.
+function verifyNewInstallAwaitingConnectorAuth({ local, state, githubApi }) {
+  if (state.macos_setup_approved !== true || state.control_environment_ready !== true ||
+      state.target_environment_ready === true || state.generated_repo_authorized === true ||
+      !safeId(state.installation_id) || state.instance_id !== canonicalInstallationId(state.installation_id) ||
+      !/^[A-Za-z0-9-]+$/.test(String(state.github_login || "")) ||
+      state.control_repository !== `${state.github_login}/chatgpt-codex-orchestrator-control-${state.instance_id}` ||
+      state.sandbox_repository !== `${state.github_login}/chatgpt-codex-orchestrator-sandbox-${state.instance_id}` ||
+      !canonicalUrl(state.reviewer_chat_url) ||
+      state.instance_platform !== "darwin" || state.instance_arch !== "arm64" ||
+      path.resolve(String(state.instance_root || "")) !== path.resolve(String(local.instanceRoot || "")) || !local.control?.ok || !local.intent?.ok ||
+      local.receipt?.present || !local.routeFile?.ok) return null;
+  const control = local.control.value;
+  const intent = local.intent.value;
+  const expected = { instance_id: state.instance_id, installation_id: state.installation_id,
+    control_repository: state.control_repository, sandbox_repository: state.sandbox_repository };
+  if (control.schema_version !== 1 || control.role !== "control" || control.platform !== "darwin" ||
+      control.arch !== "arm64" || control.instance_root !== undefined && control.instance_root !== local.instanceRoot ||
+      control.chat_route_file !== undefined && path.resolve(String(control.chat_route_file)) !== path.resolve(String(state.chat_route_file || "")) ||
+      control.github_owner_id !== undefined && String(control.github_owner_id) !== String(state.github_owner_id || "") ||
+      control.control_repository_id !== undefined && String(control.control_repository_id) !== String(state.control_repository_id || "") ||
+      control.sandbox_repository_id !== undefined && String(control.sandbox_repository_id) !== String(state.sandbox_repository_id || "") ||
+      Object.entries(expected).some(([key, value]) => !value || control[key] !== value) ||
+      intent.installation_id !== state.installation_id ||
+      intent.generated_repositories?.control !== state.control_repository ||
+      intent.generated_repositories?.sandbox !== state.sandbox_repository ||
+      intent.phase !== "PREPARED" || intent.destination?.path !== undefined && intent.destination.path !== local.instanceRoot ||
+      !repositoryOriginMatches(control.origin, state.control_repository) ||
+      !repositoryOriginMatches(control.remote_origin, state.control_repository) ||
+      !Array.isArray(local.routeFile.value?.routes) && (!local.routeFile.value?.routes || Object.keys(local.routeFile.value.routes).length !== 0) ||
+      Array.isArray(local.routeFile.value?.routes) && local.routeFile.value.routes.length !== 0) return null;
+  try {
+    const provenance = independentlyVerifiedProvenanceWithoutIssue({ state, githubApi });
+    const controlRemote = remoteRepository(githubApi, state.control_repository);
+    const sandboxRemote = remoteRepository(githubApi, state.sandbox_repository);
+    if (state.github_owner_id !== undefined &&
+        (String(controlRemote?.owner?.id || "") !== String(state.github_owner_id) ||
+         String(sandboxRemote?.owner?.id || "") !== String(state.github_owner_id))) return null;
+    return diagnostic("NEW_INSTALL_AWAITING_CONNECTOR_AUTH", ["generated_repo_authorization", "trusted_manifest"], { provenance });
   } catch { return null; }
 }
 
@@ -327,10 +408,22 @@ function independentlyVerifiedProvenanceWithoutIssue({ state, githubApi }) {
   const remoteControl = remoteRepository(githubApi, state.control_repository);
   const remoteSandbox = remoteRepository(githubApi, state.sandbox_repository);
   assertDistinctTrustDomains(control, sandbox, remoteControl, remoteSandbox);
-  if (!remoteControl?.id || !remoteSandbox?.id ||
-      !repositoryMatches(remoteControl, state.control_repository, "control", remoteControl.id) ||
-      !repositoryMatches(remoteSandbox, state.sandbox_repository, "sandbox", remoteSandbox.id)) throw new Error("independent GitHub repository provenance is contradictory");
-  return { control_repository_id: String(remoteControl.id), sandbox_repository_id: String(remoteSandbox.id) };
+  if (typeof githubApi?.getAuthenticatedUser !== "function") throw new Error("independent authenticated GitHub identity is unavailable");
+  const user = githubApi.getAuthenticatedUser();
+  if (!validRepositoryId(state.github_owner_id) || !validRepositoryId(user?.id) || user.login !== state.github_login ||
+      String(user.id) !== String(state.github_owner_id)) throw new Error("independent authenticated GitHub identity conflicts");
+  if (!validRepositoryId(state.control_repository_id) || !validRepositoryId(state.sandbox_repository_id) ||
+      String(state.control_repository_id) === String(state.sandbox_repository_id)) throw new Error("persisted generated repository IDs are unavailable");
+  for (const [actual, expected, role, persistedId] of [[remoteControl, state.control_repository, "control", state.control_repository_id], [remoteSandbox, state.sandbox_repository, "sandbox", state.sandbox_repository_id]]) {
+    if (!repositoryMatches(actual, expected, role, persistedId) || actual?.private !== true ||
+        (actual.visibility !== undefined && String(actual.visibility).toLowerCase() !== "private") ||
+        actual?.owner?.login !== state.github_login || String(actual?.owner?.id || "") !== String(state.github_owner_id) ||
+        actual?.description !== `ChatGPT Codex Orchestrator ${role} installation ${state.installation_id}` || actual?.disabled === true) throw new Error("independent GitHub repository provenance is contradictory");
+  }
+  return {
+    control_repository_id: String(remoteControl.id), sandbox_repository_id: String(remoteSandbox.id),
+    github_owner_id: String(user.id), github_login: user.login
+  };
 }
 
 // This is a separate first-install trust contract. Legacy recovery deliberately
@@ -378,7 +471,9 @@ export function verifyTrustedRecoveryEvidence({ state = {}, home = os.homedir(),
   const routeValidation = validatedRouteRecords(local.routeFile);
   if (routeValidation.error) return diagnostic("CONFLICT", ["chat_route_registry_integrity"]);
   if (local.status === "ABSENT" && !requireReceipt) {
-    const prepared = verifyNewInstallPrepared({ local, state, githubApi });
+    const awaitingConnector = verifyNewInstallAwaitingConnectorAuth({ local, state, githubApi });
+    if (awaitingConnector) return awaitingConnector;
+    const prepared = verifyNewInstallPrepared({ local, state, githubApi, fsImpl });
     if (prepared) return prepared;
   }
   if (local.status === "ABSENT" && requireReceipt) return diagnostic("NEEDS_HUMAN_LEGACY", ["trusted_manifest", "independent_provenance"]);
@@ -403,6 +498,7 @@ export function verifyTrustedRecoveryEvidence({ state = {}, home = os.homedir(),
   const routes = routeValidation.records;
   const selected = routes.filter(item => item.route === state.sandbox_review_route && item.project === state.sandbox_project_key && item.status === "active");
   if (selected.length !== 1 || routes.filter(item => item.route === state.sandbox_review_route).length !== 1 || routes.filter(item => item.project === state.sandbox_project_key && item.status === "active").length !== 1) return diagnostic("CONFLICT", ["active_unique_route"]);
+  if (!hasRegistrationDeliveryProof({ local, state, route: selected[0], fsImpl })) return diagnostic("CONFLICT", ["registration_delivery_proof"]);
   if (registrationIssueIdFromState({ ...state, sandbox_chat_registration_issue: selected[0].registration_issue }, local.routeFile) !== Number(manifest.registration_issue_id)) return diagnostic("CONFLICT", ["route_registration_binding"]);
   const identityInputs = { installation_id: state.installation_id, instance_id: state.instance_id, control_repository: state.control_repository, sandbox_repository: state.sandbox_repository, control_repository_id: manifest.control_repository_id, sandbox_repository_id: manifest.sandbox_repository_id, registration_issue_id: manifest.registration_issue_id, registration_issue_author: manifest.registration_issue_author, project: state.sandbox_project_key, chat_url: reviewerUrl };
   if (manifest.identity_sha256 !== hash(identityInputs)) return diagnostic("CONFLICT", ["identity_hash"]);
@@ -426,6 +522,7 @@ export function issueTrustedRecoveryEvidence({ state = {}, home = os.homedir(), 
   const routes = routeValidation.records || [];
   const selected = routes.filter(item => item.route === state.sandbox_review_route && item.project === state.sandbox_project_key && item.status === "active");
   if (!routeFile.ok || selected.length !== 1 || routes.filter(item => item.route === state.sandbox_review_route).length !== 1 || routes.filter(item => item.project === state.sandbox_project_key && item.status === "active").length !== 1) throw new Error("actual active route receipt is missing or ambiguous");
+  if (!hasRegistrationDeliveryProof({ local, state, route: selected[0], fsImpl })) throw new Error("current user-role registration delivery proof is missing or invalid");
   const verified = independentlyVerifiedProvenance({ state, githubApi, routeFile, issueId: issueId || selected[0].registration_issue });
   if (registrationIssueIdFromState({ ...state, sandbox_chat_registration_issue: selected[0].registration_issue }, routeFile) !== verified.registration_issue_id) throw new Error("active route is not bound to the independently queried registration issue");
   const inputs = { installation_id: state.installation_id, instance_id: state.instance_id, control_repository: state.control_repository, sandbox_repository: state.sandbox_repository, control_repository_id: verified.control_repository_id, sandbox_repository_id: verified.sandbox_repository_id, registration_issue_id: verified.registration_issue_id, registration_issue_author: verified.registration_issue_author, project: state.sandbox_project_key, chat_url: canonicalUrl(state.reviewer_chat_url) };

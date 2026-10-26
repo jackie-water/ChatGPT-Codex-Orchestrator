@@ -119,13 +119,126 @@ test("official macOS installer orders all identity and native gates before first
   assert.doesNotMatch(windows,/advanceMacosFirstBootRunner|macos_runner_package_approval/);
 });
 
-test("official setup presents scoped approval before legacy evidence in fresh-first bootstrap",()=>{
+test("fresh bootstrap admits only the exact two-root aggregate and complete independent provenance",()=>{
+  const start=cli.indexOf("function macosBootstrapMayAdvance(");
+  const end=cli.indexOf("function macosSelectedAwaitingFirstRoute(",start);
+  const context=vm.createContext({path,os:{homedir:()=>"/Users/test"},canonicalInstallationId:id=>id,findRegisteredChatRoute:(actual,{projectKey,chatUrl})=>actual.__delivered&&projectKey===actual.sandbox_project_key&&chatUrl===actual.reviewer_chat_url?{route:actual.sandbox_review_route,project:projectKey,chat_url:chatUrl,installation_id:actual.installation_id,registration_issue:Number(String(actual.sandbox_review_route||"").slice(5))}:null});
+  vm.runInContext(cli.slice(start,end)+"\nthis.fresh=macosFreshBootstrapMayAdvance;",context);
+  const state={macos_setup_approved:true,installation_id:"new-install",instance_id:"new-install",instance_root:"/Users/test/.chatgpt-codex-orchestrator/instances/new-install",control_repository:"org/control",sandbox_repository:"org/sandbox",control_repository_id:"101",sandbox_repository_id:"202",control_environment_ready:true,target_environment_ready:false,github_login:"owner",github_owner_id:"42",reviewer_chat_url:"https://chatgpt.com/c/approved",sandbox_project_key:"sandbox-new-install"};
+  const recovery={status:"NEEDS_VERIFICATION",instance_ids:["new-install"],instances:[{instance_id:"new-install",status:"NEEDS_VERIFICATION",route_names:[],route_bindings:[],missing_verification_gates:["chat_routes_metadata","migration_snapshot_metadata","registered_route_evidence"],identity:{instance_id:"new-install",installation_id:"new-install",control_repository:"org/control",sandbox_repository:"org/sandbox"}}]};
+  const evidence={status:"NEW_INSTALL_CONTROL_PREPARED_AWAITING_ROUTE",provenance:{control_repository_id:"101",sandbox_repository_id:"202"}};
+  assert.equal(context.fresh(state,recovery,evidence),true);
+  assert.equal(context.fresh({...state,fresh_first_install_bootstrap:true}, {...recovery,instance_ids:["new-install","foreign"],instances:[...recovery.instances,{identity:{instance_id:"foreign"}}]}, evidence),false);
+  assert.equal(context.fresh(state,recovery,{...evidence,provenance:{control_repository_id:"101"}}),false);
+  assert.equal(context.fresh({...state,target_environment_ready:true},recovery,evidence),false);
+  const scannerOmission={...recovery,status:"CONFLICT",instance_ids:["1832f0bb","new-install"],instances:[
+    {instance_id:"1832f0bb",status:"CONFLICT",fresh_first_install_candidate:true,missing_verification_gates:["safe_instance_tree"]},
+    {...recovery.instances[0],identity:undefined,missing_verification_gates:["verified_role_identities"]}
+  ]};
+  const connectorEvidence={...evidence,status:"NEW_INSTALL_AWAITING_CONNECTOR_AUTH",provenance:{...evidence.provenance,github_owner_id:"42",github_login:"owner"}};
+  assert.equal(context.fresh(state,scannerOmission,connectorEvidence),true);
+  const foreignRoot={instance_id:"foreign",status:"NEEDS_VERIFICATION",missing_verification_gates:["verified_role_identities"]};
+  const thirdRoot={...scannerOmission,instance_ids:[...scannerOmission.instance_ids,"foreign"],instances:[...scannerOmission.instances,foreignRoot]};
+  assert.equal(context.fresh(state,thirdRoot,connectorEvidence),false,"a third root is never lower-authority admission");
+  assert.equal(context.fresh({...state,instance_root:"/Users/test/foreign"},scannerOmission,connectorEvidence),false,"a foreign instance root is rejected");
+  assert.equal(context.fresh(state,{...scannerOmission,instance_ids:["foreign","new-install"],instances:[foreignRoot,scannerOmission.instances[1]]},connectorEvidence),false,"a foreign root cannot replace the historical conflict");
+  assert.equal(context.fresh({...state,github_owner_id:"99"},scannerOmission,connectorEvidence),false,"foreign owner provenance is rejected");
+  for (const [key,foreign] of [["github_owner_id","99"],["github_login","Owner"]]) {
+    for (const value of [undefined,null,"",foreign]) {
+      assert.equal(context.fresh({...state,[key]:value},scannerOmission,connectorEvidence),false,`invalid state ${key} is rejected`);
+      assert.equal(context.fresh(state,scannerOmission,{...connectorEvidence,provenance:{...connectorEvidence.provenance,[key]:value}}),false,`invalid provenance ${key} is rejected`);
+    }
+  }
+  assert.equal(context.fresh(state,{...scannerOmission,instances:scannerOmission.instances.map(item=>item.instance_id==="new-install"?{...item,missing_verification_gates:["verified_role_identities","unexpected_gate"]}:item)},evidence),false);
+  assert.equal(context.fresh(state,scannerOmission,{...connectorEvidence,provenance:undefined}),false,"missing provenance is rejected");
+  for (const key of ["control_repository_id","sandbox_repository_id"]) {
+    assert.equal(context.fresh(state,scannerOmission,{...connectorEvidence,provenance:{...connectorEvidence.provenance,[key]:undefined}}),false,`missing ${key} provenance is rejected`);
+    assert.equal(context.fresh(state,scannerOmission,{...connectorEvidence,provenance:{...connectorEvidence.provenance,[key]:"999"}}),false,`wrong ${key} provenance is rejected`);
+  }
+  assert.equal(context.fresh(state,scannerOmission,evidence),true,"prepared awaiting-route admission still requires no route");
+  for (const phase of ["NEW_INSTALL_REGISTRATION_PENDING","NEW_INSTALL_PREPARED","VERIFIED"])
+    assert.equal(context.fresh(state,scannerOmission,{...evidence,status:phase}),false);
+  const pendingEvidence={...evidence,status:"NEW_INSTALL_REGISTRATION_PENDING",provenance:{...evidence.provenance,registration_issue_id:408}};
+  state.sandbox_chat_registration_issue=`https://github.com/${state.control_repository}/issues/408`;
+  const boundRecovery={...scannerOmission,instances:scannerOmission.instances.map(item=>item.instance_id==="new-install"?{...item,route_names:["chat-408"],route_bindings:[{route:"chat-408",status:"active",project:"sandbox-new-install",instance_id:"new-install",installation_id:"new-install",control_repository:"org/control",sandbox_repository:"org/sandbox"}]}:item)};
+  assert.equal(context.fresh(state,boundRecovery,evidence),false,"prepared awaiting-route admission rejects an existing route");
+  assert.equal(context.fresh(state,boundRecovery,pendingEvidence),true);
+  assert.equal(context.fresh(state,{...boundRecovery,instances:boundRecovery.instances.map(item=>item.instance_id==="new-install"?{...item,route_bindings:[{...item.route_bindings[0],route:"chat-409"}]}:item)},pendingEvidence),false);
+  const preparedEvidence={...pendingEvidence,status:"NEW_INSTALL_PREPARED"};
+  const preparedState={...state,sandbox_review_route:"chat-408",__delivered:false};
+  assert.equal(context.fresh(preparedState,boundRecovery,preparedEvidence),false);
+  assert.equal(context.fresh({...preparedState,__delivered:true},boundRecovery,preparedEvidence),true);
+  assert.equal(context.fresh({...preparedState,__delivered:true,review_route:"chat-409"},boundRecovery,preparedEvidence),false);
+  assert.equal(context.fresh({...preparedState,__delivered:true,sandbox_review_route:"chat-409"},boundRecovery,preparedEvidence),false);
+});
+
+test("dry-run behavior admits the exact two-root bootstrap without mutation and denies foreign state",t=>{
+  const begin=cli.indexOf("function dryRun() {");
+  const end=cli.indexOf("function codexLogin()",begin);
+  const dryHome=path.resolve(os.tmpdir());
+  const state={macos_setup_approved:true,installation_id:"new-install",instance_id:"new-install",instance_root:path.join(dryHome,".chatgpt-codex-orchestrator","instances","new-install"),control_repository:"org/control",sandbox_repository:"org/sandbox",control_repository_id:"101",sandbox_repository_id:"202",control_environment_ready:true,target_environment_ready:false,github_login:"owner",github_owner_id:"42",reviewer_chat_url:"https://chatgpt.com/c/approved",sandbox_project_key:"sandbox-new-install",generated_repo_authorized:false};
+  const exactRecovery={status:"CONFLICT",instance_ids:["1832f0bb","new-install"],instances:[{instance_id:"1832f0bb",status:"CONFLICT",fresh_first_install_candidate:true,missing_verification_gates:["safe_instance_tree"]},{instance_id:"new-install",status:"NEEDS_VERIFICATION",route_names:[],route_bindings:[],missing_verification_gates:["verified_role_identities"],identity:undefined}]};
+  const evidence={status:"NEW_INSTALL_AWAITING_CONNECTOR_AUTH",provenance:{control_repository_id:"101",sandbox_repository_id:"202",github_owner_id:"42",github_login:"owner"}};
+  const run=(recovery,actualEvidence,{actualState=state,expectedNativeCalls=0}={})=>{
+    const before=JSON.stringify({state:actualState,recovery,evidence:actualEvidence});
+    const emitted=[],nativeCalls=[];
+    const nativePreflight={status:"PASS",mutations_performed:false};
+    const context=vm.createContext({path,os:{...os,homedir:()=>dryHome},process:{platform:"darwin"},loadState:options=>{assert.equal(options.create,false);return actualState;},ensureStateLanguage:()=>"en",macosRecoveryReport:()=>recovery,macosTrustedRecoveryEvidence:()=>actualEvidence,commandExists:()=>({ok:true}),macosPrerequisites:()=>({node:true,session_auth:true,native_helper:{status:"PASS"}}),migrationPreflight:()=>({status:"READY"}),macosNativeHelperPreflight:options=>{nativeCalls.push(options);return nativePreflight;},emit:(result,code=0)=>{emitted.push({result,code});},findRegisteredChatRoute:()=>null,canonicalInstallationId:id=>id});
+    const stateGate=cli.slice(cli.indexOf("function macosStateBound("),cli.indexOf("function macosGithubApi("));
+    const bootstrapGate=cli.slice(cli.indexOf("function macosBootstrapMayAdvance("),cli.indexOf("function macosTrustedRecoveryEvidence("));
+    vm.runInContext(stateGate+bootstrapGate+cli.slice(begin,end)+"\nthis.runDry=dryRun;",context);
+    context.runDry();
+    assert.equal(JSON.stringify({state:actualState,recovery,evidence:actualEvidence}),before);
+    assert.equal(emitted.length,1);
+    assert.equal(emitted[0].result.mutations_performed,false);
+    assert.equal(nativeCalls.length,expectedNativeCalls);
+    for (const options of nativeCalls) {
+      assert.deepEqual(Object.keys(options).sort(),["installationId","state"]);
+      assert.equal(options.state,actualState);
+      assert.equal(options.installationId,actualState.installation_id);
+      assert.equal(emitted[0].result.macos_native_helper,nativePreflight);
+    }
+    return emitted[0];
+  };
+  const admitted=run(exactRecovery,evidence,{expectedNativeCalls:1});
+  assert.equal(admitted.result.status,"PASS");
+  assert.equal(admitted.code,0);
+  assert.equal(admitted.result.dry_run,true);
+  assert.equal(admitted.result.mutations_performed,false);
+  const foreignRecovery={...exactRecovery,instance_ids:[...exactRecovery.instance_ids,"foreign"],instances:[...exactRecovery.instances,{instance_id:"foreign",status:"NEEDS_VERIFICATION"}]};
+  const denied=run(foreignRecovery,evidence);
+  assert.equal(denied.result.status,"ERROR");
+  assert.equal(denied.code,1);
+  assert.equal(denied.result.mutations_performed,false);
+  assert.equal(run({...exactRecovery,status:"UNKNOWN"},evidence).result.status,"NEEDS_USER_ACTION");
+  assert.equal(run(exactRecovery,evidence,{actualState:{...state,instance_root:path.join(dryHome,"foreign")}}).result.status,"ERROR");
+  assert.equal(run({...exactRecovery,instance_ids:["foreign","new-install"],instances:[{...exactRecovery.instances[0],instance_id:"foreign"},exactRecovery.instances[1]]},evidence).result.status,"ERROR");
+  for (const [key,foreign] of [["github_owner_id","99"],["github_login","Owner"]]) {
+    for (const value of [undefined,null,"",foreign]) {
+      assert.equal(run(exactRecovery,evidence,{actualState:{...state,[key]:value}}).result.status,"ERROR",`invalid state ${key} is denied`);
+      assert.equal(run(exactRecovery,{...evidence,provenance:{...evidence.provenance,[key]:value}}).result.status,"ERROR",`invalid provenance ${key} is denied`);
+    }
+  }
+  assert.equal(run(exactRecovery,{...evidence,provenance:{control_repository_id:"101"}}).result.status,"ERROR");
+  assert.equal(run(exactRecovery,{...evidence,provenance:undefined}).result.status,"ERROR");
+  for (const key of ["control_repository_id","sandbox_repository_id"]) {
+    assert.equal(run(exactRecovery,{...evidence,provenance:{...evidence.provenance,[key]:undefined}}).result.status,"ERROR");
+    assert.equal(run(exactRecovery,{...evidence,provenance:{...evidence.provenance,[key]:"999"}}).result.status,"ERROR");
+  }
+  assert.equal(run(exactRecovery,evidence,{actualState:{...state,target_environment_ready:true}}).result.status,"ERROR");
+});
+
+test("official setup requires approval before writes and uses the post-approval evidence phase",()=>{
   const begin=cli.indexOf("function runSetup() {");
   const end=cli.indexOf("\n  state.installation_id ||= crypto.randomUUID();",begin);
   const mac=cli.slice(begin,end);
   assert.ok(mac.indexOf("isMacosFreshFirstInstallBootstrap") < mac.indexOf("macos_setup_approval"));
   assert.ok(mac.indexOf("freshFirstInstall&&!state.macos_setup_approved") < mac.indexOf("macosTrustedRecoveryEvidence(state"));
-  assert.match(mac,/!freshFirstInstall&&earlyTrustedEvidence\.status===\"NEEDS_HUMAN_LEGACY\"/);
+  assert.ok(mac.indexOf("mutations_performed:false",mac.indexOf("macos_setup_approval")) < mac.indexOf("prepareMigrationIntent"));
+  assert.match(mac,/const freshFirstInstallAfterApproval=freshFirstInstall \|\| approvedFreshContinuation/);
+  assert.match(mac,/!freshFirstInstallAfterApproval&&earlyTrustedEvidence\.status===\"NEEDS_HUMAN_LEGACY\"/);
+  assert.match(mac,/earlyTrustedEvidence\.status===\"NEW_INSTALL_AWAITING_CONNECTOR_AUTH\"/);
+  assert.doesNotMatch(mac,/!freshFirstInstall&&earlyTrustedEvidence\.status===\"NEEDS_HUMAN_LEGACY\"/);
 });
 
 test("latest macOS evidence pins a pending first Issue before registration can create one",()=>{

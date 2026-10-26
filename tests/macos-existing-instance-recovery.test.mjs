@@ -66,6 +66,16 @@ test("multiple instances are CONFLICT", t => {
   assert.deepEqual(result.instance_ids, ["first", "second"]);
 });
 
+test("three instance roots remain a conflict and preserve every root", t => {
+  const f = fixture(t);
+  for (const id of ["first", "second", "third"]) fs.mkdirSync(path.join(f.instances, id), { mode: 0o700 });
+  const before = fs.readdirSync(f.instances).sort();
+  const result = inspectMacosExistingInstanceRecovery({ home: f.home });
+  assert.equal(result.status, "CONFLICT");
+  assert.deepEqual(result.instance_ids, before);
+  assert.deepEqual(fs.readdirSync(f.instances).sort(), before);
+});
+
 test("symlinked candidate and odd private modes fail closed", t => {
   const f = fixture(t);
   fs.mkdirSync(path.join(f.home, "outside"), { mode: 0o700 });

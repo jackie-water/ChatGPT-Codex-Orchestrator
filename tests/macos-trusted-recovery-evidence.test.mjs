@@ -6,7 +6,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { issueTrustedRecoveryEvidence, verifyTrustedRecoveryEvidence, verifyMacosGeneratedRepositoryIdentity, githubReadOnlyApi } from "../src/lib/macos-trusted-recovery-evidence.mjs";
 import { defaultLocalPaths } from "../src/lib/control-render.mjs";
-import { ensureInstallerChatRegistration } from "../src/lib/chat-registration.mjs";
+import { ensureInstallerChatRegistration, findRegisteredChatRoute } from "../src/lib/chat-registration.mjs";
 
 function fixture() {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "trusted-recovery-v1-"));
@@ -19,6 +19,14 @@ function fixture() {
   fs.writeFileSync(path.join(control, "instance.json"), JSON.stringify({ schema_version: 1, instance_id: state.instance_id, installation_id: state.installation_id, control_repository: state.control_repository, sandbox_repository: state.sandbox_repository, role: "control" }) + "\n", { mode: 0o600 });
   fs.writeFileSync(path.join(instance, "migration-intent.json"), JSON.stringify({ schema_version: 1, phase: "PREPARED", installation_id: state.installation_id, generated_repositories: { control: state.control_repository, sandbox: state.sandbox_repository } }) + "\n", { mode: 0o600 });
   fs.writeFileSync(state.chat_route_file, JSON.stringify({ version: 1, routes: [{ route: state.sandbox_review_route, project: state.sandbox_project_key, status: "active", chat_url: state.reviewer_chat_url, registration_issue: 51 }] }) + "\n", { mode: 0o600 });
+  const callbackId = `chat-register-${state.sandbox_project_key}-${51}`;
+  const outbox = path.join(instance, "pending-wakes", `${callbackId}.json`);
+  const deliveryJournal = path.join(instance, "registration-delivery", `${callbackId}.json`);
+  fs.mkdirSync(path.dirname(outbox), { recursive: true, mode: 0o700 });
+  fs.mkdirSync(path.dirname(deliveryJournal), { recursive: true, mode: 0o700 });
+  const delivery = { delivery_state: "DELIVERED", delivery_owner: "register-chat.mjs", callback_id: callbackId, chat_url: state.reviewer_chat_url, verified_by: "existing-user-message" };
+  fs.writeFileSync(outbox, JSON.stringify(delivery) + "\n", { mode: 0o600 });
+  fs.writeFileSync(deliveryJournal, JSON.stringify({ schema_version: 1, status: "DELIVERED", verified_role: "user", verified_by: delivery.verified_by, callback_id: callbackId, chat_url: state.reviewer_chat_url, callback_state_sha256: crypto.createHash("sha256").update(fs.readFileSync(outbox)).digest("hex") }) + "\n", { mode: 0o600 });
   const githubCalls = [];
   const githubApi = { getRepository: repository => { githubCalls.push(["repository", repository]); return repository === state.control_repository ? { id: 101, name: "control-a", full_name: repository, visibility: "PRIVATE", owner: { login: "owner" } } : { id: 202, name: "sandbox-a", full_name: repository, visibility: "PRIVATE", owner: { login: "owner" } }; }, getIssue: () => { githubCalls.push(["issue"]); return { number: 51, user: { login: "owner" }, body: JSON.stringify({ project: state.sandbox_project_key, chat_url: state.reviewer_chat_url, installation_id: state.installation_id }) }; } };
   return { home, instance, control, state, githubApi, githubCalls };
@@ -101,8 +109,10 @@ function registrationPendingFixture(t, { installationId = "abcd1234-pending-inst
   f.outbox = path.join(instance, "pending-wakes", `${f.callbackId}.json`);
   f.deliveryJournal = path.join(instance, "registration-delivery", `${f.callbackId}.json`);
   f.writeDeliveryProof = () => {
-    fs.mkdirSync(path.dirname(f.outbox), { mode: 0o700 });
-    fs.mkdirSync(path.dirname(f.deliveryJournal), { mode: 0o700 });
+    for (const directory of [path.dirname(f.outbox), path.dirname(f.deliveryJournal)]) {
+      fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+      fs.chmodSync(directory, 0o700);
+    }
     writeJson(f.outbox, {
       delivery_state: "DELIVERED", delivery_owner: "register-chat.mjs", callback_id: f.callbackId,
       chat_url: state.reviewer_chat_url, verified_by: "existing-user-message"
@@ -130,22 +140,132 @@ function registrationPendingSnapshot(f) {
   return JSON.stringify({ state: f.state, files });
 }
 
-test("first install issues an exact receipt and idempotent resume verifies it", () => {
-  const f = fixture();
-  try {
-    const issued = issueTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi });
-    assert.equal(issued.status, "VERIFIED");
-    assert.equal(issued.manifest.status, "VERIFIED");
-    assert.equal(new Date(issued.manifest.issued_at).toISOString(), issued.manifest.issued_at);
-    const verified = verifyTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi });
-    assert.equal(verified.status, "VERIFIED");
-    const receipt = path.join(f.instance, "trusted-recovery-evidence-v1.json");
-    const before = fs.readFileSync(receipt);
-    const issuedAgain = issueTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi });
-    assert.equal(issuedAgain.idempotent, true);
-    assert.deepEqual(fs.readFileSync(receipt), before);
-    assert.equal(issuedAgain.manifest.issued_at, issued.manifest.issued_at);
-  } finally { fs.rmSync(f.home, { recursive: true, force: true }); }
+test("first install issues an exact receipt only after real user-role delivery", t => {
+  const f = registrationPendingFixture(t);
+  assert.equal(f.state.sandbox_review_route, undefined);
+  assert.equal(fs.existsSync(path.join(f.instance, "trusted-recovery-evidence-v1.json")), false);
+  assert.throws(() => issueTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi }), /complete installer identity/);
+  f.queue();
+  assert.equal(findRegisteredChatRoute(f.state, { projectKey: f.state.sandbox_project_key, chatUrl: f.state.reviewer_chat_url }), null, "Issue/route queue is not delivery");
+  assert.throws(() => issueTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi }), /complete installer identity/);
+  f.writeDeliveryProof();
+  const delivered = findRegisteredChatRoute(f.state, { projectKey: f.state.sandbox_project_key, chatUrl: f.state.reviewer_chat_url });
+  assert.deepEqual(delivered, f.route);
+  f.state.sandbox_review_route = delivered.route;
+  const issued = issueTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi });
+  assert.equal(issued.status, "VERIFIED");
+  assert.equal(issued.manifest.status, "VERIFIED");
+  assert.equal(new Date(issued.manifest.issued_at).toISOString(), issued.manifest.issued_at);
+  assert.equal(verifyTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi }).status, "VERIFIED");
+  const receipt = path.join(f.instance, "trusted-recovery-evidence-v1.json");
+  const before = fs.readFileSync(receipt);
+  const issuedAgain = issueTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi });
+  assert.equal(issuedAgain.idempotent, true);
+  assert.deepEqual(fs.readFileSync(receipt), before);
+  assert.equal(issuedAgain.manifest.issued_at, issued.manifest.issued_at);
+});
+
+test("trusted evidence requires current user-role delivery for issue and verification", t => {
+  const f = registrationPendingFixture(t);
+  f.queue();
+  f.state.sandbox_review_route = f.route.route;
+  assert.throws(() => issueTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi }), /current user-role registration delivery proof/);
+
+  f.writeDeliveryProof();
+  const issued = issueTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi });
+  const manifest = path.join(f.instance, "trusted-recovery-evidence-v1.json");
+  const before = fs.readFileSync(manifest);
+  assert.equal(issued.status, "VERIFIED");
+
+  fs.unlinkSync(f.outbox);
+  assert.equal(f.verify({ requireReceipt: true }).status, "CONFLICT");
+  assert.deepEqual(f.verify({ requireReceipt: true }).missing_verification_gates, ["registration_delivery_proof"]);
+  assert.throws(() => issueTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi }), /current user-role registration delivery proof/);
+  assert.deepEqual(fs.readFileSync(manifest), before);
+
+  f.writeDeliveryProof();
+  const changedRole = JSON.parse(fs.readFileSync(f.deliveryJournal, "utf8"));
+  changedRole.verified_role = "assistant";
+  f.writeJson(f.deliveryJournal, changedRole);
+  assert.equal(f.verify({ requireReceipt: true }).status, "CONFLICT");
+  assert.throws(() => issueTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi }), /current user-role registration delivery proof/);
+
+  f.writeDeliveryProof();
+  const changedChat = JSON.parse(fs.readFileSync(f.outbox, "utf8"));
+  changedChat.chat_url = "https://chatgpt.com/c/foreign-chat";
+  f.writeJson(f.outbox, changedChat);
+  assert.equal(f.verify({ requireReceipt: true }).status, "CONFLICT");
+  assert.throws(() => issueTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi }), /current user-role registration delivery proof/);
+
+  f.writeDeliveryProof();
+  f.writeJson(f.state.chat_route_file, { version: 1, routes: [f.route, f.route] });
+  assert.equal(f.verify({ requireReceipt: true }).status, "CONFLICT");
+  assert.deepEqual(f.verify({ requireReceipt: true }).missing_verification_gates, ["chat_route_registry_integrity"]);
+  assert.throws(() => issueTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi }), /route registry contains a duplicate|actual active route receipt is missing or ambiguous|malformed/);
+});
+
+test("pre-connector recovery is low authority and uses canonical read-only repository proof", t => {
+  const f = registrationPendingFixture(t);
+  f.state.generated_repo_authorized = false;
+  const before = registrationPendingSnapshot(f);
+  const result = f.verify();
+  assert.equal(result.status, "NEW_INSTALL_AWAITING_CONNECTOR_AUTH");
+  assert.equal(result.mutations_performed, false);
+  assert.equal(f.state.target_environment_ready, false);
+  assert.equal(f.state.sandbox_review_route, undefined);
+  assert.equal(f.calls.filter(call => call[0] === "issue").length, 0);
+  assert.equal(registrationPendingSnapshot(f), before);
+  assert.equal(fs.existsSync(path.join(f.instance, "trusted-recovery-evidence-v1.json")), false);
+  for (const [name, mutate] of [
+    ["foreign owner", fixture => { fixture.state.github_login = "foreign"; }],
+    ["foreign control repository", fixture => { fixture.state.control_repository = "foreign/control"; }],
+    ["foreign Control origin", fixture => { fixture.metadata.origin = "https://github.com/foreign/control.git"; fixture.writeJson(fixture.controlFile, fixture.metadata); }]
+  ]) {
+    const isolated = registrationPendingFixture(t);
+    isolated.state.generated_repo_authorized = false;
+    mutate(isolated);
+    assert.notEqual(isolated.verify().status, "NEW_INSTALL_AWAITING_CONNECTOR_AUTH", name);
+    assert.equal(isolated.state.target_environment_ready, false, name);
+    assert.equal(isolated.state.sandbox_review_route, undefined, name);
+  }
+});
+
+test("pre-connector owner mismatch denies independent provenance despite matching local owner fields", t => {
+  const valid = registrationPendingFixture(t);
+  valid.state.generated_repo_authorized = false;
+  const validBefore = registrationPendingSnapshot(valid);
+  const verified = valid.verify();
+  assert.equal(verified.status, "NEW_INSTALL_AWAITING_CONNECTOR_AUTH");
+  assert.deepEqual(verified.provenance, {
+    control_repository_id: "101", sandbox_repository_id: "202", github_owner_id: "42", github_login: "owner"
+  });
+  assert.equal(registrationPendingSnapshot(valid), validBefore);
+  for (const [name, mutate] of [
+    ["matching forged local owner ID", f => {
+      f.state.github_owner_id = f.metadata.github_owner_id = "99";
+      f.writeJson(f.controlFile, f.metadata);
+    }],
+    ["authenticated owner ID", f => { f.githubApi.getAuthenticatedUser = () => ({ login: "owner", id: 99 }); }],
+    ["authenticated owner login", f => { f.githubApi.getAuthenticatedUser = () => ({ login: "Owner", id: 42 }); }],
+    ["missing authenticated owner ID", f => { f.githubApi.getAuthenticatedUser = () => ({ login: "owner" }); }],
+    ["missing authenticated owner login", f => { f.githubApi.getAuthenticatedUser = () => ({ id: 42 }); }],
+    ...["control", "sandbox"].flatMap(role => [
+      [`${role} owner ID`, f => { f.repositories[f.state[`${role}_repository`]].owner.id = 99; }],
+      [`${role} owner login`, f => { f.repositories[f.state[`${role}_repository`]].owner.login = "Owner"; }],
+      [`missing ${role} owner ID`, f => { delete f.repositories[f.state[`${role}_repository`]].owner.id; }],
+      [`missing ${role} owner login`, f => { delete f.repositories[f.state[`${role}_repository`]].owner.login; }]
+    ])
+  ]) {
+    const f = registrationPendingFixture(t);
+    f.state.generated_repo_authorized = false;
+    mutate(f);
+    const before = registrationPendingSnapshot(f);
+    const denied = f.verify();
+    assert.notEqual(denied.status, "NEW_INSTALL_AWAITING_CONNECTOR_AUTH", name);
+    assert.equal(Object.hasOwn(denied, "provenance"), false, name);
+    assert.equal(denied.mutations_performed, false, name);
+    assert.equal(registrationPendingSnapshot(f), before, name);
+  }
 });
 
 test("valid object-map route registries issue and verify", () => {
@@ -441,28 +561,40 @@ test("receipt absence is ABSENT before generated identity and legacy proof needs
   } finally { fs.rmSync(f.home, { recursive: true, force: true }); }
 });
 
-test("new install control preparation is bounded until its own Sandbox route exists", () => {
-  const f = fixture();
-  try {
-    Object.assign(f.state, {
-      control_environment_ready: true,
-      github_plugin_authorized: true,
-      github_plugin_authorization_installation_id: f.state.installation_id,
-      github_plugin_authorization_control_repository: f.state.control_repository,
-      github_plugin_authorization_sandbox_repository: f.state.sandbox_repository,
-      github_plugin_authorization_chat_url: f.state.reviewer_chat_url
-    });
-    fs.writeFileSync(f.state.chat_route_file, JSON.stringify({ version: 1, routes: [] }) + "\n", { mode: 0o600 });
-    const awaiting = verifyTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi, requireReceipt: false });
-    assert.equal(awaiting.status, "NEW_INSTALL_CONTROL_PREPARED_AWAITING_ROUTE");
-    assert.equal(awaiting.mutations_performed, false);
+test("new install control preparation is bounded until a real Sandbox route exists", t => {
+  const f = registrationPendingFixture(t);
+  const awaiting = f.verify();
+  assert.equal(awaiting.status, "NEW_INSTALL_CONTROL_PREPARED_AWAITING_ROUTE");
+  assert.equal(awaiting.mutations_performed, false);
 
-    f.state.sandbox_review_route = "sandbox-install-route";
-    fs.writeFileSync(f.state.chat_route_file, JSON.stringify({ version: 1, routes: [{ route: f.state.sandbox_review_route, project: f.state.sandbox_project_key, status: "active", chat_url: f.state.reviewer_chat_url, registration_issue: 51 }] }) + "\n", { mode: 0o600 });
-    assert.equal(verifyTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi, requireReceipt: false }).status, "NEW_INSTALL_PREPARED");
-    assert.equal(issueTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi }).status, "VERIFIED");
-    assert.equal(verifyTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi }).status, "VERIFIED");
-  } finally { fs.rmSync(f.home, { recursive: true, force: true }); }
+  f.queue();
+  assert.equal(f.verify().status, "NEW_INSTALL_REGISTRATION_PENDING");
+  assert.equal(f.state.sandbox_review_route, undefined);
+  assert.throws(() => issueTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi }), /complete installer identity/);
+
+  // A forged local bool is not delivery evidence and cannot select/persist a route.
+  f.state.sandbox_review_route = f.route.route;
+  assert.notEqual(f.verify().status, "NEW_INSTALL_PREPARED");
+  delete f.state.sandbox_review_route;
+  f.writeDeliveryProof();
+  f.state.sandbox_review_route = f.route.route;
+  const forgedJournal = JSON.parse(fs.readFileSync(f.deliveryJournal, "utf8"));
+  forgedJournal.verified_role = "assistant";
+  f.writeJson(f.deliveryJournal, forgedJournal);
+  assert.notEqual(f.verify().status, "NEW_INSTALL_PREPARED");
+  delete f.state.sandbox_review_route;
+  f.writeDeliveryProof();
+  const delivered = findRegisteredChatRoute(f.state, { projectKey: f.state.sandbox_project_key, chatUrl: f.state.reviewer_chat_url });
+  assert.deepEqual(delivered, f.route);
+  f.state.sandbox_review_route = delivered.route;
+  assert.equal(f.verify().status, "NEW_INSTALL_PREPARED");
+  const issued = issueTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi });
+  assert.equal(issued.status, "VERIFIED");
+  const receipt = fs.readFileSync(path.join(f.instance, "trusted-recovery-evidence-v1.json"));
+  assert.equal(f.verify({ requireReceipt: true }).status, "VERIFIED");
+  const issuedAgain = issueTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi });
+  assert.equal(issuedAgain.idempotent, true);
+  assert.deepEqual(fs.readFileSync(path.join(f.instance, "trusted-recovery-evidence-v1.json")), receipt);
 });
 
 test("bootstrap proof denies offline, forged Control role/origin, and historical no-proof states", () => {
