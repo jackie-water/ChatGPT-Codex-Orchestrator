@@ -79,7 +79,7 @@ function registrationPendingFixture(t, { installationId = "abcd1234-pending-inst
   };
   const issue = {
     number: issueNumber, state: "open", html_url: state.sandbox_chat_registration_issue,
-    url: state.sandbox_chat_registration_issue, user: { login: "owner", id: 42 },
+    url: `https://api.github.com/repos/${state.control_repository}/issues/${issueNumber}`, user: { login: "owner", id: 42 },
     title: `[CHAT-REGISTER] INSTALL-CHAT-${instanceId}-${project}-${crypto.createHash("sha256").update(state.reviewer_chat_url).digest("hex").slice(0, 16)}`,
     body: JSON.stringify({ project, chat_url: state.reviewer_chat_url, installation_id: installationId })
   };
@@ -685,6 +685,51 @@ test("fresh selected repository proof uses independent immutable owner and disti
   assert.equal(calls.length, 3);
 });
 
+test("fresh issuance and verification recheck the pinned owner, repositories, Issue, and route without mutating the manifest", t => {
+  const f = registrationPendingFixture(t);
+  f.queue();
+  f.writeDeliveryProof();
+  f.state.sandbox_review_route = f.route.route;
+  const issueApiUrl = `https://api.github.com/repos/${f.state.control_repository}/issues/51`;
+  f.issue.url = issueApiUrl;
+  const issued = issueTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi });
+  assert.equal(issued.status, "VERIFIED");
+  const manifestFile = path.join(f.instance, "trusted-recovery-evidence-v1.json");
+  const manifestBefore = fs.readFileSync(manifestFile, "utf8");
+  assert.equal(issueTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi }).idempotent, true);
+  const mutations = [
+    ["revoked authorization", () => { f.state.github_plugin_authorized = false; }],
+    ["wrong authenticated user", () => { f.githubApi.getAuthenticatedUser = () => ({ login: "other", id: 42 }); }],
+    ["wrong repository owner ID", () => { f.repositories[f.state.control_repository].owner.id = 43; }],
+    ["wrong repository ID", () => { f.repositories[f.state.sandbox_repository].id = 203; }],
+    ["closed Issue", () => { f.githubApi.getIssue = () => ({ ...originalIssue, state: "closed" }); }],
+    ["pull request Issue", () => { f.githubApi.getIssue = () => ({ ...originalIssue, pull_request: {} }); }],
+    ["mutated title", () => { f.githubApi.getIssue = () => ({ ...originalIssue, title: "foreign" }); }],
+    ["mutated URL", () => { f.githubApi.getIssue = () => ({ ...originalIssue, html_url: "https://github.com/owner/other/issues/51" }); }],
+    ["mutated body", () => { f.githubApi.getIssue = () => ({ ...originalIssue, body: JSON.stringify({ project: "foreign", chat_url: f.state.reviewer_chat_url, installation_id: f.state.installation_id }) }); }],
+    ["mutated author", () => { f.githubApi.getIssue = () => ({ ...originalIssue, user: { login: "other", id: 43 } }); }],
+    ["revoked user-role receipt", () => { const receipt = JSON.parse(fs.readFileSync(f.outbox)); receipt.verified_by = "submission-confirmed"; fs.writeFileSync(f.outbox, JSON.stringify(receipt) + "\n"); }],
+    ["duplicate route", () => { const routes = JSON.parse(fs.readFileSync(f.state.chat_route_file)); routes.routes.push({ ...routes.routes[0] }); fs.writeFileSync(f.state.chat_route_file, JSON.stringify(routes) + "\n"); }]
+  ];
+  const originalIssue = f.issue;
+  for (const [name, mutate] of mutations) {
+    const before = fs.readFileSync(manifestFile, "utf8");
+    mutate();
+    assert.notEqual(verifyTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi }).status, "VERIFIED", name);
+    assert.equal(fs.readFileSync(manifestFile, "utf8"), before, name);
+    f.state.github_plugin_authorized = true;
+    f.githubApi.getAuthenticatedUser = () => ({ login: "owner", id: 42 });
+    f.repositories[f.state.control_repository].owner.id = 42;
+    f.repositories[f.state.sandbox_repository].id = 202;
+    f.githubApi.getIssue = () => originalIssue;
+    fs.writeFileSync(f.state.chat_route_file, JSON.stringify({ version: 1, routes: [{ route: f.state.sandbox_review_route, project: f.state.sandbox_project_key, status: "active", chat_url: f.state.reviewer_chat_url, registration_issue: 51, installation_id: f.state.installation_id }] }) + "\n");
+    const delivery = JSON.parse(fs.readFileSync(f.outbox));
+    delivery.verified_by = "existing-user-message";
+    fs.writeFileSync(f.outbox, JSON.stringify(delivery) + "\n");
+  }
+  assert.equal(fs.readFileSync(manifestFile, "utf8"), manifestBefore);
+});
+
 test("read-only GitHub adapter pins user, repository, and issue provenance to github.com", () => {
   const calls = [];
   const api = githubReadOnlyApi({ run: args => { calls.push(args); return { ok: true, stdout: JSON.stringify({ login: "synthetic", id: 42 }) }; } });
@@ -720,7 +765,7 @@ test("ordinary fresh install reaches its saved first registration without treati
       assert.equal(args[0], "issue");
       if (args[1] === "create") { creates++; assert.fail("the exact existing registration must not be resubmitted"); }
       assert.equal(args[1], "list");
-      return { ok: true, stdout: JSON.stringify([f.issue]) };
+      return { ok: true, stdout: JSON.stringify([{ ...f.issue, url: f.issue.html_url }]) };
     }
   });
   assert.equal(waiting.status, "WAITING");
@@ -898,7 +943,7 @@ test("missing or forged delivery proof stays WAITING without a second registrati
         if (args[1] === "create") { creates++; assert.fail(`${name}: duplicate registration submission`); }
         assert.equal(args[1], "list");
         lookups++;
-        return { ok: true, stdout: JSON.stringify([f.issue]) };
+        return { ok: true, stdout: JSON.stringify([{ ...f.issue, url: f.issue.html_url }]) };
       }
     });
     assert.equal(registration.status, "WAITING", name);

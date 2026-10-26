@@ -292,7 +292,7 @@ function pendingRegistrationResume(t){
   write(path.join(state.instance_root,"migration-intent.json"),{schema_version:1,phase:"PREPARED",installation_id:state.installation_id,generated_repositories:{control:state.control_repository,sandbox:state.sandbox_repository}});
   const route={route:"chat-511",project:state.sandbox_project_key,status:"active",chat_url:state.reviewer_chat_url,registration_issue:511,installation_id:state.installation_id};
   const hash=crypto.createHash("sha256").update(state.reviewer_chat_url).digest("hex").slice(0,16);
-  const issue={number:511,html_url:state.sandbox_chat_registration_issue,url:state.sandbox_chat_registration_issue,state:"open",title:`[CHAT-REGISTER] INSTALL-CHAT-${state.instance_id}-${state.sandbox_project_key}-${hash}`,user:{login:state.github_login,id:42},body:JSON.stringify({project:state.sandbox_project_key,chat_url:state.reviewer_chat_url,installation_id:state.installation_id})};
+  const issue={number:511,html_url:state.sandbox_chat_registration_issue,url:`https://api.github.com/repos/${state.control_repository}/issues/511`,state:"open",title:`[CHAT-REGISTER] INSTALL-CHAT-${state.instance_id}-${state.sandbox_project_key}-${hash}`,user:{login:state.github_login,id:42},body:JSON.stringify({project:state.sandbox_project_key,chat_url:state.reviewer_chat_url,installation_id:state.installation_id})};
   const settings={offline:false,offlineAfterFirstProof:false,removeProofBeforeConsumption:false,queueDuringPrerequisites:false,issueListEmpty:false,firstEver:false},
   queueRoute=()=>write(state.chat_route_file,{version:1,routes:[route]}),
   deliverRoute=()=>{
@@ -316,7 +316,7 @@ function pendingRegistrationResume(t){
     calls.push("issue-"+args[1]);
     if(args[1]==="create") { assert.equal(settings.firstEver,true); settings.firstEver=false; return {ok:true,stdout:issue.html_url}; }
     if(args[1]!=="list") return {ok:true,stdout:JSON.stringify(issue)};
-    return {ok:true,stdout:JSON.stringify(settings.issueListEmpty||settings.firstEver?[]:[{...issue,state:"OPEN"}])};
+    return {ok:true,stdout:JSON.stringify(settings.issueListEmpty||settings.firstEver?[]:[{...issue,state:"OPEN",url:issue.html_url}])};
   };
   const context=vm.createContext({
     crypto,path,os:{...os,homedir:()=>f.home},process:{platform:"darwin",cwd:()=>f.home},
@@ -337,7 +337,8 @@ function pendingRegistrationResume(t){
     spawnSafeSync:(executable,args)=>{
       assert.equal(executable,"gh");assert.deepEqual(Array.from(args).slice(0,3),["api","--hostname","github.com"]);
       const endpoint=args[3];let value;
-      if(endpoint===`repos/${state.control_repository}/issues/511`)value=api.getIssue(state.control_repository,511);
+      if(endpoint==="user")value=api.getAuthenticatedUser();
+      else if(endpoint===`repos/${state.control_repository}/issues/511`)value=api.getIssue(state.control_repository,511);
       else if(endpoint===`repos/${state.control_repository}`)value=api.getRepository(state.control_repository);
       else if(endpoint===`repos/${state.sandbox_repository}`)value=api.getRepository(state.sandbox_repository);
       else assert.fail("unexpected synthetic GitHub endpoint");
