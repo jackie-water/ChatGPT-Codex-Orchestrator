@@ -165,6 +165,99 @@ test("first install issues an exact receipt only after real user-role delivery",
   assert.equal(issuedAgain.manifest.issued_at, issued.manifest.issued_at);
 });
 
+test("canonical ARM64 fresh-install identity cannot fall back to legacy when saved owner metadata changes", t => {
+  const denied = registrationPendingFixture(t);
+  denied.queue();
+  denied.writeDeliveryProof();
+  denied.state.sandbox_review_route = denied.route.route;
+  denied.issue.url = `https://api.github.com/repos/${denied.state.control_repository}/issues/51`;
+  denied.metadata.trusted_github_username = "another-owner";
+  denied.writeJson(denied.controlFile, denied.metadata);
+  denied.state.github_plugin_authorized = false;
+  denied.issue.state = "closed";
+  assert.equal(denied.verify().status, "CONFLICT");
+  assert.deepEqual(denied.verify().missing_verification_gates, ["fresh_install_identity"]);
+  assert.throws(() => issueTrustedRecoveryEvidence({ state: denied.state, home: denied.home, githubApi: denied.githubApi }), /fresh install identity is contradictory/);
+
+  const f = registrationPendingFixture(t, { installationId: "abcd1234-pending-install", instanceId: "abcd1234" });
+  f.queue();
+  f.writeDeliveryProof();
+  f.state.sandbox_review_route = f.route.route;
+  f.issue.url = `https://api.github.com/repos/${f.state.control_repository}/issues/51`;
+  assert.equal(issueTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi }).status, "VERIFIED");
+
+  const manifest = path.join(f.instance, "trusted-recovery-evidence-v1.json");
+  const before = fs.readFileSync(manifest);
+  f.metadata.trusted_github_username = "another-owner";
+  f.writeJson(f.controlFile, f.metadata);
+  f.state.github_plugin_authorized = false;
+  f.issue.state = "closed";
+
+  assert.equal(f.verify().status, "CONFLICT");
+  assert.deepEqual(f.verify().missing_verification_gates, ["fresh_install_identity"]);
+  assert.throws(() => issueTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi }), /fresh install identity is contradictory/);
+  assert.deepEqual(fs.readFileSync(manifest), before);
+});
+
+test("missing or contradictory fresh-install owner metadata is never treated as legacy", t => {
+  for (const mutate of [
+    metadata => { delete metadata.trusted_github_username; },
+    metadata => { metadata.trusted_github_username = "another-owner"; }
+  ]) {
+    const f = registrationPendingFixture(t);
+    mutate(f.metadata);
+    f.writeJson(f.controlFile, f.metadata);
+    assert.equal(f.verify().status, "CONFLICT");
+    assert.deepEqual(f.verify().missing_verification_gates, ["fresh_install_identity"]);
+    assert.throws(() => issueTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi }), /complete installer identity|fresh install identity is contradictory/);
+  }
+});
+
+test("all mutable pre-issuance identity variants remain fresh or contradictory", t => {
+  for (const [name, mutate] of [
+    ["foreign github login", state => { state.github_login = "foreign"; }],
+    ["missing github login", state => { delete state.github_login; }],
+    ["x64 architecture", state => { state.instance_arch = "x64"; }],
+    ["Windows platform", state => { state.instance_platform = "win32"; }]
+  ]) {
+    const f = registrationPendingFixture(t);
+    f.queue();
+    f.writeDeliveryProof();
+    f.state.sandbox_review_route = f.route.route;
+    f.state.github_plugin_authorized = false;
+    f.issue.state = "closed";
+    mutate(f.state);
+    assert.equal(f.verify().status, "CONFLICT", name);
+    assert.deepEqual(f.verify().missing_verification_gates, ["fresh_install_identity"], name);
+    assert.equal(fs.existsSync(path.join(f.instance, "trusted-recovery-evidence-v1.json")), false, name);
+    assert.throws(() => issueTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi }), /fresh install identity is contradictory/, name);
+  }
+});
+
+test("all mutable post-issuance identity variants cannot fall back to legacy", t => {
+  for (const [name, mutate] of [
+    ["foreign github login", state => { state.github_login = "foreign"; }],
+    ["missing github login", state => { delete state.github_login; }],
+    ["x64 architecture", state => { state.instance_arch = "x64"; }],
+    ["Windows platform", state => { state.instance_platform = "win32"; }]
+  ]) {
+    const f = registrationPendingFixture(t);
+    f.queue();
+    f.writeDeliveryProof();
+    f.state.sandbox_review_route = f.route.route;
+    f.issue.url = `https://api.github.com/repos/${f.state.control_repository}/issues/51`;
+    issueTrustedRecoveryEvidence({ state: f.state, home: f.home, githubApi: f.githubApi });
+    const manifest = path.join(f.instance, "trusted-recovery-evidence-v1.json");
+    const before = fs.readFileSync(manifest);
+    f.state.github_plugin_authorized = false;
+    f.issue.state = "closed";
+    mutate(f.state);
+    assert.equal(f.verify().status, "CONFLICT", name);
+    assert.deepEqual(f.verify().missing_verification_gates, ["fresh_install_identity"], name);
+    assert.deepEqual(fs.readFileSync(manifest), before, name);
+  }
+});
+
 test("trusted evidence requires current user-role delivery for issue and verification", t => {
   const f = registrationPendingFixture(t);
   f.queue();

@@ -23,18 +23,41 @@ const repositoryParts = value => {
   return { owner, name, full_name: `${owner}/${name}` };
 };
 const safeId = value => typeof value === "string" && ID.test(value);
-const isFreshFirstInstallTrust = (state, controlMetadata) => {
-  const persistedOwner = typeof controlMetadata?.trusted_github_username === "string" ? controlMetadata.trusted_github_username : state?.github_login;
-  if (state?.instance_platform !== "darwin" || state?.instance_arch !== "arm64" ||
-      !safeId(state?.installation_id) || state?.instance_id !== canonicalInstallationId(state.installation_id) ||
-      !/^[A-Za-z0-9-]+$/.test(String(persistedOwner || "")) ||
-      controlMetadata && (controlMetadata.instance_id !== state.instance_id || controlMetadata.installation_id !== state.installation_id ||
-        controlMetadata.platform !== "darwin" || controlMetadata.arch !== "arm64")) return false;
-  const owner = String(persistedOwner);
-  const short = canonicalInstallationId(state.installation_id);
-  return state.control_repository === `${owner}/chatgpt-codex-orchestrator-control-${short}` &&
-    state.sandbox_repository === `${owner}/chatgpt-codex-orchestrator-sandbox-${short}`;
+const freshInstallAssessment = (state, controlMetadata) => {
+  const short = canonicalInstallationId(state?.installation_id);
+  if (!safeId(state?.installation_id) || state?.instance_id !== short) return { fresh: false, contradictory: false };
+  const topology = value => {
+    if (!REPOSITORY.test(String(value?.control_repository || "")) ||
+        !REPOSITORY.test(String(value?.sandbox_repository || ""))) return null;
+    const control = repositoryParts(value.control_repository);
+    const sandbox = repositoryParts(value.sandbox_repository);
+    if (!/^[A-Za-z0-9-]+$/.test(control.owner) || control.owner !== sandbox.owner ||
+        control.name !== `chatgpt-codex-orchestrator-control-${short}` ||
+        sandbox.name !== `chatgpt-codex-orchestrator-sandbox-${short}`) return null;
+    return { owner: control.owner, control: control.full_name, sandbox: sandbox.full_name };
+  };
+  const stateTopology = topology(state);
+  const metadataTopology = topology(controlMetadata);
+  if (!stateTopology && !metadataTopology) return { fresh: false, contradictory: false };
+  const owner = stateTopology?.owner || metadataTopology.owner;
+  const canonicalControl = `${owner}/chatgpt-codex-orchestrator-control-${short}`;
+  const canonicalSandbox = `${owner}/chatgpt-codex-orchestrator-sandbox-${short}`;
+  const metadataMatchesTopology = !controlMetadata || (
+    controlMetadata.instance_id === state.instance_id && controlMetadata.installation_id === state.installation_id &&
+    controlMetadata.platform === "darwin" && controlMetadata.arch === "arm64" &&
+    controlMetadata.role === "control" && controlMetadata.trusted_github_username === owner &&
+    controlMetadata.control_repository === canonicalControl && controlMetadata.sandbox_repository === canonicalSandbox &&
+    validRepositoryId(controlMetadata.control_repository_id) && validRepositoryId(controlMetadata.sandbox_repository_id) &&
+    (state.control_repository_id === undefined || String(state.control_repository_id) === String(controlMetadata.control_repository_id)) &&
+    (state.sandbox_repository_id === undefined || String(state.sandbox_repository_id) === String(controlMetadata.sandbox_repository_id))
+  );
+  const stateMatchesTopology = stateTopology && stateTopology.owner === owner &&
+    state.control_repository === canonicalControl && state.sandbox_repository === canonicalSandbox &&
+    state.github_login === owner && state.instance_platform === "darwin" && state.instance_arch === "arm64";
+  return { fresh: true, contradictory: !stateMatchesTopology || !metadataMatchesTopology };
 };
+
+const isFreshFirstInstallTrust = (state, controlMetadata) => freshInstallAssessment(state, controlMetadata).fresh;
 
 const hasFreshFirstInstallAuthorization = state =>
   state?.macos_setup_approved === true && state?.github_plugin_authorized === true &&
@@ -517,6 +540,7 @@ export function verifyTrustedRecoveryEvidence({ state = {}, home = os.homedir(),
   if (local.status === "CONFLICT") return diagnostic("CONFLICT", local.gates);
   const routeValidation = validatedRouteRecords(local.routeFile);
   if (routeValidation.error) return diagnostic("CONFLICT", ["chat_route_registry_integrity"]);
+  if (freshInstallAssessment(state, local.control?.value).contradictory) return diagnostic("CONFLICT", ["fresh_install_identity"]);
   if (local.status === "ABSENT" && !requireReceipt) {
     const awaitingConnector = verifyNewInstallAwaitingConnectorAuth({ local, state, githubApi });
     if (awaitingConnector) return awaitingConnector;
@@ -563,6 +587,7 @@ export function issueTrustedRecoveryEvidence({ state = {}, home = os.homedir(), 
   const file = path.join(instanceRoot, "trusted-recovery-evidence-v1.json");
   const local = localProof({ state, home, fsImpl });
   if (local.status === "CONFLICT") throw new Error("local trust evidence is contradictory");
+  if (freshInstallAssessment(state, local.control?.value).contradictory) throw new Error("fresh install identity is contradictory");
   const localGates = verifyLocalIdentity({ ...local, receipt: local.receipt || { present: false } }, state).filter(gate => gate !== "trusted_manifest_version");
   if (localGates.length) throw new Error(`local trust evidence is incomplete: ${localGates.join(", ")}`);
   if (isFreshFirstInstallTrust(state, local.control?.value) && !hasFreshFirstInstallAuthorization(state)) throw new Error("fresh first-install authorization is required");
