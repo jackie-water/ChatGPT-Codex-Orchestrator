@@ -48,6 +48,12 @@ On macOS, the preflight also reports the reviewed local libproc helper capabilit
 
 The locally built helper is unsigned and is distinct from any separately gated signing, distribution, or release process. Runner installation and start require the additional first-boot approvals below. Manual receipt/lock recovery must preserve the receipt, establish that no writer remains, and use the reviewed deployment recovery procedure; an uncertain lock must not be deleted as if it belonged to another writer. The full isolated live Sandbox E2E remains separately gated.
 
+## Trusted single-user readiness profile
+
+`trusted-single-user-v1` is a logical, source-only readiness assessment selected only by a distinct official-installer receipt that literally names the profile, states `no same-account attacker resistance`, and binds the current verified installation, GitHub owner, private Control and immutable numeric Control repository ID, alongside existing `macos_setup_approved` consent. Older legacy receipts retain their validation and cannot select this profile; a policy name, old receipt, placeholder, or mismatched installation/account/Control is not profile approval. For this new assessment the legacy custom Native Helper compile/signature/ACL/Policy B/XPC/CDHash/unsigned-peer `4102` gate is recorded as `NOT_APPLICABLE_SUPERSEDED`, never as PASS, while normal ownership, 0700/0600, path/symlink, tools, authenticated session, installer approval, identity, and Sandbox-disabled gates remain required. Runner lineage is separately `BLOCKED_UNIMPLEMENTED`.
+
+Runner and LaunchAgent readiness for this profile is `BLOCKED_UNIMPLEMENTED` (`MACOS-RUNNER-SAME-UID-LINEAGE-UNIMPLEMENTED`) until trustworthy same-UID PID/start-time lineage checks are implemented. It does not invent process identity, install or activate a Runner, or establish Chat delivery. Full Runner and live Chat/Sandbox E2E are **NOT VERIFIED**.
+
 ## V2.1 M1/M2 macOS ARM64 first boot
 
 The architecture remains GitHub Control -> one self-hosted macOS ARM64 Runner -> local authenticated Codex -> independent wrapper -> the exact registered Chat callback. There is no per-task dispatcher. An ad hoc bootstrap route such as `chat-408` is not installed Runner authority. Preserve historical #404–#406 and closed manual #409; do not rerun them or reopen #409. A new conversation registers separately.

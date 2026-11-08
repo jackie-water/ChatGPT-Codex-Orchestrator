@@ -5,7 +5,7 @@ import crypto from "node:crypto";
 import { spawnSafeSync } from "./spawn-safe.mjs";
 import { canonicalInstallationId } from "./control-render.mjs";
 import { macosNativeHelperPreflight, verifyMacosNativeCapability } from "./macos-native-helper-install.mjs";
-import { hasMacosPersonalUsePolicy, inspectMacosPersonalUseLineage } from "./macos-personal-use-service.mjs";
+import { hasMacosPersonalUsePolicy, hasTrustedSingleUserReadinessProfile, hasTrustedSingleUserReadinessProfileMarker, inspectMacosPersonalUseLineage, TRUSTED_SINGLE_USER_READINESS_PROFILE } from "./macos-personal-use-service.mjs";
 import { inspectMacosRunnerBootstrap, rebindMacosRunnerConfiguration, MACOS_RUNNER_RUNTIME_PATH } from "./macos-runner-bootstrap.mjs";
 
 const HOME = () => process.env.HOME || os.homedir();
@@ -110,12 +110,15 @@ function prepareLaunchAgentDirectory() {
 }
 
 export function parseNodeMajor(version) { return Number((String(version||"").match(/v(\d+)/)||[])[1]||0); }
-export function macosPrerequisites() {
-  const node=cmd("node",["--version"]), git=cmd("git",["--version"]), gh=cmd("gh",["--version"]), codex=cmd("codex",["--version"]);
+export function macosPrerequisites({state={},commandRunner=cmd,nativeHelperPreflight=macosNativeHelperPreflight}={}) {
+  const node=commandRunner("node",["--version"]), git=commandRunner("git",["--version"]), gh=commandRunner("gh",["--version"]), codex=commandRunner("codex",["--version"]);
   const major=parseNodeMajor(node.output);
+  const native_helper=nativeHelperPreflight({platform:process.platform}),profile=hasTrustedSingleUserReadinessProfile(state),selectionPending=state?.macos_setup_approved===true&&!state?.macos_service_policy;
   return {node:node.ok&&major>=22,node_version:node.output,git:git.ok,gh:gh.ok,codex:codex.ok,
-    session_auth:codex.ok&&cmd("codex",["login","status"]).ok,github_auth:gh.ok&&cmd("gh",["auth","status"]).ok,
-    native_helper:macosNativeHelperPreflight({platform:process.platform})};
+    session_auth:codex.ok&&commandRunner("codex",["login","status"]).ok,github_auth:gh.ok&&commandRunner("gh",["auth","status"]).ok,
+    native_helper,readiness_profile:profile?TRUSTED_SINGLE_USER_READINESS_PROFILE:null,
+    legacy_native_helper_gate:profile?"NOT_APPLICABLE_SUPERSEDED":native_helper.status==="PASS"?"PASS":selectionPending?"DEFERRED_PENDING_PROFILE_SELECTION":native_helper.status,
+    runner_lineage:profile?{status:"BLOCKED_UNIMPLEMENTED",error_id:"MACOS-RUNNER-SAME-UID-LINEAGE-UNIMPLEMENTED"}:null};
 }
 
 function redactStatus(status) {
@@ -216,6 +219,8 @@ export function renderLaunchAgent({label,runnerPath,instanceRoot,workingDirector
 // Only a return from a path that made no filesystem/service action is a proven
 // rejection. Once activation writes or launchctl runs, an error is uncertain.
 export function macosRuntimeAction(action,options={}) {
+  if(!["status","doctor"].includes(action)&&hasTrustedSingleUserReadinessProfile(options.state)) return {status:"BLOCKED_UNIMPLEMENTED",error_id:"MACOS-RUNNER-SAME-UID-LINEAGE-UNIMPLEMENTED",readiness_profile:TRUSTED_SINGLE_USER_READINESS_PROFILE,mutations_performed:false,action,pre_mutation_rejection:true,service_action_state:"NOT_ATTEMPTED"};
+  if(!["status","doctor"].includes(action)&&hasTrustedSingleUserReadinessProfileMarker(options.state)) return {status:"ERROR",error_id:"MACOS-READINESS-PROFILE-INVALID",mutations_performed:false,action,pre_mutation_rejection:true,service_action_state:"NOT_ATTEMPTED"};
   const result=macosRuntimeActionImpl(action,options);
   return result.status!=="PASS"&&result.mutations_performed===false?{...result,pre_mutation_rejection:true,service_action_state:"NOT_ATTEMPTED"}:result;
 }

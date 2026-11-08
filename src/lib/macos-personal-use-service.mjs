@@ -1,12 +1,28 @@
 import { readMacosNativeProcessIdentity } from "./macos-native-process-identity.mjs";
 
 export const MACOS_PERSONAL_USE_POLICY="personal-account-trusted-same-uid-v1";
+export const TRUSTED_SINGLE_USER_READINESS_PROFILE="trusted-single-user-v1";
 export function macosPersonalUsePolicyChallenge(state) {
   return `APPROVE personal Mac trusted same-UID account ${state.github_login} installation ${state.installation_id} private Control ${state.control_repository}#${state.control_repository_id}; execute only owner-authorized private Control tasks; no same-account attacker resistance`;
+}
+export function trustedSingleUserReadinessProfileChallenge(state) {
+  return `APPROVE readiness profile ${TRUSTED_SINGLE_USER_READINESS_PROFILE} account ${state.github_login} installation ${state.installation_id} private Control ${state.control_repository}#${state.control_repository_id}; existing macOS setup consent remains required; no same-account attacker resistance; Runner lineage remains unimplemented`;
+}
+export function hasTrustedSingleUserReadinessIdentity(state) {
+  return state&&state.macos_setup_approved===true&&[state.installation_id,state.github_login,state.control_repository].every(value=>typeof value==="string"&&value.trim()!==""&&!/^(?:unknown|null|undefined|placeholder|-)$/i.test(value.trim()))&&/^[1-9]\d*$/.test(String(state.control_repository_id));
 }
 export function hasMacosPersonalUsePolicy(state) {
   const policy=state.macos_service_policy;
   return policy?.schema_version===1&&policy.policy===MACOS_PERSONAL_USE_POLICY&&policy.selected_through==="official-installer"&&policy.approval===macosPersonalUsePolicyChallenge(state)&&policy.installation_id===state.installation_id&&policy.github_login===state.github_login&&policy.control_repository===state.control_repository&&String(policy.control_repository_id)===String(state.control_repository_id)&&Number.isFinite(Date.parse(policy.approved_at||""));
+}
+// This is a new explicit installer selection, not an interpretation of older
+// policy receipts that happened to use the same personal-use policy.
+export function hasTrustedSingleUserReadinessProfile(state) {
+  const policy=state?.macos_service_policy;
+  return hasTrustedSingleUserReadinessIdentity(state)&&policy?.schema_version===1&&policy.policy===MACOS_PERSONAL_USE_POLICY&&policy.readiness_profile===TRUSTED_SINGLE_USER_READINESS_PROFILE&&policy.selected_through==="official-installer"&&policy.approval===trustedSingleUserReadinessProfileChallenge(state)&&policy.installation_id===state.installation_id&&policy.github_login===state.github_login&&policy.control_repository===state.control_repository&&String(policy.control_repository_id)===String(state.control_repository_id)&&Number.isFinite(Date.parse(policy.approved_at||""));
+}
+export function hasTrustedSingleUserReadinessProfileMarker(state) {
+  return Boolean(state?.macos_service_policy&&Object.hasOwn(state.macos_service_policy,"readiness_profile"));
 }
 function nativeIdentity(pid,reader,helperPath) {
   const value=reader(pid,{helperPath,platform:"darwin"});

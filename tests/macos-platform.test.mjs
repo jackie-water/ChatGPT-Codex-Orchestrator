@@ -6,6 +6,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { macosPrerequisites, parseNodeMajor, migrationInventory, migrationPreflight, renderLaunchAgent, macosRuntimeAction } from "../src/lib/macos-platform.mjs";
 import { MACOS_RUNNER_RUNTIME_PATH } from "../src/lib/macos-runner-bootstrap.mjs";
+import { MACOS_PERSONAL_USE_POLICY, TRUSTED_SINGLE_USER_READINESS_PROFILE, macosPersonalUsePolicyChallenge, trustedSingleUserReadinessProfileChallenge } from "../src/lib/macos-personal-use-service.mjs";
 
 function fixture() {
   const home=fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()),"orch-macos-runtime-")),previousHome=process.env.HOME;
@@ -46,6 +47,40 @@ function fixture() {
 }
 
 test("Node prerequisite parser accepts supported majors and rejects v21",()=>{assert.equal(parseNodeMajor("v21.9.0"),21);assert.equal(parseNodeMajor("v22.0.0"),22);assert.equal(typeof macosPrerequisites,"function");});
+
+test("synthetic prerequisite preflight defers legacy helper until profile selection and blocks Runner after selection",()=>{
+  const commands=[];
+  const commandRunner=(name,args)=>{commands.push([name,...args]);return {ok:true,output:name==="node"?"v22.0.0":"synthetic"};};
+  const missing=()=>({status:"MISSING"}),initial=macosPrerequisites({state:{macos_setup_approved:true},commandRunner,nativeHelperPreflight:missing});
+  assert.equal(initial.legacy_native_helper_gate,"DEFERRED_PENDING_PROFILE_SELECTION");assert.equal(initial.runner_lineage,null);assert.equal(commands.length,6);
+  const state={macos_setup_approved:true,installation_id:"install",github_login:"owner",control_repository:"owner/control",control_repository_id:"101"};
+  state.macos_service_policy={schema_version:1,policy:MACOS_PERSONAL_USE_POLICY,readiness_profile:TRUSTED_SINGLE_USER_READINESS_PROFILE,selected_through:"official-installer",installation_id:state.installation_id,github_login:state.github_login,control_repository:state.control_repository,control_repository_id:state.control_repository_id,approval:trustedSingleUserReadinessProfileChallenge(state),approved_at:"2026-10-22T00:00:00Z"};
+  const selected=macosPrerequisites({state,commandRunner,nativeHelperPreflight:missing});
+  assert.equal(selected.legacy_native_helper_gate,"NOT_APPLICABLE_SUPERSEDED");assert.equal(selected.runner_lineage.status,"BLOCKED_UNIMPLEMENTED");
+});
+
+test("no-marker legacy policy still requires native helper",()=>{
+  const calls=[];
+  const commandRunner=name=>{calls.push(name);return {ok:true,output:name==="node"?"v22.0.0":"synthetic"};};
+  const state={macos_setup_approved:true,installation_id:"install",github_login:"owner",control_repository:"owner/control",control_repository_id:"101"};
+  state.macos_service_policy={schema_version:1,policy:MACOS_PERSONAL_USE_POLICY,selected_through:"official-installer",installation_id:state.installation_id,github_login:state.github_login,control_repository:state.control_repository,control_repository_id:state.control_repository_id,approval:macosPersonalUsePolicyChallenge(state),approved_at:"2026-10-22T00:00:00Z"};
+  const missing=macosPrerequisites({state,commandRunner,nativeHelperPreflight:()=>({status:"MISSING"})});
+  assert.equal(missing.legacy_native_helper_gate,"MISSING");assert.equal(missing.readiness_profile,null);
+  const passing=macosPrerequisites({state,commandRunner,nativeHelperPreflight:()=>({status:"PASS"})});
+  assert.equal(passing.legacy_native_helper_gate,"PASS");assert.equal(passing.readiness_profile,null);
+  assert.equal(Object.hasOwn(state.macos_service_policy,"readiness_profile"),false);assert.equal(calls.length,12);
+});
+
+test("trusted single-user profiles block every mutation before service inspection and reject invalid receipts",()=>{
+  const state={macos_setup_approved:true,installation_id:"install",github_login:"owner",control_repository:"owner/control",control_repository_id:"101"};
+  state.macos_service_policy={schema_version:1,policy:MACOS_PERSONAL_USE_POLICY,readiness_profile:TRUSTED_SINGLE_USER_READINESS_PROFILE,selected_through:"official-installer",installation_id:state.installation_id,github_login:state.github_login,control_repository:state.control_repository,control_repository_id:state.control_repository_id,approval:trustedSingleUserReadinessProfileChallenge(state),approved_at:"2026-10-22T00:00:00Z"};
+  for(const valid of [true,false]) for(const action of ["install","start","stop","repair"]){
+    let reached=false;const options={state:valid?state:{...state,macos_service_policy:{...state.macos_service_policy,approval:"stale"}},commandRunner:()=>{reached=true;throw Error("must not launchctl");},runnerInspector:()=>{reached=true;throw Error("must not inspect");},capabilityVerifier:()=>{reached=true;throw Error("must not verify");}};
+    assert.equal(macosRuntimeAction(action,options).error_id,valid?"MACOS-RUNNER-SAME-UID-LINEAGE-UNIMPLEMENTED":"MACOS-READINESS-PROFILE-INVALID");assert.equal(reached,false);
+  }
+  const readonly={state,commandRunner:()=>({ok:true,output:""}),runnerInspector:()=>({status:"ERROR",error_id:"SYNTHETIC_READ_ONLY"})};
+  assert.notEqual(macosRuntimeAction("status",readonly).error_id,"MACOS-RUNNER-SAME-UID-LINEAGE-UNIMPLEMENTED");
+});
 
 test("macOS migration inventory remains read only",()=>{
   const home=fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()),"orch-macos-inventory-"));const before=fs.readdirSync(home);

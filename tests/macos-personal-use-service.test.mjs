@@ -6,7 +6,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { macosRuntimeAction } from "../src/lib/macos-platform.mjs";
 import { MACOS_RUNNER_RUNTIME_PATH } from "../src/lib/macos-runner-bootstrap.mjs";
-import { MACOS_PERSONAL_USE_POLICY, hasMacosPersonalUsePolicy, inspectMacosPersonalUseLineage, macosPersonalUsePolicyChallenge } from "../src/lib/macos-personal-use-service.mjs";
+import { MACOS_PERSONAL_USE_POLICY, TRUSTED_SINGLE_USER_READINESS_PROFILE, hasMacosPersonalUsePolicy, hasTrustedSingleUserReadinessProfile, inspectMacosPersonalUseLineage, macosPersonalUsePolicyChallenge, trustedSingleUserReadinessProfileChallenge } from "../src/lib/macos-personal-use-service.mjs";
 
 function inspectNoJobLineage(runner) {
   return inspectMacosPersonalUseLineage({jobPid:null,runner,commandRunner:()=>assert.fail("No-job lineage must not inspect processes"),identityReader:()=>assert.fail("No-job lineage must not read native process identity")});
@@ -90,6 +90,26 @@ function fixture(t) {
 test("personal policy is explicit, owner-bound, and never implied by setup consent",()=>{
   assert.equal(hasMacosPersonalUsePolicy({macos_setup_approved:true}),false);
   assert.equal(hasMacosPersonalUsePolicy({macos_service_policy:{policy:MACOS_PERSONAL_USE_POLICY}}),false);
+});
+
+test("trusted single-user readiness is explicit and preserves older policy receipts",()=>{
+  const state={installation_id:"install",github_login:"owner",control_repository:"owner/control",control_repository_id:"101"};
+  state.macos_service_policy={schema_version:1,policy:MACOS_PERSONAL_USE_POLICY,selected_through:"official-installer",installation_id:state.installation_id,github_login:state.github_login,control_repository:state.control_repository,control_repository_id:state.control_repository_id,approval:macosPersonalUsePolicyChallenge(state),approved_at:"2026-10-22T00:00:00Z"};
+  assert.equal(hasMacosPersonalUsePolicy(state),true);assert.equal(hasTrustedSingleUserReadinessProfile(state),false);
+  state.macos_setup_approved=true;state.macos_service_policy.readiness_profile=TRUSTED_SINGLE_USER_READINESS_PROFILE;state.macos_service_policy.approval=trustedSingleUserReadinessProfileChallenge(state);
+  assert.equal(hasTrustedSingleUserReadinessProfile(state),true);
+  state.macos_service_policy.control_repository_id="102";
+  assert.equal(hasTrustedSingleUserReadinessProfile(state),false,"Control mismatch rejects the profile with its policy proof");
+});
+
+test("profile receipt rejects legacy approval and missing bound identities",()=>{
+  const state={macos_setup_approved:true,installation_id:"install",github_login:"owner",control_repository:"owner/control",control_repository_id:"101"};
+  state.macos_service_policy={schema_version:1,policy:MACOS_PERSONAL_USE_POLICY,readiness_profile:TRUSTED_SINGLE_USER_READINESS_PROFILE,selected_through:"official-installer",installation_id:state.installation_id,github_login:state.github_login,control_repository:state.control_repository,control_repository_id:state.control_repository_id,approval:macosPersonalUsePolicyChallenge(state),approved_at:"2026-10-22T00:00:00Z"};
+  assert.equal(hasTrustedSingleUserReadinessProfile(state),false);
+  state.macos_service_policy.approval=trustedSingleUserReadinessProfileChallenge(state);delete state.control_repository_id;
+  assert.equal(hasTrustedSingleUserReadinessProfile(state),false);
+  state.control_repository_id="101";state.github_login="placeholder";state.macos_service_policy.github_login=state.github_login;state.macos_service_policy.approval=trustedSingleUserReadinessProfileChallenge(state);
+  assert.equal(hasTrustedSingleUserReadinessProfile(state),false);
 });
 
 test("no-job idle requires an empty independent supervisor inventory without process inspection",()=>{
