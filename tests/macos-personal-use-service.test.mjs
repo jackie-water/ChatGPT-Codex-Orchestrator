@@ -6,7 +6,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { macosRuntimeAction } from "../src/lib/macos-platform.mjs";
 import { MACOS_RUNNER_RUNTIME_PATH } from "../src/lib/macos-runner-bootstrap.mjs";
-import { MACOS_PERSONAL_USE_POLICY, TRUSTED_SINGLE_USER_READINESS_PROFILE, hasMacosPersonalUsePolicy, hasTrustedSingleUserReadinessProfile, inspectMacosPersonalUseLineage, macosPersonalUsePolicyChallenge, trustedSingleUserReadinessProfileChallenge } from "../src/lib/macos-personal-use-service.mjs";
+import { MACOS_PERSONAL_USE_POLICY, TRUSTED_SINGLE_USER_READINESS_PROFILE, hasMacosPersonalUsePolicy, hasTrustedSingleUserReadinessProfile, inspectMacosPersonalUseLineage, macosPersonalUsePolicyChallenge, trustedSingleUserReadinessProfileChallenge, observeTrustedSingleUserRunnerProcesses } from "../src/lib/macos-personal-use-service.mjs";
 
 function inspectNoJobLineage(runner) {
   return inspectMacosPersonalUseLineage({jobPid:null,runner,commandRunner:()=>assert.fail("No-job lineage must not inspect processes"),identityReader:()=>assert.fail("No-job lineage must not read native process identity")});
@@ -102,6 +102,18 @@ test("trusted single-user readiness is explicit and preserves older policy recei
   assert.equal(hasTrustedSingleUserReadinessProfile(state),false,"Control mismatch rejects the profile with its policy proof");
 });
 
+test("valid trusted profile binds active launchd chain without native helper",()=>{
+  const uid=process.getuid?.()||0,state={macos_setup_approved:true,installation_id:"install",github_login:"owner",control_repository:"owner/control",control_repository_id:"101"};
+  state.macos_service_policy={schema_version:1,policy:MACOS_PERSONAL_USE_POLICY,readiness_profile:TRUSTED_SINGLE_USER_READINESS_PROFILE,selected_through:"official-installer",installation_id:state.installation_id,github_login:state.github_login,control_repository:state.control_repository,control_repository_id:state.control_repository_id,approval:trustedSingleUserReadinessProfileChallenge(state),approved_at:"2026-10-22T00:00:00Z"};
+  const runner={status:"PASS",runner_executable:"/runner/bin/Runner.Listener",service_executable:"/runner/bin/runsvc.sh",service_node:"/runner/externals/node24/bin/node",service_node_version:"node24",service_script:"/runner/bin/RunnerService.js",local_listener_pid:499,local_listener_identity:{pid:499,observed_start:"Mon Jan  1 00:00:03 2026"},local_service_pids:[700,42]};
+  const table=`${uid} 700 1 /bin/bash ${runner.service_executable}\n${uid} 42 700 ${runner.service_node} ${runner.service_script}\n${uid} 499 42 ${runner.runner_executable} run --startuptype service\n`,starts={700:"Mon Jan  1 00:00:01 2026",42:"Mon Jan  1 00:00:02 2026",499:"Mon Jan  1 00:00:03 2026"};
+  const commandRunner=(command,args)=>args.includes("-axo")?{ok:true,output:table}:args.includes("lstart=")?{ok:true,output:starts[args[2]]}:assert.fail(`unexpected ${command}`);let nativeCalls=0;
+  const result=inspectMacosPersonalUseLineage({jobPid:700,runner,state,commandRunner,identityReader:()=>{nativeCalls++;assert.fail("trusted profile must not read native identity");}});
+  assert.equal(result.listener_running,true);assert.equal(result.observation,"trusted-single-user-ps-v1");assert.deepEqual(result.job_identity,{pid:700,observed_start:starts[700]});assert.deepEqual(result.node_identity,{pid:42,observed_start:starts[42]});assert.deepEqual(result.listener_identity,{pid:499,observed_start:starts[499]});assert.equal(nativeCalls,0);
+  assert.throws(()=>inspectMacosPersonalUseLineage({jobPid:701,runner,state,commandRunner,identityReader:()=>assert.fail("trusted profile must not read native identity")}),/differs from the independently inspected runner/);
+  assert.throws(()=>inspectMacosPersonalUseLineage({jobPid:700,runner:{...runner,local_listener_identity:{...runner.local_listener_identity,observed_start:"Mon Jan  1 00:00:04 2026"}},state,commandRunner,identityReader:()=>assert.fail("trusted profile must not read native identity")}),/differs from the independently inspected runner/);
+});
+
 test("profile receipt rejects legacy approval and missing bound identities",()=>{
   const state={macos_setup_approved:true,installation_id:"install",github_login:"owner",control_repository:"owner/control",control_repository_id:"101"};
   state.macos_service_policy={schema_version:1,policy:MACOS_PERSONAL_USE_POLICY,readiness_profile:TRUSTED_SINGLE_USER_READINESS_PROFILE,selected_through:"official-installer",installation_id:state.installation_id,github_login:state.github_login,control_repository:state.control_repository,control_repository_id:state.control_repository_id,approval:macosPersonalUsePolicyChallenge(state),approved_at:"2026-10-22T00:00:00Z"};
@@ -127,6 +139,44 @@ test("no-job idle rejects invalid, unknown, and missing supervisor inventories",
     assert.throws(()=>inspectNoJobLineage({status:"PASS",local_listener_pid:null,local_service_pids}),/extra or unmanaged runner supervisor/);
   }
   assert.throws(()=>inspectNoJobLineage({status:"PASS",local_listener_pid:null}),/extra or unmanaged runner supervisor/);
+});
+
+test("trusted readiness observes the exact same-UID chain without the native helper",()=>{
+  const uid=process.getuid?.()||0,runner={runner_executable:"/runner/bin/Runner.Listener",service_executable:"/runner/bin/runsvc.sh",service_node:"/runner/externals/node24/bin/node",service_node_version:"node24",service_script:"/runner/bin/RunnerService.js"};let nativeCalls=0;
+  const commandRunner=(command,args)=>args.includes("-axo")?{ok:true,output:`${uid} 300 1 /bin/bash ${runner.service_executable}\n${uid} 100 300 ./externals/node24/bin/node ./bin/RunnerService.js\n${uid} 200 100 ${runner.runner_executable} run --startuptype service\n`}:args.includes("lstart=")?{ok:true,output:"Mon Jan  1 00:00:00 2026"}:assert.fail(`unexpected ${command}`);
+  const result=observeTrustedSingleUserRunnerProcesses({commandRunner,runner});assert.equal(result.pid,200);assert.equal(result.identity.observed_start,"Mon Jan  1 00:00:00 2026");assert.equal(nativeCalls,0);
+});
+
+test("trusted readiness rejects process start changes and foreign chain members",()=>{
+  const uid=process.getuid?.()||0,runner={runner_executable:"/runner/bin/Runner.Listener",service_executable:"/runner/bin/runsvc.sh",service_node:"/runner/externals/node24/bin/node",service_node_version:"node24",service_script:"/runner/bin/RunnerService.js"};let starts=0;
+  const commandRunner=(command,args)=>args.includes("-axo")?{ok:true,output:`${uid} 101 1 /bin/bash ${runner.service_executable}\n${uid} 102 101 ./externals/node24/bin/node ./bin/RunnerService.js\n${uid} 103 102 ${runner.runner_executable} run --startuptype service\n`}:args.includes("lstart=")?{ok:true,output:`Mon Jan  1 00:00:0${starts++<3?0:1} 2026`}:assert.fail("unexpected command");
+  assert.throws(()=>observeTrustedSingleUserRunnerProcesses({commandRunner,runner}),/changed or a PID was reused/);
+  assert.throws(()=>observeTrustedSingleUserRunnerProcesses({commandRunner:(command,args)=>args.includes("-axo")?{ok:true,output:`${uid+1} 101 1 /bin/bash ${runner.service_executable}\n`}:{ok:true,output:"Mon Jan  1 00:00:00 2026"},runner}),/unmanaged runner supervisor/);
+});
+
+test("trusted readiness ignores unrelated process churn but rejects an added runner",()=>{
+  const uid=process.getuid?.()||0,runner={runner_executable:"/runner/bin/Runner.Listener",service_executable:"/runner/bin/runsvc.sh",service_node:"/runner/externals/node24/bin/node",service_node_version:"node24",service_script:"/runner/bin/RunnerService.js"};let tables=0;
+  const chain=`${uid} 101 1 /bin/bash ${runner.service_executable}\n${uid} 102 101 ./externals/node24/bin/node ./bin/RunnerService.js\n${uid} 103 102 ${runner.runner_executable} run --startuptype service\n`;
+  const churn=(command,args)=>args.includes("-axo")?{ok:true,output:tables++?`7 8 1 /unrelated-second\n${chain}`:`7 9 1 /unrelated-first\n${chain}`}:args.includes("lstart=")?{ok:true,output:"Mon Jan  1 00:00:00 2026"}:assert.fail("unexpected command");
+  assert.equal(observeTrustedSingleUserRunnerProcesses({commandRunner:churn,runner}).pid,103);
+  tables=0;const added=(command,args)=>args.includes("-axo")?{ok:true,output:tables++?`${chain}${uid} 104 1 ${runner.runner_executable} run --startuptype service\n`:chain}:args.includes("lstart=")?{ok:true,output:"Mon Jan  1 00:00:00 2026"}:assert.fail("unexpected command");
+  assert.throws(()=>observeTrustedSingleUserRunnerProcesses({commandRunner:added,runner}),/extra, foreign, or unmanaged runner process/);
+});
+
+test("trusted readiness rejects changed parents and malformed process inventories",()=>{
+  const uid=process.getuid?.()||0,runner={runner_executable:"/runner/bin/Runner.Listener",service_executable:"/runner/bin/runsvc.sh",service_node:"/runner/externals/node24/bin/node",service_node_version:"node24",service_script:"/runner/bin/RunnerService.js"};
+  const changedParent=(command,args)=>args.includes("-axo")?{ok:true,output:`${uid} 101 1 /bin/bash ${runner.service_executable}\n${uid} 102 1 ./externals/node24/bin/node ./bin/RunnerService.js\n${uid} 103 102 ${runner.runner_executable} run --startuptype service\n`}:{ok:true,output:"Mon Jan  1 00:00:00 2026"};
+  assert.throws(()=>observeTrustedSingleUserRunnerProcesses({commandRunner:changedParent,runner}),/exact approved service lineage/);
+  for(const output of [`${uid} 101 1 /bin/bash ${runner.service_executable}\n${uid} 101 1 /bin/bash ${runner.service_executable}\n`,`not a process row\n`,`x`.repeat(1024*1024+1)]) assert.throws(()=>observeTrustedSingleUserRunnerProcesses({commandRunner:(command,args)=>args.includes("-axo")?{ok:true,output}:{ok:true,output:"Mon Jan  1 00:00:00 2026"},runner}),/Duplicate or invalid process identity|inventory is ambiguous|inventory is unavailable or unbounded/);
+});
+
+test("a forged readiness observation marker does not bypass native lineage checks",()=>{
+  const uid=process.getuid?.()||0,runner={runner_executable:"/runner/bin/Runner.Listener",service_executable:"/runner/bin/runsvc.sh",service_node:"/runner/externals/node24/bin/node",service_node_version:"node24",service_script:"/runner/bin/RunnerService.js",local_process_observation:"trusted-single-user-ps-v1",local_listener_pid:103,local_listener_identity:{pid:103,start_sec:1,start_usec:103},local_service_pids:[101,102]};
+  const table=`${uid} 101 1 /bin/bash ${runner.service_executable}\n${uid} 102 101 ./externals/node24/bin/node ./bin/RunnerService.js\n${uid} 103 102 ${runner.runner_executable} run --startuptype service\n`;
+  for(const state of [undefined,{macos_setup_approved:true,macos_service_policy:{readiness_profile:TRUSTED_SINGLE_USER_READINESS_PROFILE}}]) {
+    let nativeCalls=0;const commandRunner=(command,args)=>args.includes("-axo")?{ok:true,output:table}:assert.fail("forged marker must not select ps-only lineage");
+    assert.doesNotThrow(()=>inspectMacosPersonalUseLineage({jobPid:101,runner,commandRunner,identityReader:pid=>{nativeCalls++;return {status:"OK",pid,start_sec:1,start_usec:pid};},state}));assert.ok(nativeCalls>0);
+  }
 });
 
 test("no-job idle rejects an absent or invalid independent runner identity",()=>{

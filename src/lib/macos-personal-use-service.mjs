@@ -47,10 +47,41 @@ function processTable(commandRunner) {
   return rows;
 }
 const equal=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
+function processStart(commandRunner,pid) {
+  const result=commandRunner("/bin/ps",["-ww","-p",String(pid),"-o","lstart="]);
+  const value=String(result?.output??result?.stdout??"").trim();
+  if(!result?.ok||!/^[A-Z][a-z]{2}\s+[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4}$/.test(value))throw new Error("Service process start observation is unavailable or malformed");
+  return {pid,observed_start:value};
+}
+// This is same-UID correlation evidence, not hostile same-UID resistance.
+export function observeTrustedSingleUserRunnerProcesses({commandRunner,runner,uid=process.getuid?.()}={}) {
+  if(!runner?.runner_executable||!runner.service_executable||!runner.service_node||!runner.service_script)throw new Error("Official service chain identity is incomplete");
+  const inspect=table=>{
+    const listeners=[...table.values()].filter(row=>/Runner\.(?:Listener|Worker)(?:\s|$)/.test(row.command));
+    if(listeners.length>1||listeners.some(row=>row.uid!==uid||row.command!==`${runner.runner_executable} run --startuptype service`))throw new Error("An extra, foreign, or unmanaged runner process is present");
+    const listener=listeners[0]||null;
+    const supervisors=[...table.values()].filter(row=>/(?:runsvc\.sh|RunnerService\.js)(?:\s|$)/.test(row.command));
+    if(!listener) {
+      if(supervisors.length)throw new Error("An extra or unmanaged runner supervisor exists");
+      return {chain:[],listener:null,service_pids:[]};
+    }
+    const relativeNode=`./externals/${runner.service_node_version}/bin/node ./bin/RunnerService.js`;
+    const node=table.get(listener.ppid),shell=node&&table.get(node.ppid);
+    if(!node||node.uid!==uid||![relativeNode,`${runner.service_node} ${runner.service_script}`].includes(node.command)||!shell||shell.uid!==uid||shell.ppid!==1||shell.command!==`/bin/bash ${runner.service_executable}`)throw new Error("Listener does not have the exact approved service lineage");
+    const chain=[shell,node,listener];
+    const children=[...table.values()].filter(row=>row.ppid===shell.pid||row.ppid===node.pid).map(row=>row.pid).sort((a,b)=>a-b);
+    if(!equal(children,[node.pid,listener.pid].sort((a,b)=>a-b))||!equal(supervisors.map(row=>row.pid).sort((a,b)=>a-b),chain.slice(0,2).map(row=>row.pid).sort((a,b)=>a-b))||supervisors.some(row=>!chain.some(member=>member.pid===row.pid)))throw new Error("An extra or unmanaged runner supervisor exists");
+    return {chain,listener,service_pids:chain.slice(0,2).map(row=>row.pid)};
+  };
+  const before=processTable(commandRunner),first=inspect(before),starts=first.chain.map(row=>processStart(commandRunner,row.pid));
+  const after=processTable(commandRunner),second=inspect(after),later=second.chain.map(row=>processStart(commandRunner,row.pid));
+  if(!equal(first.chain,second.chain)||!equal(starts,later))throw new Error("Service chain changed or a PID was reused during inspection");
+  return {pid:first.listener?.pid||null,identity:first.listener?starts.at(-1):null,service_pids:first.service_pids,observation:"trusted-single-user-ps-v1",chain_identities:starts};
+}
 // A launchd PID is the shell supervisor, not Runner.Listener. Bind two native
 // observations and two complete command/edge observations for every chain node.
 // The unchanged libproc helper retains its native 500ms call contract.
-export function inspectMacosPersonalUseLineage({jobPid,runner,helperPath,commandRunner,identityReader=readMacosNativeProcessIdentity,uid=process.getuid?.()}={}) {
+export function inspectMacosPersonalUseLineage({jobPid,runner,helperPath,commandRunner,identityReader=readMacosNativeProcessIdentity,uid=process.getuid?.(),state}={}) {
   if(jobPid===null) {
     if(!runner||typeof runner!=="object"||Array.isArray(runner)||runner.status!=="PASS")throw new Error("Independent runner identity is unavailable or invalid");
     if(runner.local_listener_pid!==null&&runner.local_listener_pid!==undefined)throw new Error("A listener exists outside the imported service");
@@ -58,6 +89,11 @@ export function inspectMacosPersonalUseLineage({jobPid,runner,helperPath,command
     return {listener_running:false,job_identity:null,listener_identity:null};
   }
   if(!Number.isSafeInteger(jobPid)||jobPid<=1||!runner.service_executable||!runner.service_node||!runner.service_script)throw new Error("Official service chain identity is incomplete");
+  if(hasTrustedSingleUserReadinessProfile(state)) {
+    const observed=observeTrustedSingleUserRunnerProcesses({commandRunner,runner,uid});
+    if(!observed.chain_identities.length||observed.chain_identities[0].pid!==jobPid||observed.pid!==runner.local_listener_pid||!equal(observed.identity,runner.local_listener_identity)||!equal(observed.service_pids,runner.local_service_pids))throw new Error("Listener process observation differs from the independently inspected runner");
+    return {listener_running:Boolean(observed.pid),job_identity:observed.chain_identities[0],node_identity:observed.chain_identities[1]||null,listener_identity:observed.identity,observation:observed.observation};
+  }
   const before=processTable(commandRunner),shell=before.get(jobPid);
   if(!shell||shell.uid!==uid||shell.ppid!==1||shell.command!==`/bin/bash ${runner.service_executable}`)throw new Error("Imported job is not the owned official runsvc shell supervised by launchd");
   const relativeNode=`./externals/${runner.service_node_version}/bin/node ./bin/RunnerService.js`;

@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
-import { MACOS_PERSONAL_USE_POLICY, macosPersonalUsePolicyChallenge } from "../src/lib/macos-personal-use-service.mjs";
+import { MACOS_PERSONAL_USE_POLICY, TRUSTED_SINGLE_USER_READINESS_PROFILE, macosPersonalUsePolicyChallenge, trustedSingleUserReadinessProfileChallenge } from "../src/lib/macos-personal-use-service.mjs";
 import { gzipSync } from "node:zlib";
 import { inspectMacosRunnerArchive, MACOS_RUNNER_PACKAGE_LEAF_BOUND, inspectMacosRunnerBootstrap, approveMacosRunnerBootstrap, rebindMacosRunnerConfiguration, MACOS_RUNNER_RUNTIME_PATH } from "../src/lib/macos-runner-bootstrap.mjs";
 
@@ -534,6 +534,10 @@ test("public archive inspector shares the production finite leaf boundary includ
 function selectPersonalPolicy(f) {
   f.state.macos_service_policy={schema_version:1,policy:MACOS_PERSONAL_USE_POLICY,selected_through:"official-installer",installation_id:f.state.installation_id,github_login:f.state.github_login,control_repository:f.state.control_repository,control_repository_id:f.state.control_repository_id,approval:macosPersonalUsePolicyChallenge(f.state),approved_at:"2026-10-22T00:00:00Z"};
 }
+function selectTrustedReadinessProfile(f) {
+  selectPersonalPolicy(f);f.state.macos_setup_approved=true;f.state.macos_service_policy.readiness_profile=TRUSTED_SINGLE_USER_READINESS_PROFILE;
+  f.state.macos_service_policy.approval=trustedSingleUserReadinessProfileChallenge(f.state);
+}
 function addServicePayload(f) {
   const entries=[...f.entries,{name:"bin/runsvc.sh",bytes:Buffer.from('#!/bin/bash\n# synthetic service, never executed\nnodever="node24"\n./externals/$nodever/bin/node ./bin/RunnerService.js &\nwait $!\n'),mode:0o700},{name:"bin/RunnerService.js",bytes:Buffer.from('// synthetic supervisor, never executed\n'),mode:0o600}];
   for(const entry of entries.slice(f.entries.length))fs.writeFileSync(path.join(f.runner,entry.name),entry.bytes,{mode:entry.mode});
@@ -549,6 +553,39 @@ test("personal service uses only retained official runsvc and its selected bundl
   assert.equal(inspectMacosRunnerBootstrap({...f.options,commandRunner}).status,"PASS");
   fs.appendFileSync(path.join(f.runner,"runsvc.sh"),"# changed\n");
   assert.equal(inspectMacosRunnerBootstrap({...f.options,commandRunner}).status,"ERROR");
+});
+
+test("trusted readiness reports an inactive runner without calling the native identity helper",()=>{
+  const f=fixture();addServicePayload(f);selectTrustedReadinessProfile(f);let nativeCalls=0;
+  const commandRunner=(command,args)=>command==="/bin/ps"&&args.includes("uid=,pid=,ppid=,command=")?{ok:true,output:""}:f.options.commandRunner(command,args);
+  const result=inspectMacosRunnerBootstrap({...f.options,commandRunner,identityReader:()=>{nativeCalls++;throw new Error("native helper must not run");}});
+  assert.equal(result.status,"PASS");assert.equal(result.local_listener_pid,null);assert.equal(result.local_process_observation,"trusted-single-user-ps-v1");assert.equal(nativeCalls,0);
+});
+
+test("active trusted bootstrap validates chain and rejects unmanaged runner",()=>{
+  const f=fixture();addServicePayload(f);selectTrustedReadinessProfile(f);const uid=process.getuid?.()||0,service=path.join(f.runner,"bin/runsvc.sh"),node=path.join(f.runner,"externals/node24/bin/node"),script=path.join(f.runner,"bin/RunnerService.js"),starts={700:"Mon Jan  1 00:00:01 2026",42:"Mon Jan  1 00:00:02 2026",499:"Mon Jan  1 00:00:03 2026"};
+  const table=`${uid} 700 1 /bin/bash ${service}\n${uid} 42 700 ${node} ${script}\n${uid} 499 42 ${f.executable} run --startuptype service\n`;
+  const commandRunner=(command,args)=>command==="/bin/ps"&&args.includes("uid=,pid=,ppid=,command=")?{ok:true,output:table}:command==="/bin/ps"&&args.includes("lstart=")?{ok:true,output:starts[args[2]]}:f.options.commandRunner(command,args);
+  let nativeCalls=0;const result=inspectMacosRunnerBootstrap({...f.options,commandRunner,identityReader:()=>{nativeCalls++;assert.fail("trusted profile must not read native identity");}});
+  assert.equal(result.status,"PASS");assert.equal(result.local_listener_pid,499);assert.equal(result.local_process_observation,"trusted-single-user-ps-v1");assert.deepEqual(result.local_listener_identity,{pid:499,observed_start:starts[499]});assert.deepEqual(result.local_service_pids,[700,42]);assert.equal(nativeCalls,0);
+  const foreign=fixture();addServicePayload(foreign);selectTrustedReadinessProfile(foreign);const foreignService=path.join(foreign.runner,"bin/runsvc.sh"),foreignNode=path.join(foreign.runner,"externals/node24/bin/node"),foreignScript=path.join(foreign.runner,"bin/RunnerService.js"),foreignTable=`${uid} 700 1 /bin/bash ${foreignService}\n${uid} 42 700 ${foreignNode} ${foreignScript}\n${uid} 499 42 ${foreign.executable} run --startuptype service\n${uid} 888 1 ${foreign.executable} run --startuptype service\n`;
+  const rejected=inspectMacosRunnerBootstrap({...foreign.options,commandRunner:(command,args)=>command==="/bin/ps"&&args.includes("uid=,pid=,ppid=,command=")?{ok:true,output:foreignTable}:foreign.options.commandRunner(command,args),identityReader:()=>assert.fail("unmanaged trusted runner must fail before native identity")});
+  assert.equal(rejected.status,"ERROR");assert.equal(rejected.mutations_performed,false);assert.equal(Object.hasOwn(rejected,"local_listener_pid"),false);
+});
+
+test("invalid explicit readiness profiles fail closed before runner inspection",()=>{
+  for(const patch of [policy=>{policy.approval="wrong receipt wording";},policy=>{policy.control_repository_id="999";},policy=>{policy.installation_id="other-installation";},(policy,state)=>{delete state.macos_setup_approved;}]) {
+    const f=fixture();addServicePayload(f);selectTrustedReadinessProfile(f);patch(f.state.macos_service_policy,f.state);
+    const result=inspectMacosRunnerBootstrap({...f.options,commandRunner:()=>assert.fail("invalid readiness profile must stop before runner inspection")});
+    assert.equal(result.status,"ERROR");assert.equal(result.error_id,"MACOS-READINESS-PROFILE-INVALID");
+  }
+});
+
+test("legacy personal policy still uses native listener identity",()=>{
+  const f=fixture();addServicePayload(f);selectPersonalPolicy(f);const uid=process.getuid?.()||0;let nativeCalls=0;
+  const commandRunner=(command,args)=>command==="/bin/ps"&&args.includes("-axo")?{ok:true,output:`${uid} 101 /bin/bash ${path.join(f.runner,"bin/runsvc.sh")}\n${uid} 102 ${path.join(f.runner,"externals/node24/bin/node")} ${path.join(f.runner,"bin/RunnerService.js")}\n${uid} 103 ${f.executable} run --startuptype service\n`}:f.options.commandRunner(command,args);
+  const result=inspectMacosRunnerBootstrap({...f.options,commandRunner,identityReader:pid=>{nativeCalls++;return {status:"OK",pid,start_sec:1,start_usec:pid};}});
+  assert.equal(result.status,"PASS");assert.ok(nativeCalls>=2);assert.equal(result.local_process_observation,undefined);
 });
 
 test("runsvc .path is absent or exactly the trusted runtime PATH",()=>{

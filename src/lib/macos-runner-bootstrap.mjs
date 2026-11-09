@@ -5,7 +5,7 @@ import crypto from "node:crypto";
 import { gunzipSync } from "node:zlib";
 import { spawnSafeSync } from "./spawn-safe.mjs";
 import { canonicalInstallationId } from "./control-render.mjs";
-import { hasMacosPersonalUsePolicy } from "./macos-personal-use-service.mjs";
+import { hasMacosPersonalUsePolicy, hasTrustedSingleUserReadinessProfile, hasTrustedSingleUserReadinessProfileMarker, observeTrustedSingleUserRunnerProcesses } from "./macos-personal-use-service.mjs";
 import { readMacosNativeProcessIdentity } from "./macos-native-process-identity.mjs";
 import { trustedCodeReviewCodexExecutable } from "./macos-code-review-runtime.mjs";
 
@@ -83,7 +83,11 @@ function verifyBrowser(commandRunner,home,profile,port) {
   if(!processProof?.ok||!match||Number(match[1])!==process.getuid?.()||!approvedBrowsers.some(browser=>match[2].startsWith(browser+" "))||!profileFlag.test(match[2])||!portFlag.test(match[2])||(match[2].match(/--user-data-dir(?:=|\s)/g)||[]).length!==1||(match[2].match(/--remote-debugging-port(?:=|\s)/g)||[]).length!==1) reject("MACOS-RUNNER-BROWSER-CONFLICT","The port owner is not the exact owned isolated browser profile");
   return {pid:Number(pids[0]),profile,port};
 }
-function verifyLocalRunnerProcesses(commandRunner,executable,{personal=false,identityReader=readMacosNativeProcessIdentity,helperPath}={}) {
+function verifyLocalRunnerProcesses(commandRunner,executable,{personal=false,trustedSingleUser=false,runner,identityReader=readMacosNativeProcessIdentity,helperPath}={}) {
+  if(trustedSingleUser) {
+    try { return observeTrustedSingleUserRunnerProcesses({commandRunner,runner}); }
+    catch(error) { reject("MACOS-RUNNER-PROCESS-UNKNOWN",error.message); }
+  }
   const result=commandRunner("/bin/ps",["-ww","-axo","uid=,pid=,command="]);
   if(!result?.ok)reject("MACOS-RUNNER-PROCESS-UNKNOWN","Local runner process ownership cannot be independently inspected");
   const listeners=[],servicePids=[];
@@ -458,6 +462,7 @@ export function inspectMacosRunnerBootstrap({state={},home=process.env.HOME||os.
   const request=macosRunnerApprovalRequest({state,home}), fail=(error)=>({status:error.code==="ENOENT"?"NEEDS_USER_ACTION":"ERROR",error_id:error.code==="ENOENT"?"MACOS-RUNNER-PROVISIONING-REQUIRED":error.code||"MACOS-RUNNER-UNVERIFIED",details:String(error.message||error),...request,...(error.update_reverification?{action_id:"macos_runner_update_reverification",update_reverification:error.update_reverification}:{})});
   try {
     if(platform!=="darwin"||arch!=="arm64") reject("MACOS-RUNNER-PLATFORM","First-boot runner requires native macOS ARM64");
+    if(hasTrustedSingleUserReadinessProfileMarker(state)&&!hasTrustedSingleUserReadinessProfile(state)) reject("MACOS-READINESS-PROFILE-INVALID","Explicit trusted single-user readiness profile approval is invalid");
     checkHomeAncestors(home,fsImpl);
     verifyRuntimeTools(commandRunner,fsImpl);
     const short=canonicalInstallationId(state.installation_id),root=path.dirname(request.receipt_path),runner=request.runner_path,options={home,fsImpl};
@@ -482,7 +487,8 @@ export function inspectMacosRunnerBootstrap({state={},home=process.env.HOME||os.
       const error=new Error("Approved native Runner.Listener bytes changed; explicit official update re-verification is required");error.code="MACOS-RUNNER-EXECUTABLE";
       error.update_reverification=reverifyOfficialUpdate({state,home,fsImpl,commandRunner,prior:approval});throw error;
     }
-    const processOptions={personal:hasMacosPersonalUsePolicy(state),identityReader,helperPath:path.join(root,"runtime","native","macos","process-identity")};
+    const legacyPersonal=hasMacosPersonalUsePolicy(state),trustedProfile=hasTrustedSingleUserReadinessProfile(state),personalService=legacyPersonal||trustedProfile,serviceModel=personalService?inspectedServiceModel(runner,archiveLayout,options):{};
+    const processOptions={personal:personalService,trustedSingleUser:trustedProfile,runner:{runner_executable:request.runner_executable,...serviceModel},identityReader,helperPath:path.join(root,"runtime","native","macos","process-identity")};
     const localProcess=verifyLocalRunnerProcesses(commandRunner,request.runner_executable,processOptions),listenerPid=localProcess.pid;
     for(const credentials of [".credentials",".credentials_rsaparams"]) checkPath(path.join(runner,credentials),options);
     const configDigest=configuration.digest;
@@ -516,11 +522,10 @@ export function inspectMacosRunnerBootstrap({state={},home=process.env.HOME||os.
     if(sha(readPackageFile(request.archive_path,options))!==approval.archive_sha256)reject("MACOS-RUNNER-PACKAGE","Retained official package changed before authorization");
     if(JSON.stringify(approvedRunnerEnvironment(runner,approval,options))!==JSON.stringify(environment))reject("MACOS-RUNNER-ENV","Runner environment changed before authorization");
     if(JSON.stringify(inspectRunnerPath(runner,options))!==JSON.stringify(runnerPathEnvironment))reject("MACOS-RUNNER-ENV","Runner .path changed before authorization");
-    const serviceModel=hasMacosPersonalUsePolicy(state)?inspectedServiceModel(runner,archiveLayout,options):{};
     const finalConfiguration=runnerConfiguration(runner,options);
     if(!samePackageFile(configuration.identity,finalConfiguration.identity)||finalConfiguration.digest!==approval.config_sha256||finalConfiguration.digest!==configDigest||String(finalConfiguration.config.agentId)!==String(remote.id)||finalConfiguration.config.agentName!==remote.name||finalConfiguration.config.gitHubUrl!==`https://github.com/${state.control_repository}`)reject("MACOS-RUNNER-CONFIG","Runner configuration changed after independent GitHub and Codex callbacks");
     if(processOptions.personal&&JSON.stringify(verifyLocalRunnerProcesses(commandRunner,request.runner_executable,processOptions))!==JSON.stringify(localProcess))reject("MACOS-RUNNER-PROCESS-UNKNOWN","Native listener identity changed during package authorization");
-    return {status:requireApproval?"PASS":"NEEDS_USER_ACTION",action_id:requireApproval?undefined:"macos_runner_package_approval",mutations_performed:false,installation_id:state.installation_id,instance_path:root,runner_path:runner,runner_executable:request.runner_executable,program_arguments:["run"],runner_id:String(remote.id),runner_label:state.runner_label,runner_status:remote.status,local_listener_pid:listenerPid,local_listener_identity:localProcess.identity,local_service_pids:localProcess.service_pids,control_repository_id:String(state.control_repository_id),sandbox_repository_id:String(state.sandbox_repository_id),approval_id:approval.approval_id,approval_sha256:approvalDigest,approval_challenge:requireApproval?undefined:challenge,approval_candidate:requireApproval?undefined:approval,config_sha256:configDigest,config_identity:configuration.identity,env_sha256:environment.digest,path_sha256:runnerPathEnvironment.digest,...serviceModel,browser};
+    return {status:requireApproval?"PASS":"NEEDS_USER_ACTION",action_id:requireApproval?undefined:"macos_runner_package_approval",mutations_performed:false,installation_id:state.installation_id,instance_path:root,runner_path:runner,runner_executable:request.runner_executable,program_arguments:["run"],runner_id:String(remote.id),runner_label:state.runner_label,runner_status:remote.status,local_listener_pid:listenerPid,local_listener_identity:localProcess.identity,local_service_pids:localProcess.service_pids,local_process_observation:localProcess.observation,control_repository_id:String(state.control_repository_id),sandbox_repository_id:String(state.sandbox_repository_id),approval_id:approval.approval_id,approval_sha256:approvalDigest,approval_challenge:requireApproval?undefined:challenge,approval_candidate:requireApproval?undefined:approval,config_sha256:configDigest,config_identity:configuration.identity,env_sha256:environment.digest,path_sha256:runnerPathEnvironment.digest,...serviceModel,browser};
   } catch(error) { return fail(error); }
 }
 

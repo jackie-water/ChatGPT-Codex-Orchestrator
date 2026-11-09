@@ -80,6 +80,57 @@ test("trusted single-user profiles block every mutation before service inspectio
   }
   const readonly={state,commandRunner:()=>({ok:true,output:""}),runnerInspector:()=>({status:"ERROR",error_id:"SYNTHETIC_READ_ONLY"})};
   assert.notEqual(macosRuntimeAction("status",readonly).error_id,"MACOS-RUNNER-SAME-UID-LINEAGE-UNIMPLEMENTED");
+  for(const action of ["status","doctor"]){let reached=false;assert.equal(macosRuntimeAction(action,{state:{...state,macos_service_policy:{...state.macos_service_policy,approval:"stale"}},commandRunner:()=>{reached=true;throw Error("must not inspect");},runnerInspector:()=>{reached=true;throw Error("must not inspect");}}).error_id,"MACOS-READINESS-PROFILE-INVALID");assert.equal(reached,false);}
+});
+
+function trustedFixture({active=false}={}) {
+  const f=fixture(),service=path.join(f.runner,"bin","runsvc.sh"),node=path.join(f.runner,"externals","node20","bin","node"),script=path.join(f.runner,"bin","RunnerService.js");
+  for(const dir of [path.dirname(node)])fs.mkdirSync(dir,{recursive:true,mode:0o700});for(const file of [service,node,script])fs.writeFileSync(file,"synthetic\n",{mode:0o700});
+  Object.assign(f.state,{github_login:"owner",control_repository_id:"101",sandbox_repository_id:"102"});
+  f.state.macos_service_policy={schema_version:1,policy:MACOS_PERSONAL_USE_POLICY,readiness_profile:TRUSTED_SINGLE_USER_READINESS_PROFILE,selected_through:"official-installer",installation_id:f.state.installation_id,github_login:f.state.github_login,control_repository:f.state.control_repository,control_repository_id:f.state.control_repository_id,approval:trustedSingleUserReadinessProfileChallenge(f.state),approved_at:"2026-10-22T00:00:00Z"};
+  const start="Mon Jan  1 00:00:00 2024",identity={pid:125,observed_start:start};
+  const runner={...f.runnerIdentity,service_executable:service,service_arguments:[],service_node:node,service_node_version:"node20",service_script:script,local_process_observation:"trusted-single-user-ps-v1",local_listener_pid:active?125:null,local_listener_identity:active?identity:null,local_service_pids:active?[123,124]:[]};
+  const plist=path.join(f.home,"Library","LaunchAgents",`${f.state.launch_agent_label}.plist`),rendered=renderLaunchAgent({label:f.state.launch_agent_label,runnerPath:service,programArguments:[],instanceRoot:f.instance,workingDirectory:f.runner,activated:false,officialService:true});
+  if(active){fs.mkdirSync(path.dirname(plist),{recursive:true,mode:0o700});fs.writeFileSync(plist,rendered,{mode:0o600});f.setStarted();}
+  const print=()=>`gui/${process.getuid?.()||0}/${f.state.launch_agent_label} = {
+    path = ${plist}
+    type = LaunchAgent
+    state = ${active?"running":"not running"}
+    program = ${service}
+    arguments = {
+      ${service}
+    }
+    working directory = ${f.runner}
+    environment = {
+      PATH => ${MACOS_RUNNER_RUNTIME_PATH}
+      ACTIONS_RUNNER_SVC => 1
+      XPC_SERVICE_NAME => ${f.state.launch_agent_label}
+    }
+    domain = gui/${process.getuid?.()||0} [100003]
+    ${active?"pid = 123":""}
+    properties = inferred program
+  }`;
+  const table=`${process.getuid?.()||0} 123 1 /bin/bash ${service}\n${process.getuid?.()||0} 124 123 ${node} ${script}\n${process.getuid?.()||0} 125 124 ${f.executable} run --startuptype service`;
+  const commandRunner=(command,args)=>{if(command==="/bin/ps")return args.includes("lstart=")?{ok:true,output:start}:{ok:true,output:table};if(command==="launchctl"&&args[0]==="print")return {ok:active,output:active?print():`Could not find service "${f.state.launch_agent_label}" in domain for user gui:${process.getuid?.()||0}`};return f.options.commandRunner(command,args);};
+  return {...f,runner,plist,rendered,options:{...f.options,commandRunner,runnerInspector:()=>runner,capabilityVerifier:()=>{throw Error("native helper must not run");}}};
+}
+
+test("trusted status and doctor inspect inactive service without native helper",()=>{
+  const f=trustedFixture();try{for(const action of ["status","doctor"]){const before=fs.readdirSync(f.home),result=macosRuntimeAction(action,f.options);assert.equal(result.status,"PASS");assert.equal(result.readiness_profile,TRUSTED_SINGLE_USER_READINESS_PROFILE);assert.equal(result.runner_action_state,"BLOCKED_UNIMPLEMENTED");assert.equal(result.mutations_performed,false);assert.equal(result.launchctl_state,"not-loaded");assert.deepEqual(fs.readdirSync(f.home),before);}assert.equal(f.calls.some(x=>["bootstrap","bootout"].includes(x.args[0])),false);}finally{f.cleanup();}
+});
+
+test("trusted active launchd verifies pinned process chain without native helper",()=>{
+  const f=trustedFixture({active:true});try{const result=macosRuntimeAction("status",f.options);assert.equal(result.status,"PASS");assert.deepEqual(result.job_identity,{pid:123,observed_start:"Mon Jan  1 00:00:00 2024"});assert.deepEqual(result.listener_identity,{pid:125,observed_start:"Mon Jan  1 00:00:00 2024"});assert.equal(f.calls.some(x=>x.command==="launchctl"&&["bootstrap","bootout"].includes(x.args[0])),false);
+    assert.equal(macosRuntimeAction("status",{...f.options,runnerInspector:()=>({...f.runner,local_listener_pid:126})}).error_id,"MACOS-LAUNCHCTL-IDENTITY");
+  }finally{f.cleanup();}
+});
+
+test("trusted status rejects forged runner observation and plist drift",()=>{
+  const f=trustedFixture({active:true});try{assert.equal(macosRuntimeAction("status",{...f.options,runnerInspector:()=>({...f.runner,local_process_observation:"forged"})}).error_id,"MACOS-RUNNER-LINEAGE-INVALID");fs.writeFileSync(f.plist,f.rendered.replace("ACTIONS_RUNNER_SVC","FOREIGN"),{mode:0o600});assert.equal(macosRuntimeAction("doctor",f.options).error_id,"MACOS-PLIST-NATIVE-PATH-MISMATCH");assert.equal(f.calls.some(x=>x.command==="launchctl"&&["bootstrap","bootout"].includes(x.args[0])),false);}finally{f.cleanup();}
+});
+
+test("legacy and invalid profiles preserve native helper gate and mutation block",()=>{
+  const f=fixture();try{assert.equal(macosRuntimeAction("status",{...f.options,capabilityVerifier:()=>({status:"MISSING"})}).error_id,"MACOS-NATIVE-CAPABILITY-INVALID");const trusted=trustedFixture();try{for(const action of ["install","start","stop","repair"])assert.equal(macosRuntimeAction(action,trusted.options).error_id,"MACOS-RUNNER-SAME-UID-LINEAGE-UNIMPLEMENTED");}finally{trusted.cleanup();}}finally{f.cleanup();}
 });
 
 test("macOS migration inventory remains read only",()=>{
