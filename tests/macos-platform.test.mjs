@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
-import { macosPrerequisites, parseNodeMajor, migrationInventory, migrationPreflight, renderLaunchAgent, macosRuntimeAction } from "../src/lib/macos-platform.mjs";
+import { macosPrerequisites, parseNodeMajor, migrationInventory, migrationPreflight, renderLaunchAgent, macosRuntimeAction, trustedClaimRead } from "../src/lib/macos-platform.mjs";
 import { MACOS_RUNNER_RUNTIME_PATH } from "../src/lib/macos-runner-bootstrap.mjs";
 import { MACOS_PERSONAL_USE_POLICY, TRUSTED_SINGLE_USER_READINESS_PROFILE, macosPersonalUsePolicyChallenge, trustedSingleUserReadinessProfileChallenge } from "../src/lib/macos-personal-use-service.mjs";
 
@@ -56,7 +56,7 @@ test("synthetic prerequisite preflight defers legacy helper until profile select
   const state={macos_setup_approved:true,installation_id:"install",github_login:"owner",control_repository:"owner/control",control_repository_id:"101"};
   state.macos_service_policy={schema_version:1,policy:MACOS_PERSONAL_USE_POLICY,readiness_profile:TRUSTED_SINGLE_USER_READINESS_PROFILE,selected_through:"official-installer",installation_id:state.installation_id,github_login:state.github_login,control_repository:state.control_repository,control_repository_id:state.control_repository_id,approval:trustedSingleUserReadinessProfileChallenge(state),approved_at:"2026-10-22T00:00:00Z"};
   const selected=macosPrerequisites({state,commandRunner,nativeHelperPreflight:missing});
-  assert.equal(selected.legacy_native_helper_gate,"NOT_APPLICABLE_SUPERSEDED");assert.equal(selected.runner_lineage.status,"BLOCKED_UNIMPLEMENTED");
+  assert.equal(selected.legacy_native_helper_gate,"NOT_APPLICABLE_SUPERSEDED");assert.equal(selected.runner_lineage.status,"ACTION_APPROVAL_REQUIRED");
 });
 
 test("no-marker legacy policy still requires native helper",()=>{
@@ -71,16 +71,23 @@ test("no-marker legacy policy still requires native helper",()=>{
   assert.equal(Object.hasOwn(state.macos_service_policy,"readiness_profile"),false);assert.equal(calls.length,12);
 });
 
-test("trusted single-user profiles block every mutation before service inspection and reject invalid receipts",()=>{
+test("trusted invalid profile and foreign Control fail closed",()=>{
   const state={macos_setup_approved:true,installation_id:"install",github_login:"owner",control_repository:"owner/control",control_repository_id:"101"};
   state.macos_service_policy={schema_version:1,policy:MACOS_PERSONAL_USE_POLICY,readiness_profile:TRUSTED_SINGLE_USER_READINESS_PROFILE,selected_through:"official-installer",installation_id:state.installation_id,github_login:state.github_login,control_repository:state.control_repository,control_repository_id:state.control_repository_id,approval:trustedSingleUserReadinessProfileChallenge(state),approved_at:"2026-10-22T00:00:00Z"};
   for(const valid of [true,false]) for(const action of ["install","start","stop","repair"]){
     let reached=false;const options={state:valid?state:{...state,macos_service_policy:{...state.macos_service_policy,approval:"stale"}},commandRunner:()=>{reached=true;throw Error("must not launchctl");},runnerInspector:()=>{reached=true;throw Error("must not inspect");},capabilityVerifier:()=>{reached=true;throw Error("must not verify");}};
-    assert.equal(macosRuntimeAction(action,options).error_id,valid?"MACOS-RUNNER-SAME-UID-LINEAGE-UNIMPLEMENTED":"MACOS-READINESS-PROFILE-INVALID");assert.equal(reached,false);
+    assert.equal(macosRuntimeAction(action,options).error_id,valid?(["stop","repair"].includes(action)?"MACOS-RUNNER-TRUSTED-ACTION-UNSUPPORTED":"MACOS-ACTION-APPROVAL"):"MACOS-READINESS-PROFILE-INVALID");assert.equal(reached,false);
   }
+  const foreign={...state,control_repository_id:"999"};foreign.macos_service_policy={...state.macos_service_policy};assert.equal(macosRuntimeAction("install",{state:foreign}).error_id,"MACOS-READINESS-PROFILE-INVALID");
   const readonly={state,commandRunner:()=>({ok:true,output:""}),runnerInspector:()=>({status:"ERROR",error_id:"SYNTHETIC_READ_ONLY"})};
-  assert.notEqual(macosRuntimeAction("status",readonly).error_id,"MACOS-RUNNER-SAME-UID-LINEAGE-UNIMPLEMENTED");
+  assert.notEqual(macosRuntimeAction("status",readonly).error_id,"MACOS-RUNNER-TRUSTED-ACTION-UNSUPPORTED");
   for(const action of ["status","doctor"]){let reached=false;assert.equal(macosRuntimeAction(action,{state:{...state,macos_service_policy:{...state.macos_service_policy,approval:"stale"}},commandRunner:()=>{reached=true;throw Error("must not inspect");},runnerInspector:()=>{reached=true;throw Error("must not inspect");}}).error_id,"MACOS-READINESS-PROFILE-INVALID");assert.equal(reached,false);}
+});
+
+test("trusted single-user profiles block every mutation before service inspection and reject invalid receipts",()=>{
+  const state={macos_setup_approved:true,installation_id:"install",github_login:"owner",control_repository:"owner/control",control_repository_id:"101",macos_service_policy:{readiness_profile:TRUSTED_SINGLE_USER_READINESS_PROFILE,approval:"forged"}};
+  let reached=false;const result=macosRuntimeAction("install",{state,commandRunner:()=>{reached=true;return {ok:true,output:""};},runnerInspector:()=>{reached=true;return {status:"PASS"};}});
+  assert.equal(result.error_id,"MACOS-READINESS-PROFILE-INVALID");assert.equal(reached,false);
 });
 
 function trustedFixture({active=false}={}) {
@@ -108,7 +115,7 @@ function trustedFixture({active=false}={}) {
     }
     domain = gui/${process.getuid?.()||0} [100003]
     ${active?"pid = 123":""}
-    properties = inferred program
+    properties = inferred program${f.state.macos_runner_bootstrap?.phase==="STARTED"?" | runatload":""}
   }`;
   const table=`${process.getuid?.()||0} 123 1 /bin/bash ${service}\n${process.getuid?.()||0} 124 123 ${node} ${script}\n${process.getuid?.()||0} 125 124 ${f.executable} run --startuptype service`;
   const commandRunner=(command,args)=>{if(command==="/bin/ps")return args.includes("lstart=")?{ok:true,output:start}:{ok:true,output:table};if(command==="launchctl"&&args[0]==="print")return {ok:active,output:active?print():`Could not find service "${f.state.launch_agent_label}" in domain for user gui:${process.getuid?.()||0}`};return f.options.commandRunner(command,args);};
@@ -116,7 +123,7 @@ function trustedFixture({active=false}={}) {
 }
 
 test("trusted status and doctor inspect inactive service without native helper",()=>{
-  const f=trustedFixture();try{for(const action of ["status","doctor"]){const before=fs.readdirSync(f.home),result=macosRuntimeAction(action,f.options);assert.equal(result.status,"PASS");assert.equal(result.readiness_profile,TRUSTED_SINGLE_USER_READINESS_PROFILE);assert.equal(result.runner_action_state,"BLOCKED_UNIMPLEMENTED");assert.equal(result.mutations_performed,false);assert.equal(result.launchctl_state,"not-loaded");assert.deepEqual(fs.readdirSync(f.home),before);}assert.equal(f.calls.some(x=>["bootstrap","bootout"].includes(x.args[0])),false);}finally{f.cleanup();}
+  const f=trustedFixture();try{for(const action of ["status","doctor"]){const before=fs.readdirSync(f.home),result=macosRuntimeAction(action,f.options);assert.equal(result.status,"PASS");assert.equal(result.readiness_profile,TRUSTED_SINGLE_USER_READINESS_PROFILE);assert.equal(result.runner_action_state,"ACTION_APPROVAL_REQUIRED");assert.equal(result.mutations_performed,false);assert.equal(result.launchctl_state,"not-loaded");assert.deepEqual(fs.readdirSync(f.home),before);}assert.equal(f.calls.some(x=>["bootstrap","bootout"].includes(x.args[0])),false);}finally{f.cleanup();}
 });
 
 test("trusted active launchd verifies pinned process chain without native helper",()=>{
@@ -129,8 +136,139 @@ test("trusted status rejects forged runner observation and plist drift",()=>{
   const f=trustedFixture({active:true});try{assert.equal(macosRuntimeAction("status",{...f.options,runnerInspector:()=>({...f.runner,local_process_observation:"forged"})}).error_id,"MACOS-RUNNER-LINEAGE-INVALID");fs.writeFileSync(f.plist,f.rendered.replace("ACTIONS_RUNNER_SVC","FOREIGN"),{mode:0o600});assert.equal(macosRuntimeAction("doctor",f.options).error_id,"MACOS-PLIST-NATIVE-PATH-MISMATCH");assert.equal(f.calls.some(x=>x.command==="launchctl"&&["bootstrap","bootout"].includes(x.args[0])),false);}finally{f.cleanup();}
 });
 
+test("trusted read-only status rejects contradictory journals without mutation",()=>{
+  const f=trustedFixture();try{f.state.macos_runner_bootstrap={phase:"INSTALL_INTENT",operation:"foreign",runner_id:f.runner.runner_id,install_challenge:"install:"+"a".repeat(64),start_challenge:"start:"+"b".repeat(64)};assert.equal(macosRuntimeAction("status",f.options).error_id,"MACOS-FIRST-BOOT-JOURNAL");f.state.macos_runner_bootstrap={phase:"INSTALL_INTENT",operation:"install",runner_id:"foreign",install_challenge:"install:"+"a".repeat(64),start_challenge:"start:"+"b".repeat(64)};assert.equal(macosRuntimeAction("doctor",f.options).error_id,"MACOS-RUNNER-APPROVAL-DRIFT");assert.equal(f.calls.some(x=>["bootstrap","kickstart","bootout"].includes(x.args[0])),false);}finally{f.cleanup();}
+});
+
+test("trusted stop and repair stay blocked without mutation",()=>{
+  const f=fixture();try{assert.equal(macosRuntimeAction("status",{...f.options,capabilityVerifier:()=>({status:"MISSING"})}).error_id,"MACOS-NATIVE-CAPABILITY-INVALID");const trusted=trustedFixture();try{for(const action of ["stop","repair"])assert.equal(macosRuntimeAction(action,trusted.options).error_id,"MACOS-RUNNER-TRUSTED-ACTION-UNSUPPORTED");assert.equal(trusted.calls.some(x=>["bootstrap","bootout"].includes(x.args[0])),false);}finally{trusted.cleanup();}}finally{f.cleanup();}
+});
+
+function approveTrustedAction(f,action,phase=action==="install"?"INSTALL_INTENT":"START_INTENT",attempt=1){
+  const challengeFor=operation=>operation+":"+crypto.createHash("sha256").update(JSON.stringify([f.state.installation_id,f.state.instance_id,f.state.instance_root,f.state.control_repository,f.state.control_repository_id,f.state.sandbox_repository,f.state.sandbox_repository_id,f.state.sandbox_project_key,f.state.runner_label,f.runner.runner_id,f.runner.runner_executable,f.runner.approval_sha256,f.state.browser_profile,f.state.browser_port,f.state.pending_wake_outbox,...(attempt===1?[]:[{proven_rejection_attempt:attempt}])])).digest("hex");
+  const challenge=challengeFor(action);
+  const baselineFor=operation=>operation+":"+crypto.createHash("sha256").update(JSON.stringify([f.state.installation_id,f.state.instance_id,f.state.instance_root,f.state.control_repository,f.state.control_repository_id,f.state.sandbox_repository,f.state.sandbox_repository_id,f.state.sandbox_project_key,f.state.runner_label,f.runner.runner_id,f.runner.runner_executable,f.runner.approval_sha256,f.state.browser_profile,f.state.browser_port,f.state.pending_wake_outbox])).digest("hex");
+  f.state.macos_runner_bootstrap={phase,operation:action,attempt,action_challenge:challenge,runner_id:f.runner.runner_id,install_challenge:baselineFor("install"),start_challenge:baselineFor("start")};
+  f.state.macos_action_approval=action;f.state.macos_runner_action_approval=challenge;
+  const claim=path.join(f.state.instance_root,`macos-runner-${action}${attempt===1?"":`-attempt-${attempt}`}-claim.json`);
+  fs.writeFileSync(claim,JSON.stringify({schema_version:1,installation_id:f.state.installation_id,instance_id:f.state.instance_id,action,attempt,challenge,pid:process.pid,claimed_at:"2026-10-22T00:00:00Z"})+"\n",{mode:0o600});
+  f.state.macos_runner_bootstrap.claim_path=claim;
+  if(action==="start"){f.state.macos_activation_challenge=challenge;f.state.macos_runner_activation={installation_id:f.state.installation_id,runner_id:f.runner.runner_id,approval_sha256:f.runner.approval_sha256,challenge,login_restart_approved:true,approved_at:"2026-10-22T00:00:00Z"};}
+  return challenge;
+}
+function retainedRejection(f,operation,attempt=1){
+  const action_challenge=approveTrustedAction(f,operation,"REJECTED",attempt),claim_path=f.state.macos_runner_bootstrap.claim_path;
+  return {installation_id:f.state.installation_id,operation,attempt,claim_path,action_challenge,result:{status:"ERROR",action:operation,pre_mutation_rejection:true,service_action_state:"NOT_ATTEMPTED",mutations_performed:false}};
+}
+
+test("trusted install preflight binds official service without native helper",()=>{
+  const f=trustedFixture();try{approveTrustedAction(f,"install");assert.equal(macosRuntimeAction("install",{...f.options,preflightOnly:true}).status,"PASS");const installed=macosRuntimeAction("install",f.options);assert.equal(installed.status,"PASS");assert.match(fs.readFileSync(installed.plist,"utf8"),/ACTIONS_RUNNER_SVC/);assert.doesNotMatch(fs.readFileSync(installed.plist,"utf8"),/NATIVE_HELPER/);}finally{f.cleanup();}
+});
+
+test("trusted start preclaim and postclaim require exact persisted intent",()=>{
+  const f=trustedFixture();try{
+    approveTrustedAction(f,"install");delete f.state.macos_runner_bootstrap;
+    const before=f.calls.length;
+    assert.equal(macosRuntimeAction("install",{...f.options,preflightOnly:true}).status,"PASS");assert.equal(f.calls.slice(before).some(call=>["bootstrap","kickstart","bootout"].includes(call.args?.[0])),false);
+    approveTrustedAction(f,"install");assert.equal(macosRuntimeAction("install",f.options).status,"PASS");
+    const start=approveTrustedAction(f,"start","START_INTENT");
+    f.state.macos_runner_bootstrap.phase="PLIST_INSTALLED";f.state.macos_runner_bootstrap.operation="install";delete f.state.macos_runner_bootstrap.action_challenge;
+    const startPreflight=macosRuntimeAction("start",{...f.options,preflightOnly:true});assert.equal(startPreflight.status,"PASS",JSON.stringify(startPreflight));assert.equal(f.calls.some(call=>call.args?.[0]==="bootstrap"),false);
+    f.state.macos_runner_bootstrap={...f.state.macos_runner_bootstrap,phase:"START_INTENT",operation:"start",attempt:1,action_challenge:start};
+    const postclaim=macosRuntimeAction("start",f.options);assert.notEqual(postclaim.error_id,"MACOS-ACTION-APPROVAL");assert.equal(f.calls.some(call=>call.args?.[0]==="bootstrap"),true);
+  }finally{f.cleanup();}
+});
+
+test("trusted proven rejection retry binds attempt two and rejects uncertain replay",()=>{
+  const f=trustedFixture();try{
+    const retry=approveTrustedAction(f,"install","INSTALL_INTENT",2);
+    f.state.macos_runner_bootstrap.rejections=[{operation:"install",attempt:1,claim_path:"/private/claim-1",result:{pre_mutation_rejection:true,service_action_state:"NOT_ATTEMPTED",mutations_performed:false}}];
+    assert.equal(macosRuntimeAction("install",{...f.options,preflightOnly:true}).status,"PASS");
+    f.state.macos_runner_bootstrap.action_challenge=retry.replace(/.$/,value=>value==="0"?"1":"0");assert.equal(macosRuntimeAction("install",f.options).error_id,"MACOS-ACTION-APPROVAL");
+    f.state.macos_runner_bootstrap={...f.state.macos_runner_bootstrap,phase:"ERROR",result:{mutations_performed:"UNKNOWN"}};assert.equal(macosRuntimeAction("install",f.options).error_id,"MACOS-ACTION-APPROVAL");
+  }finally{f.cleanup();}
+});
+
+test("trusted rejected install attempt two needs fresh preclaim approval",()=>{
+  const f=trustedFixture();try{const first=retainedRejection(f,"install");f.state.macos_runner_bootstrap={...f.state.macos_runner_bootstrap,phase:"REJECTED",rejected_operation:"install",rejections:[first]};assert.equal(macosRuntimeAction("install",{...f.options,preflightOnly:true}).error_id,"MACOS-ACTION-APPROVAL");approveTrustedAction(f,"install","REJECTED",2);f.state.macos_runner_bootstrap.rejected_operation="install";f.state.macos_runner_bootstrap.rejections=[first];assert.equal(macosRuntimeAction("install",{...f.options,preflightOnly:true}).status,"PASS");assert.notEqual(first.action_challenge,f.state.macos_runner_action_approval);}finally{f.cleanup();}
+});
+
+test("trusted rejected start attempt two needs fresh preclaim approval",()=>{
+  const f=trustedFixture();try{const first=retainedRejection(f,"start");approveTrustedAction(f,"start","REJECTED",2);f.state.macos_runner_bootstrap.rejected_operation="start";f.state.macos_runner_bootstrap.rejections=[first];assert.equal(macosRuntimeAction("start",{...f.options,preflightOnly:true}).error_id,"MACOS-PLIST-MISSING");assert.equal(f.calls.some(call=>["bootstrap","kickstart","bootout"].includes(call.args?.[0])),false);f.state.macos_runner_action_approval=f.state.macos_runner_action_approval.replace(/.$/,value=>value==="0"?"1":"0");assert.equal(macosRuntimeAction("start",{...f.options,preflightOnly:true}).error_id,"MACOS-ACTION-APPROVAL");assert.equal(f.calls.some(call=>["bootstrap","kickstart","bootout"].includes(call.args?.[0])),false);}finally{f.cleanup();}
+});
+
+test("trusted attempt two STARTED status binds activated plist after approval consumed",()=>{
+  const f=trustedFixture({active:true});try{const challenge=approveTrustedAction(f,"start","STARTED",2),base=operation=>operation+":"+crypto.createHash("sha256").update(JSON.stringify([f.state.installation_id,f.state.instance_id,f.state.instance_root,f.state.control_repository,f.state.control_repository_id,f.state.sandbox_repository,f.state.sandbox_repository_id,f.state.sandbox_project_key,f.state.runner_label,f.runner.runner_id,f.runner.runner_executable,f.runner.approval_sha256,f.state.browser_profile,f.state.browser_port,f.state.pending_wake_outbox])).digest("hex");f.state.macos_runner_bootstrap.install_challenge=base("install");f.state.macos_runner_bootstrap.start_challenge=base("start");f.state.macos_runner_bootstrap.rejections=[{operation:"start",attempt:1,claim_path:path.join(f.state.instance_root,"macos-runner-start-claim.json"),result:{pre_mutation_rejection:true,service_action_state:"NOT_ATTEMPTED",mutations_performed:false}}];fs.writeFileSync(f.plist,renderLaunchAgent({label:f.state.launch_agent_label,runnerPath:f.runner.service_executable,programArguments:[],instanceRoot:f.state.instance_root,workingDirectory:f.state.runner_path,activated:true,officialService:true}),{mode:0o600});delete f.state.macos_runner_action_approval;delete f.state.macos_action_approval;f.state.macos_runner_activation.challenge=challenge;const status=macosRuntimeAction("status",f.options);assert.equal(status.status,"PASS",JSON.stringify(status));f.state.macos_runner_activation.challenge="start:"+"0".repeat(64);assert.equal(macosRuntimeAction("status",f.options).error_id,"MACOS-PLIST-NATIVE-PATH-MISMATCH");}finally{f.cleanup();}
+});
+
+test("trusted postclaim requires exact durable single-use claim before mutation",()=>{
+  const f=trustedFixture();try{approveTrustedAction(f,"install");fs.unlinkSync(f.state.macos_runner_bootstrap.claim_path);assert.equal(macosRuntimeAction("install",f.options).error_id,"MACOS-FIRST-BOOT-CLAIM");assert.equal(f.calls.some(x=>x.args?.[0]==="bootstrap"),false);const challenge=approveTrustedAction(f,"install");fs.writeFileSync(f.state.macos_runner_bootstrap.claim_path,JSON.stringify({schema_version:1,installation_id:f.state.installation_id,instance_id:f.state.instance_id,action:"install",attempt:1,challenge:"install:"+"0".repeat(64),pid:process.pid,claimed_at:"2026-10-22T00:00:00Z"}),{mode:0o600});assert.equal(macosRuntimeAction("install",f.options).error_id,"MACOS-FIRST-BOOT-CLAIM");assert.match(challenge,/^install:/);}finally{f.cleanup();}
+});
+
+test("mixed rejected history preserves install while authorizing only start attempt two",()=>{
+  const f=trustedFixture();try{const install=retainedRejection(f,"install"),startFirst=retainedRejection(f,"start"),start=approveTrustedAction(f,"start","REJECTED",2),base=operation=>operation+":"+crypto.createHash("sha256").update(JSON.stringify([f.state.installation_id,f.state.instance_id,f.state.instance_root,f.state.control_repository,f.state.control_repository_id,f.state.sandbox_repository,f.state.sandbox_repository_id,f.state.sandbox_project_key,f.state.runner_label,f.runner.runner_id,f.runner.runner_executable,f.runner.approval_sha256,f.state.browser_profile,f.state.browser_port,f.state.pending_wake_outbox])).digest("hex");fs.mkdirSync(path.dirname(f.plist),{recursive:true,mode:0o700});fs.writeFileSync(f.plist,f.rendered,{mode:0o600});f.state.macos_runner_bootstrap.install_challenge=base("install");f.state.macos_runner_bootstrap.start_challenge=base("start");f.state.macos_runner_bootstrap.rejected_operation="start";f.state.macos_runner_bootstrap.rejections=[install,startFirst];assert.equal(macosRuntimeAction("start",{...f.options,preflightOnly:true}).status,"PASS");assert.match(start,/^start:/);}finally{f.cleanup();}
+});
+
+test("trusted history rejects impossible mixed ordering and contradictory result identities",()=>{
+  const f=trustedFixture();try{const start=retainedRejection(f,"start"),install=retainedRejection(f,"install");approveTrustedAction(f,"install","REJECTED",2);f.state.macos_runner_bootstrap.rejected_operation="install";f.state.macos_runner_bootstrap.rejections=[start,install];assert.equal(macosRuntimeAction("install",f.options).error_id,"MACOS-ACTION-APPROVAL");f.state.macos_runner_bootstrap.rejections=[{...install,result:{...install.result,action:"start"}}];assert.equal(macosRuntimeAction("install",f.options).error_id,"MACOS-ACTION-APPROVAL");}finally{f.cleanup();}
+});
+
+test("trusted claim read rejects mid-inspection metadata and content drift",()=>{
+  const f=trustedFixture();try{approveTrustedAction(f,"install");const claim=f.state.macos_runner_bootstrap.claim_path,read=fs.readSync;let changed=false;fs.readSync=(...args)=>{const value=read(...args);if(!changed){changed=true;fs.writeFileSync(claim,fs.readFileSync(claim,"utf8").replace("install","install"));}return value;};assert.equal(macosRuntimeAction("install",f.options).error_id,"MACOS-FIRST-BOOT-CLAIM");fs.readSync=read;}finally{f.cleanup();}
+});
+
+test("trusted attempt nine and malformed claim history fail before service mutation",()=>{
+  const f=trustedFixture();try{approveTrustedAction(f,"install","REJECTED",8);f.state.macos_runner_bootstrap.rejected_operation="install";f.state.macos_runner_bootstrap.rejections=[{...retainedRejection(f,"install",1),attempt:9}];assert.equal(macosRuntimeAction("install",f.options).error_id,"MACOS-ACTION-APPROVAL");assert.equal(f.calls.some(call=>["bootstrap","kickstart"].includes(call.args?.[0])),false);}finally{f.cleanup();}
+});
+
+test("contradictory rejected history cannot reach a service mutation",()=>{
+  const f=trustedFixture();try{approveTrustedAction(f,"install","REJECTED",2);f.state.macos_runner_bootstrap.rejected_operation="install";f.state.macos_runner_bootstrap.rejections=[{operation:"install",attempt:2,claim_path:path.join(f.state.instance_root,"macos-runner-install-attempt-2-claim.json"),result:{status:"ERROR",pre_mutation_rejection:true,service_action_state:"NOT_ATTEMPTED",mutations_performed:false}}];assert.equal(macosRuntimeAction("install",f.options).error_id,"MACOS-ACTION-APPROVAL");assert.equal(f.calls.some(call=>["bootstrap","kickstart"].includes(call.args?.[0])),false);}finally{f.cleanup();}
+});
+
+test("claim inspection rejects mode link and symlink swaps before service mutation",()=>{
+  const f=trustedFixture();try{approveTrustedAction(f,"install");const claim=f.state.macos_runner_bootstrap.claim_path;fs.chmodSync(claim,0o644);assert.equal(macosRuntimeAction("install",f.options).error_id,"MACOS-FIRST-BOOT-CLAIM");fs.chmodSync(claim,0o600);const alias=path.join(f.state.instance_root,"claim-link");fs.linkSync(claim,alias);assert.equal(macosRuntimeAction("install",f.options).error_id,"MACOS-FIRST-BOOT-CLAIM");fs.unlinkSync(alias);fs.unlinkSync(claim);fs.symlinkSync("/dev/null",claim);assert.equal(macosRuntimeAction("install",f.options).error_id,"MACOS-FIRST-BOOT-CLAIM");assert.equal(f.calls.some(call=>["bootstrap","kickstart"].includes(call.args?.[0])),false);}finally{f.cleanup();}
+});
+
+test("claim inspection rejects conflicting JSON keys before service mutation",()=>{
+  const f=trustedFixture();try{const challenge=approveTrustedAction(f,"install"),claim=f.state.macos_runner_bootstrap.claim_path;fs.writeFileSync(claim,`{"schema_version":1,"schema_version":1,"installation_id":"${f.state.installation_id}","instance_id":"${f.state.instance_id}","action":"install","attempt":1,"challenge":"${challenge}","pid":${process.pid},"claimed_at":"2026-10-22T00:00:00Z"}\n`,{mode:0o600});assert.equal(macosRuntimeAction("install",f.options).error_id,"MACOS-FIRST-BOOT-CLAIM");assert.equal(f.calls.some(call=>["bootstrap","kickstart"].includes(call.args?.[0])),false);}finally{f.cleanup();}
+});
+
+test("trusted claim rejects unicode escaped duplicate JSON field",()=>{
+  const f=trustedFixture();try{const challenge=approveTrustedAction(f,"install"),claim=f.state.macos_runner_bootstrap.claim_path;fs.writeFileSync(claim,`{"schema_version":1,"installation_id":"${f.state.installation_id}","instance_id":"${f.state.instance_id}","action":"install","\\u0061ction":"install","attempt":1,"challenge":"${challenge}","pid":${process.pid},"claimed_at":"2026-10-22T00:00:00Z"}\n`,{mode:0o600});assert.equal(macosRuntimeAction("install",f.options).error_id,"MACOS-FIRST-BOOT-CLAIM");assert.equal(f.calls.some(call=>["bootstrap","kickstart","bootout"].includes(call.args?.[0])),false);}finally{f.cleanup();}
+});
+
+test("trusted claim rejects noncanonical raw UTF8 bytes despite identical decoded text",()=>{
+  const f=trustedFixture();try{
+    f.state.instance_id="instance-\ufffd";
+    const challenge=approveTrustedAction(f,"install"),claim=f.state.macos_runner_bootstrap.claim_path;
+    assert.equal(trustedClaimRead({state:f.state,home:f.home,action:"install",attempt:1,challenge,claim_path:claim}),true);
+    const canonical=fs.readFileSync(claim),replacement=Buffer.from("\ufffd","utf8"),offset=canonical.indexOf(replacement);assert.ok(offset>=0);
+    const invalid=Buffer.concat([canonical.subarray(0,offset),Buffer.from([0xff]),canonical.subarray(offset+replacement.length)]);
+    fs.writeFileSync(claim,invalid,{mode:0o600});
+    assert.equal(macosRuntimeAction("install",f.options).error_id,"MACOS-FIRST-BOOT-CLAIM");assert.equal(f.calls.some(call=>["bootstrap","kickstart","bootout"].includes(call.args?.[0])),false);
+    fs.writeFileSync(claim,`{"schema_version":1,"installation_id":"${f.state.installation_id}","instance_id":"${f.state.instance_id}","action":"install","\\u0061ction":"install","attempt":1,"challenge":"${challenge}","pid":${process.pid},"claimed_at":"2026-10-22T00:00:00Z"}\n`,{mode:0o600});
+    assert.equal(macosRuntimeAction("install",f.options).error_id,"MACOS-FIRST-BOOT-CLAIM");assert.equal(f.calls.some(call=>["bootstrap","kickstart","bootout"].includes(call.args?.[0])),false);
+  }finally{f.cleanup();}
+});
+
+test("trusted install cannot authorize startup or login restart",()=>{
+  const f=trustedFixture();try{const challenge=approveTrustedAction(f,"install");assert.equal(macosRuntimeAction("install",f.options).status,"PASS");f.state.macos_runner_bootstrap={...f.state.macos_runner_bootstrap,phase:"PLIST_INSTALLED",operation:"start",start_challenge:"start:"+"d".repeat(64)};f.state.macos_action_approval="start";f.state.macos_runner_action_approval=challenge;assert.equal(macosRuntimeAction("start",f.options).error_id,"MACOS-ACTION-APPROVAL");}finally{f.cleanup();}
+});
+
+test("trusted start requires installed plist and distinct approval",()=>{
+  const f=trustedFixture();try{approveTrustedAction(f,"start");assert.equal(macosRuntimeAction("start",f.options).error_id,"MACOS-PLIST-MISSING");f.state.macos_runner_action_approval="install:"+"a".repeat(64);assert.equal(macosRuntimeAction("start",f.options).error_id,"MACOS-ACTION-APPROVAL");}finally{f.cleanup();}
+});
+
+test("trusted start rejects changed runner or launchd identity",()=>{
+  const f=trustedFixture();try{approveTrustedAction(f,"start");assert.equal(macosRuntimeAction("start",{...f.options,runnerInspector:()=>({...f.runner,runner_id:"foreign"})}).error_id,"MACOS-RUNNER-APPROVAL-DRIFT");const active=trustedFixture({active:true});try{approveTrustedAction(active,"start");const result=macosRuntimeAction("start",active.options);assert.equal(result.error_id,"MACOS-LAUNCHCTL-IDENTITY");assert.equal(result.mutations_performed,false);}finally{active.cleanup();}}finally{f.cleanup();}
+});
+
+test("trusted single-user readiness blocks Runner actions before inspection",()=>{
+  const f=trustedFixture();try{for(const action of ["install","start"]){let inspected=false;const result=macosRuntimeAction(action,{...f.options,runnerInspector:()=>{inspected=true;return f.runner;}});assert.equal(result.error_id,"MACOS-ACTION-APPROVAL");assert.equal(inspected,false);}}finally{f.cleanup();}
+});
+
 test("legacy and invalid profiles preserve native helper gate and mutation block",()=>{
-  const f=fixture();try{assert.equal(macosRuntimeAction("status",{...f.options,capabilityVerifier:()=>({status:"MISSING"})}).error_id,"MACOS-NATIVE-CAPABILITY-INVALID");const trusted=trustedFixture();try{for(const action of ["install","start","stop","repair"])assert.equal(macosRuntimeAction(action,trusted.options).error_id,"MACOS-RUNNER-SAME-UID-LINEAGE-UNIMPLEMENTED");}finally{trusted.cleanup();}}finally{f.cleanup();}
+  const f=fixture();try{assert.equal(macosRuntimeAction("status",{...f.options,capabilityVerifier:()=>({status:"MISSING"})}).error_id,"MACOS-NATIVE-CAPABILITY-INVALID");const invalid={...f.state,macos_service_policy:{...f.state.macos_service_policy,readiness_profile:TRUSTED_SINGLE_USER_READINESS_PROFILE}};assert.equal(macosRuntimeAction("install",{state:invalid}).error_id,"MACOS-READINESS-PROFILE-INVALID");}finally{f.cleanup();}
 });
 
 test("macOS migration inventory remains read only",()=>{

@@ -119,7 +119,7 @@ export function macosPrerequisites({state={},commandRunner=cmd,nativeHelperPrefl
     session_auth:codex.ok&&commandRunner("codex",["login","status"]).ok,github_auth:gh.ok&&commandRunner("gh",["auth","status"]).ok,
     native_helper,readiness_profile:profile?TRUSTED_SINGLE_USER_READINESS_PROFILE:null,
     legacy_native_helper_gate:profile?"NOT_APPLICABLE_SUPERSEDED":native_helper.status==="PASS"?"PASS":selectionPending?"DEFERRED_PENDING_PROFILE_SELECTION":native_helper.status,
-    runner_lineage:profile?{status:"BLOCKED_UNIMPLEMENTED",error_id:"MACOS-RUNNER-SAME-UID-LINEAGE-UNIMPLEMENTED"}:null};
+    runner_lineage:profile?{status:"ACTION_APPROVAL_REQUIRED",error_id:"MACOS-RUNNER-ACTION-APPROVAL"}:null};
 }
 
 function redactStatus(status) {
@@ -221,14 +221,69 @@ export function renderLaunchAgent({label,runnerPath,instanceRoot,workingDirector
 // rejection. Once activation writes or launchctl runs, an error is uncertain.
 export function macosRuntimeAction(action,options={}) {
   if(hasTrustedSingleUserReadinessProfileMarker(options.state)&&!hasTrustedSingleUserReadinessProfile(options.state)) return {status:"ERROR",error_id:"MACOS-READINESS-PROFILE-INVALID",mutations_performed:false,action,pre_mutation_rejection:true,service_action_state:"NOT_ATTEMPTED"};
-  if(!["status","doctor"].includes(action)&&hasTrustedSingleUserReadinessProfile(options.state)) return {status:"BLOCKED_UNIMPLEMENTED",error_id:"MACOS-RUNNER-SAME-UID-LINEAGE-UNIMPLEMENTED",readiness_profile:TRUSTED_SINGLE_USER_READINESS_PROFILE,mutations_performed:false,action,pre_mutation_rejection:true,service_action_state:"NOT_ATTEMPTED"};
+  if(hasTrustedSingleUserReadinessProfile(options.state)&&["stop","repair"].includes(action)) return {status:"BLOCKED_UNIMPLEMENTED",error_id:"MACOS-RUNNER-TRUSTED-ACTION-UNSUPPORTED",readiness_profile:TRUSTED_SINGLE_USER_READINESS_PROFILE,mutations_performed:false,action,pre_mutation_rejection:true,service_action_state:"NOT_ATTEMPTED"};
   const result=macosRuntimeActionImpl(action,options);
   return result.status!=="PASS"&&result.mutations_performed===false?{...result,pre_mutation_rejection:true,service_action_state:"NOT_ATTEMPTED"}:result;
 }
+function trustedActionChallenge(action,state,runner,attempt=1){
+  const binding=[state.installation_id,state.instance_id,state.instance_root,state.control_repository,state.control_repository_id,state.sandbox_repository,state.sandbox_repository_id,state.sandbox_project_key,state.runner_label,runner.runner_id,runner.runner_executable,runner.approval_sha256,state.browser_profile,state.browser_port,state.pending_wake_outbox];
+  if(attempt!==1)binding.push({proven_rejection_attempt:attempt});
+  return action+":"+crypto.createHash("sha256").update(JSON.stringify(binding)).digest("hex");
+}
+function trustedRejectionHistory(journal,state,runner,action,home) {
+  if(journal?.phase!=="REJECTED"||journal.rejected_operation!==action||!Array.isArray(journal.rejections)||journal.rejections.length<1) return null;
+  const attempts={install:0,start:0};
+  let previous=0;
+  for(const entry of journal.rejections) {
+    const order=entry?.operation==="install"?0:1;
+    if(!entry||!["install","start"].includes(entry.operation)||order<previous||!Number.isSafeInteger(entry.attempt)||entry.attempt!==attempts[entry.operation]+1||entry.attempt>8) return null;
+    const claim=path.join(state.instance_root,`macos-runner-${entry.operation}${entry.attempt===1?"":`-attempt-${entry.attempt}`}-claim.json`);
+    if(entry.installation_id!==state.installation_id||entry.claim_path!==claim||entry.action_challenge!==trustedActionChallenge(entry.operation,state,runner,entry.attempt)||entry.result?.status!=="ERROR"||entry.result?.action!==entry.operation||entry.result?.pre_mutation_rejection!==true||entry.result?.service_action_state!=="NOT_ATTEMPTED"||entry.result?.mutations_performed!==false||!trustedClaimRead({state,home,action:entry.operation,attempt:entry.attempt,challenge:entry.action_challenge,claim_path:entry.claim_path})) return null;
+    attempts[entry.operation]++;
+    previous=order;
+  }
+  return attempts[action]||null;
+}
+export function trustedClaimRead({state,home,action,attempt,challenge,claim_path}) {
+  const root=path.join(path.resolve(home),".chatgpt-codex-orchestrator","instances",canonicalInstallationId(state.installation_id));
+  if(state.instance_root!==root||!Number.isSafeInteger(attempt)||attempt<1||attempt>8) return false;
+  const file=path.join(root,`macos-runner-${action}${attempt===1?"":`-attempt-${attempt}`}-claim.json`);
+  if(claim_path!==file||!fs.constants.O_NOFOLLOW) return false;
+  try {
+    const before=fs.lstatSync(file);
+    const identical=(a,b)=>["dev","ino","uid","gid","mode","nlink","size","mtimeMs","ctimeMs"].every(key=>a[key]===b[key]);
+    if(!before.isFile()||before.isSymbolicLink()||before.nlink!==1||before.uid!==owner()||(before.mode&0o777)!==0o600||before.size<1||before.size>4096) return false;
+    const fd=fs.openSync(file,fs.constants.O_RDONLY|fs.constants.O_NOFOLLOW|fs.constants.O_NONBLOCK);
+    let bytes,after;
+    try {
+      const opened=fs.fstatSync(fd);if(!identical(before,opened)) return false;
+      const body=Buffer.alloc(4096),read=fs.readSync(fd,body,0,4096,null),overflow=Buffer.alloc(1);
+      if(fs.readSync(fd,overflow,0,1,null)!==0) return false;
+      if(read!==opened.size) return false;
+      bytes=body.subarray(0,read);after=fs.fstatSync(fd);
+    } finally { fs.closeSync(fd); }
+    const final=fs.lstatSync(file);
+    if(!identical(before,after)||!identical(before,final)) return false;
+    const claim=JSON.parse(bytes.toString("utf8"));
+    const keys=["schema_version","installation_id","instance_id","action","attempt","challenge","pid","claimed_at"];
+    if(!claim||Object.getPrototypeOf(claim)!==Object.prototype||Object.keys(claim).length!==keys.length||!keys.every(key=>Object.hasOwn(claim,key))||claim.schema_version!==1||claim.installation_id!==state.installation_id||claim.instance_id!==state.instance_id||claim.action!==action||claim.attempt!==attempt||claim.challenge!==challenge||!Number.isSafeInteger(claim.pid)||claim.pid<=0||!Number.isFinite(Date.parse(claim.claimed_at||""))) return false;
+    return bytes.equals(Buffer.from(JSON.stringify({schema_version:1,installation_id:state.installation_id,instance_id:state.instance_id,action,attempt,challenge,pid:claim.pid,claimed_at:claim.claimed_at})+"\n","utf8"));
+  } catch { return false; }
+}
+function trustedClaim({state,home,action,journal,challenge}) { return trustedClaimRead({state,home,action,attempt:journal?.attempt,challenge,claim_path:journal?.claim_path}); }
 function macosRuntimeActionImpl(action,{state={},commandRunner=cmd,home=HOME(),platform=process.platform,arch=process.arch,capabilityVerifier=verifyMacosNativeCapability,runnerInspector=inspectMacosRunnerBootstrap,identityReader,preflightOnly=false}={}) {
   if(!["status","doctor","install","start","stop","repair"].includes(action)) return {status:"ERROR",mutations_performed:false,action};
   const readonly=action==="status"||action==="doctor";
   const trusted=hasTrustedSingleUserReadinessProfile(state);
+  const journal=state.macos_runner_bootstrap;
+  const approvedChallenge=typeof state.macos_runner_action_approval==="string"&&new RegExp(`^${action}:[a-f0-9]{64}$`).test(state.macos_runner_action_approval);
+  // The installer has verified the current runner but cannot journal it until
+  // this no-side-effect preflight succeeds.
+  const preclaimBase=action==="install"?!journal:journal?.phase==="PLIST_INSTALLED"&&journal.operation==="install";
+  const preclaimRetry=journal?.phase==="REJECTED"&&journal.rejected_operation===action;
+  const preclaimPreflight=trusted&&preflightOnly&&state.macos_action_approval===action&&approvedChallenge&&(preclaimBase||preclaimRetry);
+  const trustedActionApproved=trusted&&["install","start"].includes(action)&&state.macos_action_approval===action&&state.macos_runner_action_approval===journal?.action_challenge&&journal?.operation===action&&journal?.phase===(action==="install"?"INSTALL_INTENT":"START_INTENT")&&journal?.runner_id;
+  if(!readonly&&trusted&&!trustedActionApproved&&!preclaimPreflight) return {status:"NEEDS_USER_ACTION",error_id:"MACOS-ACTION-APPROVAL",mutations_performed:false,action:"Approve this exact trusted macOS action through the official installer."};
   const preflight=migrationPreflight({state,home,commandRunner});
   if(preflight.status!=="READY") {
     const unknown=preflight.conflicts.some(x=>x.kind==="runner_ownership_unknown");
@@ -238,6 +293,15 @@ function macosRuntimeActionImpl(action,{state={},commandRunner=cmd,home=HOME(),p
   try { runner=runnerInspector({state,home,platform,arch,commandRunner,requireOnline:false}); }
   catch(error) { return {status:"ERROR",error_id:"MACOS-RUNNER-VERIFY",mutations_performed:false,details:String(error.message||error)}; }
   if(runner?.status!=="PASS") return {...runner,status:runner?.status||"ERROR",mutations_performed:false,preflight,plist_verified:false};
+  if(trusted&&journal&&(!["INSTALL_INTENT","PLIST_INSTALLED","START_INTENT","STARTED","REJECTED","ERROR"].includes(journal.phase)||!["install","start"].includes(journal.operation)||typeof journal.runner_id!=="string"||!journal.install_challenge||!journal.start_challenge)) return {status:"ERROR",error_id:"MACOS-FIRST-BOOT-JOURNAL",mutations_performed:false,preflight,plist_verified:false};
+  if(trusted&&journal&&journal.runner_id!==runner.runner_id) return {status:"ERROR",error_id:"MACOS-RUNNER-APPROVAL-DRIFT",mutations_performed:false,preflight,plist_verified:false};
+  if(trusted&&journal&&(journal.install_challenge!==trustedActionChallenge("install",state,runner)||journal.start_challenge!==trustedActionChallenge("start",state,runner))) return {status:"ERROR",error_id:"MACOS-ACTION-APPROVAL",mutations_performed:false,preflight,plist_verified:false};
+  const rejectedAttempts=trustedRejectionHistory(journal,state,runner,action,home);
+  if(trusted&&preclaimRetry&&rejectedAttempts===null) return {status:"ERROR",error_id:"MACOS-ACTION-APPROVAL",mutations_performed:false,preflight,plist_verified:false};
+  const preclaimAttempt=preclaimRetry?rejectedAttempts+1:1;
+  const expectedActionChallenge=journal?.action_challenge&&trustedActionChallenge(journal.operation,state,runner,journal.attempt);
+  if(trusted&&journal&&journal.action_challenge!==undefined&&journal.action_challenge!==expectedActionChallenge) return {status:"ERROR",error_id:"MACOS-ACTION-APPROVAL",mutations_performed:false,preflight,plist_verified:false};
+  if(trusted&&!readonly&&((preclaimPreflight&&state.macos_runner_action_approval!==trustedActionChallenge(action,state,runner,preclaimAttempt))||(trustedActionApproved&&state.macos_runner_action_approval!==expectedActionChallenge))) return {status:"ERROR",error_id:"MACOS-ACTION-APPROVAL",mutations_performed:false,preflight,plist_verified:false};
   if(trusted&&(runner.local_process_observation!=="trusted-single-user-ps-v1"||!Array.isArray(runner.local_service_pids)||runner.local_listener_pid!==null&&(!Number.isSafeInteger(runner.local_listener_pid)||!runner.local_listener_identity)||runner.local_listener_pid===null&&(runner.local_listener_identity!==null&&runner.local_listener_identity!==undefined||runner.local_service_pids.length))) return {status:"ERROR",error_id:"MACOS-RUNNER-LINEAGE-INVALID",mutations_performed:false,preflight,plist_verified:false};
   const authorizationKeys=["runner_executable","program_arguments","service_executable","service_arguments","service_node","service_script","service_sha256","runner_id","approval_sha256","config_sha256","config_identity","env_sha256","path_sha256"];
   const approvedRunnerAuthorization=JSON.stringify(authorizationKeys.map(key=>runner[key]));
@@ -260,7 +324,8 @@ function macosRuntimeActionImpl(action,{state={},commandRunner=cmd,home=HOME(),p
   }
   const personal=hasMacosPersonalUsePolicy(state)||trusted;
   const activation=state.macos_runner_activation;
-  const activated=personal&&activation?.installation_id===state.installation_id&&activation?.approval_sha256===runner.approval_sha256&&activation?.runner_id===runner.runner_id&&activation?.login_restart_approved===true&&typeof activation?.challenge==="string"&&/^start:[a-f0-9]{64}$/.test(activation.challenge)&&(activation.challenge===state.macos_runner_action_approval||activation.challenge===state.macos_runner_bootstrap?.start_challenge)&&Number.isFinite(Date.parse(activation.approved_at||""));
+  const startedJournal=journal?.phase==="STARTED"&&journal.operation==="start"&&Number.isSafeInteger(journal.attempt)&&journal.attempt>=1&&journal.attempt<=8&&journal.action_challenge===trustedActionChallenge("start",state,runner,journal.attempt);
+  const activated=personal&&activation?.installation_id===state.installation_id&&activation?.approval_sha256===runner.approval_sha256&&activation?.runner_id===runner.runner_id&&activation?.login_restart_approved===true&&typeof activation?.challenge==="string"&&/^start:[a-f0-9]{64}$/.test(activation.challenge)&&(activation.challenge===state.macos_runner_action_approval||trusted&&startedJournal&&activation.challenge===journal.action_challenge||!trusted&&activation.challenge===state.macos_runner_bootstrap?.start_challenge)&&Number.isFinite(Date.parse(activation.approved_at||""));
   if(personal&&(!runner.service_executable||runner.service_executable!==path.join(state.runner_path,"bin","runsvc.sh")||!Array.isArray(runner.service_arguments)||runner.service_arguments.length!==0))return {status:"ERROR",error_id:"MACOS-RUNNER-SERVICE-MODEL",mutations_performed:false};
   const rendering=enabled=>renderLaunchAgent({label,runnerPath:personal?runner.service_executable:runner.runner_executable,programArguments:personal?runner.service_arguments:runner.program_arguments,instanceRoot:root,workingDirectory:state.runner_path,nativeHelperPath:trusted?null:capability.helper_path,nativeProcessIdentity:!trusted,activated:enabled,officialService:personal});
   const activeRendering=activated&&["START_INTENT","STARTED","ERROR"].includes(state.macos_runner_bootstrap?.phase);
@@ -281,8 +346,9 @@ function macosRuntimeActionImpl(action,{state={},commandRunner=cmd,home=HOME(),p
       serviceProof=prove(currentProof.output);if(personal&&listedJobPid(ownEntries[0])!==serviceProof.pid)throw new Error("Listed job PID differs from the native inspected imported job");readApprovedLaunchAgent(plist,expectedPlist,plistBinding);
     }catch(error){return {status:"ERROR",error_id:"MACOS-LAUNCHCTL-IDENTITY",mutations_performed:false,action,launchctl_state:"unknown",details:String(error.message||error)};}
     if(readonly&&personal&&!trusted)try{rebindMacosRunnerConfiguration({state,home,approval:runner});}catch(error){return {status:"ERROR",error_id:error.code||"MACOS-RUNNER-CONFIG",details:String(error.message||error),mutations_performed:false,plist_verified:false};}
-    if(readonly) return {status:"PASS",mutations_performed:false,readiness_profile:trusted?TRUSTED_SINGLE_USER_READINESS_PROFILE:undefined,runner_action_state:trusted?"BLOCKED_UNIMPLEMENTED":undefined,launchctl_checked:true,launchctl_state:active?"loaded":"not-loaded",plist_exists:plistVerified,plist_verified:plistVerified,listener_running:serviceProof.listener_running,listener_identity:serviceProof.listener_identity,job_identity:serviceProof.job_identity,runner_state:serviceProof.listener_running?"listener-running":active?"loaded-idle":"not-loaded",github_online:runner.runner_status==="online",runner,preflight};
+    if(readonly) return {status:"PASS",mutations_performed:false,readiness_profile:trusted?TRUSTED_SINGLE_USER_READINESS_PROFILE:undefined,runner_action_state:trusted?"ACTION_APPROVAL_REQUIRED":undefined,launchctl_checked:true,launchctl_state:active?"loaded":"not-loaded",plist_exists:plistVerified,plist_verified:plistVerified,listener_running:serviceProof.listener_running,listener_identity:serviceProof.listener_identity,job_identity:serviceProof.job_identity,runner_state:serviceProof.listener_running?"listener-running":active?"loaded-idle":"not-loaded",github_online:runner.runner_status==="online",runner,preflight};
     if(state.macos_setup_approved!==true||state.macos_action_approval!==action) return {status:"NEEDS_USER_ACTION",error_id:"MACOS-ACTION-APPROVAL",mutations_performed:false,action:"Approve this exact macOS action: "+action};
+    if(trusted&&!preflightOnly&&!trustedClaim({state,home,action,journal,challenge:expectedActionChallenge})) return {status:"ERROR",error_id:"MACOS-FIRST-BOOT-CLAIM",mutations_performed:false,action};
     if(active&&(action==="install"||action==="repair"||action==="start")) return {status:"ERROR",error_id:"MACOS-RUNNER-ACTIVE",mutations_performed:false,action,launchctl_state:"loaded",plist_verified:plistVerified,preflight};
     if((action==="install"||action==="repair")&&activated)return {status:"ERROR",error_id:"MACOS-ACTIVATION-ALREADY-APPROVED",mutations_performed:false};
     if(action==="install"||action==="repair") {
