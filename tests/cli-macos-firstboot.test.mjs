@@ -660,3 +660,371 @@ test("trusted uncertain start bootstrap preserves claim and forbids automatic re
   const [intent,error]=f.snapshots.slice(-2);assert.notStrictEqual(intent,error);assert.notStrictEqual(intent,f.state);assert.notStrictEqual(intent.macos_runner_bootstrap,f.state.macos_runner_bootstrap);assert.notStrictEqual(error,f.state);assert.notStrictEqual(error.macos_runner_bootstrap,f.state.macos_runner_bootstrap);assert.equal(intent.macos_runner_bootstrap.phase,"START_INTENT");assert.equal(intent.macos_runner_bootstrap.operation,"start");assert.equal(intent.macos_runner_bootstrap.attempt,1);assert.equal(intent.macos_runner_bootstrap.action_challenge,startChallenge);assert.equal(intent.macos_runner_bootstrap.claim_path,claimPath);assert.equal(intent.macos_runner_action_approval,undefined);assert.equal(intent.macos_action_approval,undefined);assert.equal(error.macos_runner_bootstrap.phase,"ERROR");assert.equal(error.macos_runner_bootstrap.operation,"start");assert.equal(error.macos_runner_bootstrap.attempt,1);assert.equal(error.macos_runner_bootstrap.action_challenge,startChallenge);assert.equal(error.macos_runner_bootstrap.claim_path,claimPath);assert.equal(error.macos_runner_action_approval,undefined);assert.equal(error.macos_action_approval,undefined);assert.equal(error.macos_runner_bootstrap.result.status,"ERROR");assert.equal(error.macos_runner_bootstrap.result.mutations_performed,"UNKNOWN");assert.equal(error.macos_runner_bootstrap.result.error_id,result.error_id);
   const snapshots=f.snapshots.length,journal=JSON.stringify(error),claimFiles=fs.readdirSync(f.state.instance_root).filter(file=>/macos-runner-(?:install|start)(?:-attempt-\d+)?-claim\.json/.test(file)).sort();result=advance();assert.equal(result.error_id,"MACOS-FIRST-BOOT-INTERRUPTED");assert.equal(f.snapshots.length,snapshots);assert.equal(JSON.stringify(f.snapshots.at(-1)),journal);assert.deepEqual(claims,[{action:"install",attempt:1,challenge:installChallenge},{action:"start",attempt:1,challenge:startChallenge}]);assert.deepEqual(fs.readdirSync(f.state.instance_root).filter(file=>/macos-runner-(?:install|start)(?:-attempt-\d+)?-claim\.json/.test(file)).sort(),claimFiles);assert.equal(bootstrapCalls,1);assert.equal(bootoutCalls,0);assert.deepEqual(fs.readFileSync(installClaim),installBytes);assert.deepEqual(fs.readFileSync(claimPath),startBytes);
 });
+
+test("G3 legacy evidence isolation: CLI passive paths use real classification and no external calls", async t => {
+  const { inspectMacosExistingInstanceRecovery } = await import("../src/lib/macos-existing-instance-recovery.mjs");
+  const home = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "g3-cli-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const root = path.join(home, ".chatgpt-codex-orchestrator", "instances", "1832f0bb");
+  fs.mkdirSync(path.join(root, "short-turn-evidence"), { recursive: true, mode: 0o700 });
+  const state = { preferred_language: "en", macos_setup_approved: true, fresh_first_install_bootstrap: true, fresh_first_install_legacy_instance_id: "1832f0bb" };
+  const before = JSON.stringify(state), emitted = [];
+  const context = vm.createContext({ path, os: { homedir: () => home }, process: { platform: "darwin" }, loadState: () => state, ensureStateLanguage: () => "en", valueOf: () => undefined, inspectMacosExistingInstanceRecovery, isMacosFreshFirstInstallBootstrap, emit: result => emitted.push(result), macosTrustedRecoveryEvidence: () => assert.fail("no external evidence calls"), commandExists: () => assert.fail("no commands") });
+  const report = cli.slice(cli.indexOf("function macosRecoveryReport("), cli.indexOf("function macosBootstrapMayAdvance("));
+  const dry = cli.slice(cli.indexOf("function dryRun() {"), cli.indexOf("function codexLogin()"));
+  const preflight = cli.slice(cli.indexOf("function recoveryPreflight() {"), cli.indexOf("function reportProblem()"));
+  vm.runInContext(report + dry + preflight + "\nthis.dry=dryRun;this.preflight=recoveryPreflight;", context);
+  for (const run of [context.dry, context.preflight]) { run(); const result = emitted.pop(); assert.equal(result.status, "NEEDS_USER_ACTION"); assert.equal(result.action_id, "macos_official_fresh_preparation"); assert.equal(result.installation_authorized, false); assert.equal(result.runtime_readiness, "NOT_ASSESSED"); }
+  fs.writeFileSync(path.join(root, "unexpected"), "x", { mode: 0o600 });
+  for (const run of [context.dry, context.preflight]) { run(); const result = emitted.pop(); assert.equal(result.status, "ERROR"); assert.equal(result.official_fresh_first_install_bootstrap_eligible, false); }
+  assert.equal(JSON.stringify(state), before);
+});
+
+test("G3 legacy evidence isolation: actual migration preflight blocks old runner observations before writes", async t => {
+  const { inspectMacosExistingInstanceRecovery } = await import("../src/lib/macos-existing-instance-recovery.mjs");
+  const { migrationPreflight } = await import("../src/lib/macos-platform.mjs");
+  const home = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "g3-runtime-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(home, ".chatgpt-codex-orchestrator", "instances", "1832f0bb", "short-turn-evidence"), { recursive: true, mode: 0o700 });
+  for (const [name, stateExtra, response] of [
+    ["old job", {}, { ok: true, output: "123 0 com.chatgpt.codex.old" }],
+    ["old job without PID", {}, { ok: true, output: "- 0 com.chatgpt.codex.old" }],
+    ["failed observation", {}, { ok: false, output: "failure" }],
+    ["unknown ownership", { runner_label: "codex-orchestrator-old" }, { ok: true, output: "" }]
+  ]) {
+    const state = { preferred_language: "en", macos_setup_approved: true, fresh_first_install_bootstrap: true, fresh_first_install_legacy_instance_id: "1832f0bb", ...stateExtra };
+    const recovery = inspectMacosExistingInstanceRecovery({ home, state });
+    const emitted = [], calls = [];
+    const context = vm.createContext({ process: { platform: "darwin" }, loadState: () => state, ensureStateLanguage: () => "en", hasTrustedSingleUserReadinessProfileMarker: () => false, macosRecoveryReport: () => recovery, isMacosFreshFirstInstallBootstrap, macosTrustedRecoveryEvidence: () => ({ status: "ABSENT" }), macosFreshBootstrapMayAdvance: () => false, macosPrerequisites: () => ({ node: true, git: true, gh: true, codex: true, session_auth: true, legacy_native_helper_gate: "PASS" }), migrationPreflight: ({ state: actual }) => migrationPreflight({ state: actual, home, commandRunner: (command, args) => { calls.push([command, args]); return response; } }), emit: result => emitted.push(result), saveState: () => assert.fail("save"), prepareMigrationIntent: () => assert.fail("intent"), prepareControlEnvironment: () => assert.fail("repositories") });
+    vm.runInContext(cli.slice(cli.indexOf("function runSetup() {"), cli.indexOf("function codexLogin()")) + "\nthis.run=runSetup;", context);
+    context.run();
+    assert.equal(emitted[0].error_id, "MACOS-PREREQUISITE-OR-MIGRATION", name);
+    assert.equal(emitted[0].migration.status, "CONFLICT", name);
+    assert.equal(calls.length, 1, name);
+  }
+});
+
+function g3RegistrationFixture(t, { installationId = "abcd1234-pending-install", instanceId = "abcd1234" } = {}) {
+  const home = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "trusted-first-registration-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  fs.chmodSync(home, 0o700);
+  const instance = path.join(home, ".chatgpt-codex-orchestrator", "instances", instanceId);
+  const project = `sandbox-${instanceId}`;
+  const control = defaultLocalPaths({ home, installationId, projectKey: project }).control;
+  fs.mkdirSync(control, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(instance, { recursive: true, mode: 0o700 });
+  const state = {
+    schema_version: 1, installation_id: installationId, instance_id: instanceId,
+    instance_platform: "darwin", instance_arch: "arm64", instance_root: instance,
+    control_clone_path: control, chat_route_file: path.join(instance, "chat-routes.json"),
+    github_login: "owner", github_owner_id: "42", control_repository_id: "101", sandbox_repository_id: "202",
+    control_repository: `owner/chatgpt-codex-orchestrator-control-${instanceId}`,
+    sandbox_repository: `owner/chatgpt-codex-orchestrator-sandbox-${instanceId}`,
+    sandbox_project_key: project, reviewer_chat_url: "https://chatgpt.com/c/pending-first-registration",
+    macos_setup_approved: true, github_plugin_authorized: true, github_plugin_authorization_verified: true,
+    generated_repo_authorized: true, control_environment_ready: true, target_environment_ready: false,
+    sandbox_only: true, sandbox_verified: false
+  };
+  Object.assign(state, {
+    github_plugin_authorization_installation_id: installationId,
+    github_plugin_authorization_control_repository: state.control_repository,
+    github_plugin_authorization_sandbox_repository: state.sandbox_repository,
+    github_plugin_authorization_chat_url: state.reviewer_chat_url
+  });
+  const issueNumber = 51;
+  state.sandbox_chat_registration_issue = `https://github.com/${state.control_repository}/issues/${issueNumber}`;
+  const metadata = {
+    schema_version: 1, instance_id: instanceId, installation_id: installationId,
+    platform: "darwin", arch: "arm64", instance_root: instance, chat_route_file: state.chat_route_file,
+    control_repository: state.control_repository, sandbox_repository: state.sandbox_repository,
+    control_repository_id: state.control_repository_id, sandbox_repository_id: state.sandbox_repository_id,
+    github_owner_id: state.github_owner_id, trusted_github_username: state.github_login, role: "control",
+    origin: `https://github.com/${state.control_repository}.git`, remote_origin: `https://github.com/${state.control_repository}.git`
+  };
+  const intent = {
+    schema_version: 1, phase: "PREPARED", installation_id: installationId,
+    generated_repositories: { control: state.control_repository, sandbox: state.sandbox_repository },
+    destination: { path: instance }
+  };
+  const route = {
+    route: `chat-${issueNumber}`, project, status: "active", chat_url: state.reviewer_chat_url,
+    registration_issue: issueNumber, installation_id: installationId
+  };
+  const issue = {
+    number: issueNumber, state: "open", html_url: state.sandbox_chat_registration_issue,
+    url: `https://api.github.com/repos/${state.control_repository}/issues/${issueNumber}`, user: { login: "owner", id: 42 },
+    title: `[CHAT-REGISTER] INSTALL-CHAT-${instanceId}-${project}-${crypto.createHash("sha256").update(state.reviewer_chat_url).digest("hex").slice(0, 16)}`,
+    body: JSON.stringify({ project, chat_url: state.reviewer_chat_url, installation_id: installationId })
+  };
+  const repositories = Object.fromEntries(["control", "sandbox"].map(role => {
+    const repository = state[`${role}_repository`];
+    return [repository, {
+      id: Number(state[`${role}_repository_id`]), private: true, visibility: "private",
+      name: repository.split("/")[1], full_name: repository, owner: { login: "owner", id: 42 },
+      description: `ChatGPT Codex Orchestrator ${role} installation ${installationId}`
+    }];
+  }));
+  const writeJson = (file, value) => fs.writeFileSync(file, JSON.stringify(value) + "\n", { mode: 0o600 });
+  const controlFile = path.join(control, "instance.json");
+  const intentFile = path.join(instance, "migration-intent.json");
+  writeJson(controlFile, metadata);
+  writeJson(intentFile, intent);
+  writeJson(state.chat_route_file, { version: 1, instance_id: state.instance_id, installation_id: state.installation_id, control_repository: state.control_repository, sandbox_repository: state.sandbox_repository, routes: [] });
+  const calls = [];
+  const f = { home, instance, control, state, metadata, intent, route, issue, repositories, calls, writeJson, controlFile, intentFile };
+  f.githubApi = {
+    getAuthenticatedUser: () => { calls.push(["user"]); return { login: "owner", id: 42 }; },
+    getRepository: repository => { calls.push(["repository", repository]); return repositories[repository]; },
+    getIssue: (repository, number) => { calls.push(["issue", repository, number]); return f.issue; }
+  };
+  f.queue = () => writeJson(state.chat_route_file, { version: 1, routes: [f.route] });
+  f.callbackId = `chat-register-${project}-${issueNumber}`;
+  f.outbox = path.join(instance, "pending-wakes", `${f.callbackId}.json`);
+  f.deliveryJournal = path.join(instance, "registration-delivery", `${f.callbackId}.json`);
+  f.writeDeliveryProof = () => {
+    for (const directory of [path.dirname(f.outbox), path.dirname(f.deliveryJournal)]) {
+      fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+      fs.chmodSync(directory, 0o700);
+    }
+    writeJson(f.outbox, {
+      delivery_state: "DELIVERED", delivery_owner: "register-chat.mjs", callback_id: f.callbackId,
+      chat_url: state.reviewer_chat_url, verified_by: "existing-user-message"
+    });
+    writeJson(f.deliveryJournal, {
+      schema_version: 1, status: "DELIVERED", verified_role: "user", verified_by: "existing-user-message",
+      callback_id: f.callbackId, chat_url: state.reviewer_chat_url,
+      callback_state_sha256: crypto.createHash("sha256").update(fs.readFileSync(f.outbox)).digest("hex")
+    });
+  };
+  f.verify = (options = {}) => verifyTrustedRecoveryEvidence({ state, home, githubApi: f.githubApi, requireReceipt: false, ...options });
+  return f;
+}
+
+
+test("G3 legacy evidence isolation: real two-root provenance and registration stages", async t => {
+  const { inspectMacosExistingInstanceRecovery } = await import("../src/lib/macos-existing-instance-recovery.mjs");
+  const f = g3RegistrationFixture(t);
+  Object.assign(f.state, { fresh_first_install_bootstrap: true, fresh_first_install_legacy_instance_id: "1832f0bb" });
+  fs.mkdirSync(path.join(path.dirname(f.instance), "1832f0bb", "short-turn-evidence"), { recursive: true, mode: 0o700 });
+  const context = vm.createContext({ path, os: { homedir: () => f.home }, canonicalInstallationId, findRegisteredChatRoute });
+  vm.runInContext(cli.slice(cli.indexOf("function macosBootstrapMayAdvance("), cli.indexOf("function macosSelectedAwaitingFirstRoute(")) + "\nthis.fresh=macosFreshBootstrapMayAdvance;", context);
+  const check = expected => { const recovery = inspectMacosExistingInstanceRecovery({ home: f.home, state: f.state }); const evidence = f.verify(); assert.equal(evidence.status, expected); assert.equal(context.fresh(f.state, recovery, evidence), true, expected); return { recovery, evidence }; };
+  f.state.generated_repo_authorized = false;
+  check("NEW_INSTALL_AWAITING_CONNECTOR_AUTH");
+  f.state.generated_repo_authorized = true;
+  check("NEW_INSTALL_CONTROL_PREPARED_AWAITING_ROUTE");
+  f.queue();
+  check("NEW_INSTALL_REGISTRATION_PENDING");
+  assert.equal(findRegisteredChatRoute(f.state, { projectKey: f.state.sandbox_project_key, chatUrl: f.state.reviewer_chat_url }), null);
+  f.writeDeliveryProof();
+  const delivered = findRegisteredChatRoute(f.state, { projectKey: f.state.sandbox_project_key, chatUrl: f.state.reviewer_chat_url });
+  assert.deepEqual(delivered, f.route);
+  f.state.sandbox_review_route = delivered.route;
+  check("NEW_INSTALL_PREPARED");
+  assert.equal(fs.existsSync(path.join(f.instance, "instance.json")), false);
+});
+
+test("G3 legacy evidence isolation: actual provenance matrix", async t => {
+for (const [name, mutate] of [
+  ["state owner", f => { f.state.github_login = "foreign"; }],
+  ["state owner ID", f => { f.state.github_owner_id = "43"; }],
+  ["Control owner", f => { f.metadata.trusted_github_username = "foreign"; f.writeJson(f.controlFile, f.metadata); }],
+  ["remote owner", f => { f.repositories[f.state.control_repository].owner.id = 43; }],
+  ["remote duplicate ID", f => { f.repositories[f.state.sandbox_repository].id = 101; }],
+  ["remote swapped ID", f => { f.repositories[f.state.control_repository].id = 202; f.repositories[f.state.sandbox_repository].id = 101; }],
+  ["migration identity", f => { f.intent.installation_id = "wrong"; f.writeJson(f.intentFile, f.intent); }],
+  ["migration phase", f => { f.intent.phase = "WRONG"; f.writeJson(f.intentFile, f.intent); }],
+  ["foreign origin", f => { f.metadata.origin = "https://github.com/foreign/control.git"; f.writeJson(f.controlFile, f.metadata); }],
+  ["target enabled", f => { f.state.target_environment_ready = true; }],
+  ["route project", f => { f.route.project = "sandbox-other"; f.queue(); }],
+  ["route chat", f => { f.route.chat_url = "https://chatgpt.com/c/foreign"; f.queue(); }],
+  ["duplicate route", f => { f.writeJson(f.state.chat_route_file, { version: 1, routes: [f.route, f.route] }); }]
+]) {
+  const { inspectMacosExistingInstanceRecovery } = await import("../src/lib/macos-existing-instance-recovery.mjs");
+  const f = g3RegistrationFixture(t); Object.assign(f.state, { fresh_first_install_bootstrap: true, fresh_first_install_legacy_instance_id: "1832f0bb" });
+  fs.mkdirSync(path.join(path.dirname(f.instance), "1832f0bb", "short-turn-evidence"), { recursive: true, mode: 0o700 }); mutate(f);
+  const recovery = inspectMacosExistingInstanceRecovery({ home: f.home, state: f.state }), evidence = f.verify();
+  const context = vm.createContext({ path, os: { homedir: () => f.home }, canonicalInstallationId, findRegisteredChatRoute });
+  vm.runInContext(cli.slice(cli.indexOf("function macosBootstrapMayAdvance("), cli.indexOf("function macosSelectedAwaitingFirstRoute(")) + "\nthis.fresh=macosFreshBootstrapMayAdvance;", context);
+  assert.equal(context.fresh(f.state, recovery, evidence), false);
+}
+});
+
+test("G3 legacy evidence isolation: delivery integrity matrix", t => {
+for (const [name, mutate] of [
+  ["assistant role", f => { const journal = JSON.parse(fs.readFileSync(f.deliveryJournal)); journal.verified_role = "assistant"; f.writeJson(f.deliveryJournal, journal); }],
+  ["bad digest", f => { const journal = JSON.parse(fs.readFileSync(f.deliveryJournal)); journal.callback_state_sha256 = "0".repeat(64); f.writeJson(f.deliveryJournal, journal); }]
+]) {
+  const f = g3RegistrationFixture(t); f.queue(); f.writeDeliveryProof(); mutate(f);
+  assert.equal(findRegisteredChatRoute(f.state, { projectKey: f.state.sandbox_project_key, chatUrl: f.state.reviewer_chat_url }), null);
+  f.state.sandbox_review_route = f.route.route; assert.notEqual(f.verify().status, "NEW_INSTALL_PREPARED");
+}
+});
+
+test("G3 legacy evidence isolation: continuation markers require exact fields and identity omission shape", async t => {
+  const { inspectMacosExistingInstanceRecovery } = await import("../src/lib/macos-existing-instance-recovery.mjs");
+  const f = g3RegistrationFixture(t); Object.assign(f.state, { fresh_first_install_bootstrap: true, fresh_first_install_legacy_instance_id: "1832f0bb" });
+  fs.mkdirSync(path.join(path.dirname(f.instance), "1832f0bb", "short-turn-evidence"), { recursive: true, mode: 0o700 });
+  const recovery = inspectMacosExistingInstanceRecovery({ home: f.home, state: f.state }), evidence = f.verify();
+  const context = vm.createContext({ path, os: { homedir: () => f.home }, canonicalInstallationId, findRegisteredChatRoute });
+  vm.runInContext(cli.slice(cli.indexOf("function macosBootstrapMayAdvance("), cli.indexOf("function macosSelectedAwaitingFirstRoute(")) + "\nthis.fresh=macosFreshBootstrapMayAdvance;", context);
+  assert.equal(context.fresh(f.state, recovery, evidence), true);
+  for (const key of ["schema_version", "classification", "instance_id", "diagnostics_subtree", "historical_instances_are_authority", "descendants_inspected", "runtime_activity_verified", "reason"]) for (const place of ["aggregate", "historical"]) {
+    const copy = structuredClone(recovery), historical = copy.instances.find(item => item.instance_id === "1832f0bb"); (place === "aggregate" ? copy.legacy_evidence_isolation : historical.legacy_evidence_isolation)[key] = "tampered";
+    assert.equal(context.fresh(f.state, copy, evidence), false, `${place} ${key}`);
+  }
+  for (const value of [null, false, 0, ""]) for (const place of ["aggregate", "historical"]) {
+    const copy = structuredClone(recovery), historical = copy.instances.find(item => item.instance_id === "1832f0bb"); if (place === "aggregate") copy.legacy_evidence_isolation = value; else historical.legacy_evidence_isolation = value;
+    assert.equal(context.fresh(f.state, copy, evidence), false, `${place} ${value}`);
+  }
+  const missing = structuredClone(recovery); delete missing.instances.find(item => item.instance_id === f.state.instance_id).identity; assert.equal(context.fresh(f.state, missing, evidence), false);
+  const reordered = structuredClone(recovery); for (const holder of [reordered, reordered.instances.find(item => item.instance_id === "1832f0bb")]) holder.legacy_evidence_isolation = Object.fromEntries(Object.entries(holder.legacy_evidence_isolation).reverse()); assert.equal(context.fresh(f.state, reordered, evidence), true);
+});
+
+test("G3 legacy evidence isolation: explicit route identity matrix", async t => {
+for (const field of ["instance_id", "control_repository", "sandbox_repository", "installation_id"]) for (const value of [null, "", "foreign"]) {
+  const { inspectMacosExistingInstanceRecovery } = await import("../src/lib/macos-existing-instance-recovery.mjs");
+  const f = g3RegistrationFixture(t); Object.assign(f.state, { fresh_first_install_bootstrap: true, fresh_first_install_legacy_instance_id: "1832f0bb" });
+  fs.mkdirSync(path.join(path.dirname(f.instance), "1832f0bb", "short-turn-evidence"), { recursive: true, mode: 0o700 }); f.route[field] = value; f.queue();
+  const recovery = inspectMacosExistingInstanceRecovery({ home: f.home, state: f.state }), evidence = f.verify();
+  const context = vm.createContext({ path, os: { homedir: () => f.home }, canonicalInstallationId, findRegisteredChatRoute });
+  vm.runInContext(cli.slice(cli.indexOf("function macosBootstrapMayAdvance("), cli.indexOf("function macosSelectedAwaitingFirstRoute(")) + "\nthis.fresh=macosFreshBootstrapMayAdvance;", context);
+  assert.equal(context.fresh(f.state, recovery, evidence), false);
+}
+});
+
+test("G3 legacy evidence isolation: real pending evidence makes runSetup wait before all writes", async t => {
+  const { inspectMacosExistingInstanceRecovery } = await import("../src/lib/macos-existing-instance-recovery.mjs");
+  const f = g3RegistrationFixture(t); Object.assign(f.state, { preferred_language: "en", fresh_first_install_bootstrap: true, fresh_first_install_legacy_instance_id: "1832f0bb" });
+  fs.mkdirSync(path.join(path.dirname(f.instance), "1832f0bb", "short-turn-evidence"), { recursive: true, mode: 0o700 }); f.queue();
+  const recovery = inspectMacosExistingInstanceRecovery({ home: f.home, state: f.state }), evidence = f.verify(), before = JSON.stringify(f.state);
+  assert.equal(evidence.status, "NEW_INSTALL_REGISTRATION_PENDING");
+  const forbidden = () => assert.fail("pending registration must stop before external effects"), context = vm.createContext({ path, os: { homedir: () => f.home }, process: { platform: "darwin" }, canonicalInstallationId, findRegisteredChatRoute, isMacosFreshFirstInstallBootstrap, loadState: () => f.state, ensureStateLanguage: () => "en", hasTrustedSingleUserReadinessProfileMarker: () => false, macosRecoveryReport: () => recovery, macosTrustedRecoveryEvidence: () => evidence, emit: result => result, macosPrerequisites: forbidden, migrationPreflight: forbidden, saveState: forbidden, prepareMigrationIntent: forbidden, prepareControlEnvironment: forbidden, ensureInstallerChatRegistration: forbidden, advanceMacosFirstBootRunner: forbidden });
+  vm.runInContext(cli.slice(cli.indexOf("function macosBootstrapMayAdvance("), cli.indexOf("function macosSelectedAwaitingFirstRoute(")) + cli.slice(cli.indexOf("function runSetup() {"), cli.indexOf("function codexLogin()")) + "\nthis.run=runSetup;", context);
+  const result = context.run(); assert.equal(result.status, "WAITING"); assert.equal(result.action_id, "sandbox_chat_registration"); assert.equal(result.mutations_performed, false); assert.equal(JSON.stringify(f.state), before);
+});
+
+test("G3 legacy evidence isolation: jointly forged local owner cannot replace independent API owner", async t => {
+  const { inspectMacosExistingInstanceRecovery } = await import("../src/lib/macos-existing-instance-recovery.mjs");
+  const f = g3RegistrationFixture(t); Object.assign(f.state, { fresh_first_install_bootstrap: true, fresh_first_install_legacy_instance_id: "1832f0bb", github_owner_id: "43" });
+  f.metadata.github_owner_id = "43"; f.writeJson(f.controlFile, f.metadata);
+  fs.mkdirSync(path.join(path.dirname(f.instance), "1832f0bb", "short-turn-evidence"), { recursive: true, mode: 0o700 });
+  const recovery = inspectMacosExistingInstanceRecovery({ home: f.home, state: f.state }), evidence = f.verify();
+  const context = vm.createContext({ path, os: { homedir: () => f.home }, canonicalInstallationId, findRegisteredChatRoute });
+  vm.runInContext(cli.slice(cli.indexOf("function macosBootstrapMayAdvance("), cli.indexOf("function macosSelectedAwaitingFirstRoute(")) + "\nthis.fresh=macosFreshBootstrapMayAdvance;", context);
+  assert.equal(["NEW_INSTALL_AWAITING_CONNECTOR_AUTH", "NEW_INSTALL_CONTROL_PREPARED_AWAITING_ROUTE", "NEW_INSTALL_REGISTRATION_PENDING", "NEW_INSTALL_PREPARED", "VERIFIED"].includes(evidence.status), false); assert.equal(context.fresh(f.state, recovery, evidence), false);
+  assert.ok(f.calls.some(call => call[0] === "user")); for (const repo of [f.state.control_repository, f.state.sandbox_repository]) assert.ok(f.calls.some(call => call[0] === "repository" && call[1] === repo));
+});
+
+test("G3 legacy evidence isolation: Windows preflight and dry run avoid Mac inspection", () => {
+  const forbidden = () => assert.fail("Windows path called Mac or external operation"), outputs = [], calls = [];
+  const context = vm.createContext({ process: { platform: "win32" }, loadState: () => ({}), ensureStateLanguage: () => "en", emit: result => outputs.push(result), commandExists: (name, args) => { calls.push([name, args]); return { ok: true }; }, macosRecoveryReport: forbidden, macosTrustedRecoveryEvidence: forbidden, macosPrerequisites: forbidden, migrationPreflight: forbidden, macosNativeHelperPreflight: forbidden });
+  vm.runInContext(cli.slice(cli.indexOf("function dryRun() {"), cli.indexOf("function codexLogin()")) + cli.slice(cli.indexOf("function recoveryPreflight() {"), cli.indexOf("function reportProblem()")) + "\nthis.dry=dryRun;this.preflight=recoveryPreflight;", context);
+  context.preflight(); assert.equal(outputs[0].status, "PASS"); assert.equal(outputs[0].existing_instance_recovery.status, "UNSUPPORTED"); assert.equal(calls.length, 0);
+  context.dry(); assert.equal(outputs[1].status, "PASS"); assert.equal(outputs[1].mutations_performed, false); assert.ok(outputs[1].plan.some(item => item.step === "isolated_control_environment")); assert.ok(calls.length > 0);
+});
+
+test("G3 legacy evidence isolation: old and new identity collision matrix", async t => {
+for (const [name, oldMetadata] of [
+  ["control numeric ID", { control_repository_id: 101 }], ["cross-role numeric ID", { control_repository_id: 202 }], ["sandbox numeric ID", { sandbox_repository_id: 202 }], ["cross-role sandbox ID", { sandbox_repository_id: 101 }], ["new instance ID", { instance_id: "abcd1234" }], ["new installation ID", { installation_id: "abcd1234-pending-install" }]
+]) {
+  const { inspectMacosExistingInstanceRecovery } = await import("../src/lib/macos-existing-instance-recovery.mjs");
+  const f = g3RegistrationFixture(t); Object.assign(f.state, { fresh_first_install_bootstrap: true, fresh_first_install_legacy_instance_id: "1832f0bb" });
+  const old = path.join(path.dirname(f.instance), "1832f0bb"); fs.mkdirSync(path.join(old, "short-turn-evidence"), { recursive: true, mode: 0o700 }); f.writeJson(path.join(old, "instance.json"), oldMetadata);
+  assert.equal(inspectMacosExistingInstanceRecovery({ home: f.home, state: f.state }).legacy_evidence_isolation.classification, "REJECTED");
+}
+});
+
+test("G3 legacy evidence isolation: two-root route casefold collision rejects", async t => {
+  const { inspectMacosExistingInstanceRecovery } = await import("../src/lib/macos-existing-instance-recovery.mjs");
+  const f = g3RegistrationFixture(t); Object.assign(f.state, { fresh_first_install_bootstrap: true, fresh_first_install_legacy_instance_id: "1832f0bb" });
+  const old = path.join(path.dirname(f.instance), "1832f0bb"); fs.mkdirSync(path.join(old, "short-turn-evidence"), { recursive: true, mode: 0o700 }); f.writeJson(path.join(old, "chat-routes.json"), { routes: [{ route: "CHAT-51" }] }); f.queue();
+  assert.equal(inspectMacosExistingInstanceRecovery({ home: f.home, state: f.state }).legacy_evidence_isolation.classification, "REJECTED");
+});
+
+test("G3 legacy evidence isolation: explicit selected path dispatches to selected inspector", () => {
+  const state = { instance_id: "abcd1234", ...{ macos_setup_approved: true, fresh_first_install_bootstrap: true, fresh_first_install_legacy_instance_id: "1832f0bb" } }, expected = { status: "NEEDS_USER_ACTION" }, calls = [];
+  const context = vm.createContext({ os: { homedir: () => "/synthetic" }, valueOf: () => state.instance_id, macosGithubApi: () => ({}), inspectMacosSelectedFreshInstance: args => { calls.push(args); return expected; }, inspectMacosExistingInstanceRecovery: () => assert.fail("selected dispatch must not use aggregate inspector") });
+  vm.runInContext(cli.slice(cli.indexOf("function macosRecoveryReport("), cli.indexOf("function macosBootstrapMayAdvance(")) + "\nthis.report=macosRecoveryReport;", context);
+  assert.equal(context.report(state), expected); assert.equal(calls.length, 1); assert.equal(calls[0].state.selected_fresh_instance, true); assert.equal(state.selected_fresh_instance, undefined);
+});
+
+test("G3 legacy evidence isolation: actual conflicting trusted evidence blocks both CLI reports", async t => {
+  const { inspectMacosExistingInstanceRecovery } = await import("../src/lib/macos-existing-instance-recovery.mjs");
+  const f = g3RegistrationFixture(t); Object.assign(f.state, { preferred_language: "en", fresh_first_install_bootstrap: true, fresh_first_install_legacy_instance_id: "1832f0bb" });
+  fs.mkdirSync(path.join(path.dirname(f.instance), "1832f0bb", "short-turn-evidence"), { recursive: true, mode: 0o700 }); f.metadata.instance_id = "foreign"; f.writeJson(f.controlFile, f.metadata);
+  const recovery = inspectMacosExistingInstanceRecovery({ home: f.home, state: f.state }), evidence = f.verify(); assert.equal(evidence.status, "CONFLICT");
+  const outputs = [], forbidden = () => assert.fail("conflicting evidence must stop before commands");
+  const context = vm.createContext({ path, os: { homedir: () => f.home }, process: { platform: "darwin" }, canonicalInstallationId, findRegisteredChatRoute, loadState: () => f.state, ensureStateLanguage: () => "en", macosRecoveryReport: () => recovery, macosTrustedRecoveryEvidence: () => evidence, macosStateBound: () => false, macosSelectedAwaitingFirstRoute: () => false, emit: result => outputs.push(result), commandExists: forbidden, macosPrerequisites: forbidden });
+  vm.runInContext(cli.slice(cli.indexOf("function macosBootstrapMayAdvance("), cli.indexOf("function macosSelectedAwaitingFirstRoute(")) + cli.slice(cli.indexOf("function dryRun() {"), cli.indexOf("function codexLogin()")) + cli.slice(cli.indexOf("function recoveryPreflight() {"), cli.indexOf("function reportProblem()")) + "\nthis.dry=dryRun;this.preflight=recoveryPreflight;", context);
+  context.dry(); context.preflight(); for (const result of outputs) { assert.notEqual(result.status, "PASS"); assert.equal(result.mutations_performed, false); }
+});
+
+test("G3 legacy evidence isolation: diagnostics cannot alias fresh instance inode", async t => {
+  const { inspectMacosExistingInstanceRecovery } = await import("../src/lib/macos-existing-instance-recovery.mjs");
+  const f = g3RegistrationFixture(t); Object.assign(f.state, { fresh_first_install_bootstrap: true, fresh_first_install_legacy_instance_id: "1832f0bb" });
+  const diag = path.join(path.dirname(f.instance), "1832f0bb", "short-turn-evidence"); fs.mkdirSync(diag, { recursive: true, mode: 0o700 }); const freshStat = fs.lstatSync(f.instance);
+  const proxy = new Proxy(fs, { get(target, key) { if (key !== "lstatSync") return target[key]; return (...args) => { const stat = target.lstatSync(...args); if (args[0] !== diag) return stat; return new Proxy(stat, { get(object, prop) { if (prop === "dev" || prop === "ino") return freshStat[prop]; const value = object[prop]; return typeof value === "function" ? value.bind(object) : value; } }); }; } });
+  assert.equal(inspectMacosExistingInstanceRecovery({ home: f.home, state: f.state, fsImpl: proxy }).legacy_evidence_isolation.classification, "REJECTED");
+});
+
+test("G3 legacy evidence isolation: two-root paths and partial provenance reject", async t => {
+  const { inspectMacosExistingInstanceRecovery } = await import("../src/lib/macos-existing-instance-recovery.mjs");
+  for (const field of ["control_clone_path", "chat_route_file"]) {
+    const f = g3RegistrationFixture(t); Object.assign(f.state, { fresh_first_install_bootstrap: true, fresh_first_install_legacy_instance_id: "1832f0bb" }); fs.mkdirSync(path.join(path.dirname(f.instance), "1832f0bb", "short-turn-evidence"), { recursive: true, mode: 0o700 });
+    f.state[field] = `${f.state[field]}/../${path.basename(f.state[field])}`;
+    assert.equal(inspectMacosExistingInstanceRecovery({ home: f.home, state: f.state }).legacy_evidence_isolation.classification, "REJECTED", field);
+  }
+  for (const field of ["github_login", "github_owner_id", "control_repository_id", "sandbox_repository_id"]) {
+    const f = g3RegistrationFixture(t); Object.assign(f.state, { fresh_first_install_bootstrap: true, fresh_first_install_legacy_instance_id: "1832f0bb" }); fs.mkdirSync(path.join(path.dirname(f.instance), "1832f0bb", "short-turn-evidence"), { recursive: true, mode: 0o700 }); delete f.state[field];
+    const recovery = inspectMacosExistingInstanceRecovery({ home: f.home, state: f.state }), evidence = f.verify();
+    const context = vm.createContext({ path, os: { homedir: () => f.home }, canonicalInstallationId, findRegisteredChatRoute }); vm.runInContext(cli.slice(cli.indexOf("function macosBootstrapMayAdvance("), cli.indexOf("function macosSelectedAwaitingFirstRoute(")) + "\nthis.fresh=macosFreshBootstrapMayAdvance;", context);
+    assert.equal(context.fresh(f.state, recovery, evidence), false, field);
+  }
+});
+
+test("G3 legacy evidence isolation: fresh root ownership, mode and alias checks", async t => {
+  const { inspectMacosExistingInstanceRecovery } = await import("../src/lib/macos-existing-instance-recovery.mjs");
+  for (const kind of ["uid", "0755", "special", "inode-alias"]) {
+    const f = g3RegistrationFixture(t); Object.assign(f.state, { fresh_first_install_bootstrap: true, fresh_first_install_legacy_instance_id: "1832f0bb" }); const old = path.join(path.dirname(f.instance), "1832f0bb"); fs.mkdirSync(path.join(old, "short-turn-evidence"), { recursive: true, mode: 0o700 }); const oldStat = fs.lstatSync(old);
+    const proxy = new Proxy(fs, { get(target, key) { if (key !== "lstatSync") return target[key]; return (...args) => { const stat = target.lstatSync(...args); if (args[0] !== f.instance) return stat; return new Proxy(stat, { get(object, prop) { if (kind === "uid" && prop === "uid") return (process.getuid?.() ?? 0) + 1; if (kind === "0755" && prop === "mode") return (object.mode & ~0o7777) | 0o755; if (kind === "special" && prop === "mode") return object.mode | 0o1000; if (kind === "inode-alias" && (prop === "dev" || prop === "ino")) return oldStat[prop]; const value = object[prop]; return typeof value === "function" ? value.bind(object) : value; } }); }; } });
+    assert.equal(inspectMacosExistingInstanceRecovery({ home: f.home, state: f.state, fsImpl: proxy }).legacy_evidence_isolation.classification, "REJECTED", kind);
+  }
+});
+
+test("G3 legacy evidence isolation: wrong registration issue and route bindings fail", async t => {
+  const { inspectMacosExistingInstanceRecovery } = await import("../src/lib/macos-existing-instance-recovery.mjs");
+  for (const kind of ["issue-number", "issue-owner", "issue-project", "route-number", "route-issue"]) {
+    const f = g3RegistrationFixture(t); Object.assign(f.state, { fresh_first_install_bootstrap: true, fresh_first_install_legacy_instance_id: "1832f0bb" }); fs.mkdirSync(path.join(path.dirname(f.instance), "1832f0bb", "short-turn-evidence"), { recursive: true, mode: 0o700 });
+    if (kind === "issue-number") f.issue.number = 52; if (kind === "issue-owner") f.issue.user.id = 43; if (kind === "issue-project") f.issue.body = JSON.stringify({ project: "other", chat_url: f.state.reviewer_chat_url, installation_id: f.state.installation_id }); if (kind === "route-number") f.route.route = "chat-52"; if (kind === "route-issue") f.route.registration_issue = 52; f.queue();
+    const recovery = inspectMacosExistingInstanceRecovery({ home: f.home, state: f.state }), evidence = f.verify(); const context = vm.createContext({ path, os: { homedir: () => f.home }, canonicalInstallationId, findRegisteredChatRoute }); vm.runInContext(cli.slice(cli.indexOf("function macosBootstrapMayAdvance("), cli.indexOf("function macosSelectedAwaitingFirstRoute(")) + "\nthis.fresh=macosFreshBootstrapMayAdvance;", context); assert.equal(context.fresh(f.state, recovery, evidence), false, kind);
+  }
+});
+
+test("G3 legacy evidence isolation: real continuation evidence advances both CLI reports", async t => {
+  const { inspectMacosExistingInstanceRecovery } = await import("../src/lib/macos-existing-instance-recovery.mjs");
+  const f = g3RegistrationFixture(t); Object.assign(f.state, { preferred_language: "en", fresh_first_install_bootstrap: true, fresh_first_install_legacy_instance_id: "1832f0bb" }); fs.mkdirSync(path.join(path.dirname(f.instance), "1832f0bb", "short-turn-evidence"), { recursive: true, mode: 0o700 });
+  const outputs = [], context = vm.createContext({ path, os: { homedir: () => f.home }, process: { platform: "darwin" }, canonicalInstallationId, findRegisteredChatRoute, loadState: () => f.state, ensureStateLanguage: () => "en", macosRecoveryReport: () => inspectMacosExistingInstanceRecovery({ home: f.home, state: f.state }), macosTrustedRecoveryEvidence: () => f.verify(), macosStateBound: () => false, macosSelectedAwaitingFirstRoute: () => false, emit: result => outputs.push(result), commandExists: () => ({ ok: true }), macosPrerequisites: () => ({ node: true, session_auth: true, native_helper: { status: "PASS" } }), migrationPreflight: () => ({ status: "READY" }), macosNativeHelperPreflight: () => ({ status: "PASS" }) });
+  vm.runInContext(cli.slice(cli.indexOf("function macosBootstrapMayAdvance("), cli.indexOf("function macosSelectedAwaitingFirstRoute(")) + cli.slice(cli.indexOf("function dryRun() {"), cli.indexOf("function codexLogin()")) + cli.slice(cli.indexOf("function recoveryPreflight() {"), cli.indexOf("function reportProblem()")) + "\nthis.dry=dryRun;this.preflight=recoveryPreflight;", context);
+  assert.equal(f.verify().status, "NEW_INSTALL_CONTROL_PREPARED_AWAITING_ROUTE"); context.dry(); context.preflight(); assert.equal(outputs.length, 2); for (const result of outputs) { assert.equal(result.status, "PASS"); assert.equal(result.mutations_performed, false); }
+});
+
+test("G3 legacy evidence isolation: generated repository names cannot collide across old and new identities", async t => {
+  const { inspectMacosExistingInstanceRecovery } = await import("../src/lib/macos-existing-instance-recovery.mjs");
+  const oldControl = "owner/chatgpt-codex-orchestrator-control-1832f0bb", oldSandbox = "owner/chatgpt-codex-orchestrator-sandbox-1832f0bb";
+  for (const [field, name] of [["control_repository", oldControl], ["sandbox_repository", oldSandbox.toUpperCase()], ["control_repository", oldSandbox], ["sandbox_repository", oldControl.toUpperCase()]]) {
+    const f = g3RegistrationFixture(t); Object.assign(f.state, { fresh_first_install_bootstrap: true, fresh_first_install_legacy_instance_id: "1832f0bb", [field]: name });
+    const old = path.join(path.dirname(f.instance), "1832f0bb"), file = path.join(old, "instance.json"); fs.mkdirSync(path.join(old, "short-turn-evidence"), { recursive: true, mode: 0o700 }); f.writeJson(file, { control_repository: oldControl, sandbox_repository: oldSandbox });
+    const before = fs.readFileSync(file), stat = fs.lstatSync(file), report = inspectMacosExistingInstanceRecovery({ home: f.home, state: f.state });
+    assert.equal(report.legacy_evidence_isolation.classification, "REJECTED", field); assert.equal(report.legacy_evidence_isolation.reason, "identity_collision", field); assert.equal(isMacosFreshFirstInstallBootstrap({ state: f.state, recovery: report }), false, field); assert.deepEqual(fs.readFileSync(file), before); for (const key of ["mode", "dev", "ino"]) assert.equal(fs.lstatSync(file)[key], stat[key]);
+  }
+});
+
+
+test("G3 legacy evidence isolation: real third root blocks two-root continuation", async t => {
+  const { inspectMacosExistingInstanceRecovery } = await import("../src/lib/macos-existing-instance-recovery.mjs");
+  const f = g3RegistrationFixture(t); Object.assign(f.state, { fresh_first_install_bootstrap: true, fresh_first_install_legacy_instance_id: "1832f0bb" }); const instances = path.dirname(f.instance); fs.mkdirSync(path.join(instances, "1832f0bb", "short-turn-evidence"), { recursive: true, mode: 0o700 });
+  const valid = inspectMacosExistingInstanceRecovery({ home: f.home, state: f.state }); assert.equal(valid.legacy_evidence_isolation.classification, "OPAQUE_PRESERVED_NONAUTHORITY"); const evidence = f.verify();
+  fs.mkdirSync(path.join(instances, "unexpected-third"), { mode: 0o700 }); const rejected = inspectMacosExistingInstanceRecovery({ home: f.home, state: f.state }); assert.equal(rejected.legacy_evidence_isolation.classification, "REJECTED");
+  const context = vm.createContext({ path, os: { homedir: () => f.home }, canonicalInstallationId, findRegisteredChatRoute }); vm.runInContext(cli.slice(cli.indexOf("function macosBootstrapMayAdvance("), cli.indexOf("function macosSelectedAwaitingFirstRoute(")) + "\nthis.fresh=macosFreshBootstrapMayAdvance;", context); assert.equal(context.fresh(f.state, rejected, evidence), false);
+});

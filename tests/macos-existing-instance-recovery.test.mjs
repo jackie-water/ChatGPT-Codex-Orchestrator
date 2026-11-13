@@ -863,3 +863,336 @@ test("selected recovery rechecks link and generated service inode after independ
   }
 });
 
+
+test("G3 legacy evidence isolation: diagnostics are opaque and preserved", t => {
+  const f = fixture(t), root = path.join(f.instances, "1832ffbb".replace("ff", "f0"));
+  fs.mkdirSync(path.join(root, "short-turn-evidence", "nested"), { recursive: true, mode: 0o700 });
+  const log = path.join(root, "short-turn-evidence", "nested", "worker.log");
+  fs.writeFileSync(log, "historic", { mode: 0o644 });
+  fs.chmodSync(log, 0o644);
+  const executable = path.join(root, "short-turn-evidence", "nested", "process-identity");
+  fs.writeFileSync(executable, "old", { mode: 0o700 });
+  const before = [log, executable].map(file => ({ bytes: fs.readFileSync(file, "hex"), stat: fs.lstatSync(file) }));
+  const state = { macos_setup_approved: true, fresh_first_install_bootstrap: true, fresh_first_install_legacy_instance_id: "1832f0bb" };
+  assert.equal(inspectMacosExistingInstanceRecovery({ home: f.home }).status, "CONFLICT");
+  const result = inspectMacosExistingInstanceRecovery({ home: f.home, state });
+  assert.equal(result.legacy_evidence_isolation.classification, "OPAQUE_PRESERVED_NONAUTHORITY");
+  assert.equal(result.status, "CONFLICT");
+  assert.equal(isMacosFreshFirstInstallBootstrap({ state, recovery: result }), true);
+  [log, executable].forEach((file, index) => { const stat = fs.lstatSync(file); assert.equal(fs.readFileSync(file, "hex"), before[index].bytes); assert.equal(stat.ino, before[index].stat.ino); assert.equal(stat.mode, before[index].stat.mode); });
+});
+
+test("G3 legacy evidence isolation: opaque descendants are never accessed", t => {
+  const f = fixture(t), root = path.join(f.instances, "1832f0bb"), diag = path.join(root, "short-turn-evidence");
+  fs.mkdirSync(path.join(diag, "nested"), { recursive: true, mode: 0o700 });
+  fs.symlinkSync("/does-not-exist", path.join(diag, "nested", "link"));
+  const proxy = new Proxy(fs, { get(target, key) { const value = target[key]; if (typeof value !== "function") return value; return (...args) => { if (typeof args[0] === "string" && args[0].startsWith(diag + path.sep)) throw Error("opaque descendant accessed"); return value(...args); }; } });
+  const state = { macos_setup_approved: true, fresh_first_install_bootstrap: true, fresh_first_install_legacy_instance_id: "1832f0bb" };
+  assert.equal(inspectMacosExistingInstanceRecovery({ home: f.home, state, fsImpl: proxy }).legacy_evidence_isolation.classification, "OPAQUE_PRESERVED_NONAUTHORITY");
+});
+
+test("G3 legacy evidence isolation: rejection is terminal and receipts remain untouched", t => {
+  const f = fixture(t), root = path.join(f.instances, "1832f0bb");
+  fs.mkdirSync(path.join(root, "short-turn-evidence"), { recursive: true, mode: 0o700 });
+  const state = { macos_setup_approved: true, fresh_first_install_bootstrap: true, fresh_first_install_legacy_instance_id: "1832f0bb" };
+  const receipt = path.join(root, "selected-fresh-instance-approval-v1.json");
+  fs.writeFileSync(receipt, "{}", { mode: 0o600 });
+  const result = inspectMacosExistingInstanceRecovery({ home: f.home, state });
+  assert.equal(result.legacy_evidence_isolation.classification, "REJECTED");
+  assert.equal(result.instances[0].fresh_first_install_candidate, false);
+  assert.equal(fs.readFileSync(receipt, "utf8"), "{}");
+});
+
+test("G3 legacy evidence isolation: malformed identity metadata and partial continuation reject", t => {
+  const f = fixture(t), root = path.join(f.instances, "1832f0bb");
+  fs.mkdirSync(path.join(root, "short-turn-evidence"), { recursive: true, mode: 0o700 });
+  const state = { macos_setup_approved: true, fresh_first_install_bootstrap: true, fresh_first_install_legacy_instance_id: "1832f0bb" };
+  const metadata = path.join(root, "instance.json");
+  fs.writeFileSync(metadata, '{"instance_id":"1832f0bb","instance_\u0069d":"1832f0bb"}', { mode: 0o600 });
+  assert.equal(inspectMacosExistingInstanceRecovery({ home: f.home, state }).legacy_evidence_isolation.classification, "REJECTED");
+  fs.unlinkSync(metadata);
+  assert.equal(inspectMacosExistingInstanceRecovery({ home: f.home, state: { ...state, installation_id: "abcd1234" } }).legacy_evidence_isolation.classification, "REJECTED");
+});
+
+test("G3 legacy evidence isolation: unsafe names, roots, modes and metadata reject", t => {
+  const state = { macos_setup_approved: true, fresh_first_install_bootstrap: true, fresh_first_install_legacy_instance_id: "1832f0bb" };
+  const cases = [
+    ["unknown directory", root => fs.mkdirSync(path.join(root, "unknown"))],
+    ["unknown file", root => fs.writeFileSync(path.join(root, "unknown"), "x")],
+    ["legacy receipt", root => fs.writeFileSync(path.join(root, "trusted-recovery-evidence-v1.json"), "{}")],
+    ["outside executable", root => { fs.mkdirSync(path.join(root, "logs")); fs.writeFileSync(path.join(root, "logs", "helper"), "x", { mode: 0o700 }); }],
+    ["outside symlink", root => fs.symlinkSync("/does-not-exist", path.join(root, "logs"))],
+    ["invalid UTF-8", root => fs.writeFileSync(path.join(root, "instance.json"), Buffer.from([0xff]), { mode: 0o600 })],
+    ["oversize JSON", root => fs.writeFileSync(path.join(root, "instance.json"), Buffer.alloc(1024 * 1024 + 1, 0x20), { mode: 0o600 })],
+    ["duplicate routes", root => writeJson(path.join(root, "chat-routes.json"), { routes: [{ route: "chat-A" }, { route: "chat-a" }] })],
+    ["conflicting identity", root => writeJson(path.join(root, "instance.json"), { instance_id: "foreign" })],
+    ["writable diagnostics", root => fs.chmodSync(path.join(root, "short-turn-evidence"), 0o777)]
+  ];
+  for (const [name, setup] of cases) {
+    const f = fixture(t), root = path.join(f.instances, "1832f0bb");
+    fs.mkdirSync(path.join(root, "short-turn-evidence"), { recursive: true, mode: 0o700 });
+    setup(root);
+    const result = inspectMacosExistingInstanceRecovery({ home: f.home, state });
+    assert.equal(result.legacy_evidence_isolation.classification, "REJECTED", name);
+    assert.equal(result.fresh_first_install_candidate, false, name);
+  }
+});
+
+test("G3 legacy evidence isolation: exact intent is required", t => {
+  const f = fixture(t), root = path.join(f.instances, "1832f0bb");
+  fs.mkdirSync(path.join(root, "short-turn-evidence"), { recursive: true, mode: 0o700 });
+  const state = { macos_setup_approved: true, fresh_first_install_bootstrap: true, fresh_first_install_legacy_instance_id: "1832f0bb" };
+  for (const bad of [{ ...state, macos_setup_approved: "true" }, { ...state, fresh_first_install_bootstrap: "true" }, { ...state, fresh_first_install_legacy_instance_id: "other" }, {}]) {
+    assert.equal(inspectMacosExistingInstanceRecovery({ home: f.home, state: bad }).legacy_evidence_isolation, undefined);
+  }
+  fs.mkdirSync(path.join(f.instances, "other"), { mode: 0o700 });
+  assert.equal(inspectMacosExistingInstanceRecovery({ home: f.home, state }).legacy_evidence_isolation.classification, "REJECTED");
+});
+
+test("G3 legacy evidence isolation: diagnostics owner and drift fail closed", t => {
+  const f = fixture(t), root = path.join(f.instances, "1832f0bb"), diag = path.join(root, "short-turn-evidence");
+  fs.mkdirSync(diag, { recursive: true, mode: 0o700 });
+  const state = { macos_setup_approved: true, fresh_first_install_bootstrap: true, fresh_first_install_legacy_instance_id: "1832f0bb" };
+  for (const kind of ["foreign", "drift"]) {
+    let seen = 0;
+    const proxy = new Proxy(fs, { get(target, key) { if (key !== "lstatSync") return target[key]; return (...args) => { const stat = target.lstatSync(...args); if (args[0] !== diag) return stat; const changed = ++seen > 1; return new Proxy(stat, { get(object, prop) { if (kind === "foreign" && prop === "uid") return (process.getuid?.() ?? 0) + 1; if (kind === "drift" && changed && prop === "ctimeMs") return object.ctimeMs + 1; const value = object[prop]; return typeof value === "function" ? value.bind(object) : value; } }); }; } });
+    assert.equal(inspectMacosExistingInstanceRecovery({ home: f.home, state, fsImpl: proxy }).legacy_evidence_isolation.classification, "REJECTED", kind);
+  }
+});
+
+const g3Intent = { macos_setup_approved: true, fresh_first_install_bootstrap: true, fresh_first_install_legacy_instance_id: "1832f0bb" };
+function g3Fixture(t) {
+  const f = fixture(t), root = path.join(f.instances, "1832f0bb"), diagnostics = path.join(root, "short-turn-evidence");
+  fs.mkdirSync(diagnostics, { recursive: true, mode: 0o700 });
+  return { ...f, root, diagnostics };
+}
+
+test("G3 legacy evidence isolation: full observed historical paths and queue bytes are preserved", t => {
+  const f = g3Fixture(t);
+  const files = [
+    ["shortturn-fixture-chat267-20261017-01/worker.log", 0o644],
+    ["native-pid500-real-libproc-proof-20261018-v1/isolated-helper-home/.chatgpt-codex-orchestrator/instances/diag500a/runtime/native/macos/process-identity", 0o700]
+  ].map(([relative, mode]) => { const file = path.join(f.diagnostics, relative); fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 }); fs.writeFileSync(file, "historical bytes", { mode }); fs.chmodSync(file, mode); return file; });
+  writeJson(path.join(f.root, "chat-routes.json"), { routes: [{ route: "chat-old", status: "active", chat_url: "https://chatgpt.com/c/private-old" }] });
+  for (const directory of ["pending-wakes", "registration-delivery"]) { const file = path.join(f.root, directory, "old.json"); fs.mkdirSync(path.dirname(file), { mode: 0o700 }); fs.writeFileSync(file, "queue bytes", { mode: 0o600 }); files.push(file); }
+  const before = files.map(file => ({ bytes: fs.readFileSync(file, "hex"), stat: fs.lstatSync(file) }));
+  assert.equal(inspectMacosExistingInstanceRecovery({ home: f.home }).status, "CONFLICT");
+  const report = inspectMacosExistingInstanceRecovery({ home: f.home, state: g3Intent });
+  assert.equal(report.status, "CONFLICT"); assert.equal(report.legacy_evidence_isolation.classification, "OPAQUE_PRESERVED_NONAUTHORITY");
+  assert.equal(Object.hasOwn(report.instances[0], "identity"), false); assert.equal(JSON.stringify(report).includes("private-old"), false);
+  for (let i = 0; i < files.length; i++) { const now = fs.lstatSync(files[i]); assert.equal(fs.readFileSync(files[i], "hex"), before[i].bytes); for (const key of ["mode", "dev", "ino"]) assert.equal(now[key], before[i].stat[key]); }
+  assert.deepEqual(g3Intent, { macos_setup_approved: true, fresh_first_install_bootstrap: true, fresh_first_install_legacy_instance_id: "1832f0bb" });
+});
+
+test("G3 legacy evidence isolation: no opaque enumeration or passive payload read is attempted", t => {
+  const f = g3Fixture(t), deep = path.join(f.diagnostics, "fake", "instances", "new");
+  fs.mkdirSync(deep, { recursive: true, mode: 0o700 }); fs.symlinkSync("/unreadable-target", path.join(deep, "link")); fs.writeFileSync(path.join(deep, "bad\u0001name"), "data");
+  const payloads = ["pending-wakes", "logs"].map(name => { const dir = path.join(f.root, name); fs.mkdirSync(dir, { mode: 0o700 }); const file = path.join(dir, "payload"); fs.writeFileSync(file, "never read", { mode: 0o600 }); return file; });
+  const violations = [], proxy = new Proxy(fs, { get(target, key) { const original = target[key]; if (typeof original !== "function") return original; return (...args) => { const p = args[0]; if (typeof p === "string" && (p.startsWith(f.diagnostics + path.sep) || (p === f.diagnostics && ["readdirSync", "opendirSync", "openSync", "readFileSync"].includes(key)) || (payloads.includes(p) && ["readFileSync", "openSync"].includes(key)))) { violations.push([key, p]); throw Error("forbidden observation"); } return original(...args); }; } });
+  const report = inspectMacosExistingInstanceRecovery({ home: f.home, state: g3Intent, fsImpl: proxy });
+  assert.equal(report.legacy_evidence_isolation.classification, "OPAQUE_PRESERVED_NONAUTHORITY"); assert.deepEqual(violations, []);
+});
+
+test("G3 legacy evidence isolation: exact intent matrix", t => {
+for (const [name, mutate] of [
+  ["missing setup", s => delete s.macos_setup_approved], ["false setup", s => s.macos_setup_approved = false], ["numeric setup", s => s.macos_setup_approved = 1], ["string setup", s => s.macos_setup_approved = "true"],
+  ["missing bootstrap", s => delete s.fresh_first_install_bootstrap], ["false bootstrap", s => s.fresh_first_install_bootstrap = false], ["numeric bootstrap", s => s.fresh_first_install_bootstrap = 1], ["string bootstrap", s => s.fresh_first_install_bootstrap = "true"], ["wrong legacy", s => s.fresh_first_install_legacy_instance_id = "other"]
+]) { const f = g3Fixture(t), state = { ...g3Intent }; mutate(state); assert.equal(inspectMacosExistingInstanceRecovery({ home: f.home, state }).legacy_evidence_isolation, undefined); }
+});
+
+test("G3 legacy evidence isolation: unsafe entries matrix", t => {
+for (const [name, setup] of [
+  ["invalid JSON", f => fs.writeFileSync(path.join(f.root, "instance.json"), "{", { mode: 0o600 })],
+  ["nonobject JSON", f => fs.writeFileSync(path.join(f.root, "instance.json"), "[]", { mode: 0o600 })],
+  ["escaped duplicate key", f => fs.writeFileSync(path.join(f.root, "instance.json"), String.raw`{"instance_id":"1832f0bb","instance_\u0069d":"1832f0bb"}`, { mode: 0o600 })],
+  ["empty snapshot suffix", f => fs.mkdirSync(path.join(f.root, "control-routing-migration-"), { mode: 0o700 })],
+  ["authorization receipt", f => fs.writeFileSync(path.join(f.root, "selected-fresh-instance-approval-v1.json"), "{}", { mode: 0o600 })],
+  ["trusted receipt", f => fs.writeFileSync(path.join(f.root, "trusted-recovery-evidence-v1.json"), "{}", { mode: 0o600 })],
+  ["second root", f => fs.mkdirSync(path.join(f.instances, "another"), { mode: 0o700 })],
+  ["diagnostic file", f => { fs.rmdirSync(f.diagnostics); fs.writeFileSync(f.diagnostics, "x", { mode: 0o600 }); }],
+  ["diagnostic symlink", f => { fs.rmdirSync(f.diagnostics); fs.symlinkSync(f.home, f.diagnostics); }],
+  ["diagnostic special mode", f => fs.chmodSync(f.diagnostics, 0o1700)],
+  ["hard link", f => { const d = path.join(f.root, "logs"); fs.mkdirSync(d, { mode: 0o700 }); fs.writeFileSync(path.join(d, "a"), "x", { mode: 0o600 }); fs.linkSync(path.join(d, "a"), path.join(d, "b")); }]
+]) { const f = g3Fixture(t); setup(f); const report = inspectMacosExistingInstanceRecovery({ home: f.home, state: g3Intent }); assert.equal(report.legacy_evidence_isolation.classification, "REJECTED"); assert.equal(report.fresh_first_install_candidate, false); assert.equal(isMacosFreshFirstInstallBootstrap({ state: g3Intent, recovery: report }), false); }
+});
+
+test("G3 legacy evidence isolation: casefold root alias rejects", t => {
+  const f = g3Fixture(t), proxy = new Proxy(fs, { get(target, key) { if (key !== "readdirSync") return target[key]; return (...args) => { const entries = target.readdirSync(...args); return args[0] === f.instances ? [...entries, { name: "1832F0BB" }] : entries; }; } });
+  const report = inspectMacosExistingInstanceRecovery({ home: f.home, state: g3Intent, fsImpl: proxy }); assert.equal(report.legacy_evidence_isolation.classification, "REJECTED"); assert.equal(report.fresh_first_install_candidate, false);
+});
+
+test("G3 legacy evidence isolation: initial audit marker and gates cannot be tampered", t => {
+  const f = g3Fixture(t), report = inspectMacosExistingInstanceRecovery({ home: f.home, state: g3Intent });
+  assert.equal(isMacosFreshFirstInstallBootstrap({ state: g3Intent, recovery: report }), true);
+  for (const key of ["schema_version", "classification", "instance_id", "diagnostics_subtree", "historical_instances_are_authority", "descendants_inspected", "runtime_activity_verified", "reason"]) {
+    for (const place of ["aggregate", "historical"]) { const changed = structuredClone(report); const marker = place === "aggregate" ? changed.legacy_evidence_isolation : changed.instances[0].legacy_evidence_isolation; marker[key] = "tampered"; assert.equal(isMacosFreshFirstInstallBootstrap({ state: g3Intent, recovery: changed }), false, `${place} ${key}`); }
+  }
+  for (const mutate of [r => { r.instances[0].identity = {}; }, r => { r.instances[0].missing_verification_gates.push("other"); }, r => { r.missing_verification_gates.push("other"); }, r => { r.instances[0].fresh_first_install_candidate = false; }, r => { r.instance_ids.push("other"); }, r => { r.mutations_performed = true; }]) { const changed = structuredClone(report); mutate(changed); assert.equal(isMacosFreshFirstInstallBootstrap({ state: g3Intent, recovery: changed }), false); }
+  for (const [key, value] of [["control_environment_ready", true], ["target_environment_ready", true], ["review_route", "chat-old"], ["chat_route_file", "/tmp/foreign"]]) assert.equal(isMacosFreshFirstInstallBootstrap({ state: { ...g3Intent, [key]: value }, recovery: report }), false, key);
+});
+
+test("G3 legacy evidence isolation: falsey initial audit matrix", t => {
+for (const value of [null, false, 0, ""]) for (const location of ["aggregate", "historical"]) {
+  const f = g3Fixture(t), report = inspectMacosExistingInstanceRecovery({ home: f.home, state: g3Intent });
+  if (location === "aggregate") report.legacy_evidence_isolation = value; else report.instances[0].legacy_evidence_isolation = value;
+  assert.equal(isMacosFreshFirstInstallBootstrap({ state: g3Intent, recovery: report }), false);
+}
+});
+
+test("G3 legacy evidence isolation: diagnostic drift matrix", t => {
+for (const field of ["dev", "ino", "uid", "gid", "mode", "mtimeMs", "ctimeMs"]) {
+  const f = g3Fixture(t); let count = 0;
+  const proxy = new Proxy(fs, { get(target, key) { if (key !== "lstatSync") return target[key]; return (...args) => { const stat = target.lstatSync(...args); if (args[0] !== f.diagnostics) return stat; count++; const changed = count > 1; return new Proxy(stat, { get(object, prop) { if (changed && prop === field) return object[prop] + 1; const value = object[prop]; return typeof value === "function" ? value.bind(object) : value; } }); }; } });
+  const report = inspectMacosExistingInstanceRecovery({ home: f.home, state: g3Intent, fsImpl: proxy }); assert.equal(report.legacy_evidence_isolation.classification, "REJECTED"); assert.ok(count > 1);
+}
+});
+
+test("G3 legacy evidence isolation: private owner and mode matrix", t => {
+for (const [name, which] of [["project", "project"], ["instances", "instances"], ["legacy", "root"], ["diagnostics", "diagnostics"]]) for (const property of ["uid", "mode"]) {
+  const f = g3Fixture(t); f.project = path.dirname(f.instances); const targetPath = f[which];
+  const proxy = new Proxy(fs, { get(target, key) { if (key !== "lstatSync") return target[key]; return (...args) => { const stat = target.lstatSync(...args); if (args[0] !== targetPath) return stat; return new Proxy(stat, { get(object, prop) { if (prop === property) return property === "uid" ? (process.getuid?.() ?? 0) + 1 : object.mode | 0o020; const value = object[prop]; return typeof value === "function" ? value.bind(object) : value; } }); }; } });
+  assert.equal(inspectMacosExistingInstanceRecovery({ home: f.home, state: g3Intent, fsImpl: proxy }).legacy_evidence_isolation.classification, "REJECTED");
+}
+});
+
+test("G3 legacy evidence isolation: partial state matrix", t => {
+for (const [name, field, value] of [["installation", "installation_id", "partial"], ["instance", "instance_id", "partial"], ["instance path", "instance_root", "/tmp/partial"], ["control", "control_repository", "owner/partial"], ["sandbox", "sandbox_repository", "owner/partial"], ["control ID", "control_repository_id", "1"], ["sandbox ID", "sandbox_repository_id", "2"], ["route", "review_route", "chat-old"], ["route path", "chat_route_file", "/tmp/route"], ["target ready", "target_environment_ready", true], ["control ready", "control_environment_ready", true]]) {
+  const f = g3Fixture(t), state = { ...g3Intent, [field]: value }, report = inspectMacosExistingInstanceRecovery({ home: f.home, state });
+  assert.equal(report.legacy_evidence_isolation.classification, "REJECTED"); assert.equal(isMacosFreshFirstInstallBootstrap({ state, recovery: report }), false);
+}
+});
+
+test("G3 legacy evidence isolation: first-install intent does not grant selected approval", t => {
+  const f = selectedFixture(t); Object.assign(f.state, { fresh_first_install_bootstrap: true, fresh_first_install_legacy_instance_id: "1832f0bb" });
+  const before = inspectSelected(f); assert.notEqual(before.status, "SELECTED_FRESH_INSTANCE_VERIFIED"); assert.ok(before.approval_challenge);
+  assert.throws(() => approveSelected(f, "wrong approval"), /exact selected-fresh-instance approval/);
+  const after = approveSelected(f, before.approval_challenge); assert.equal(after.status, "SELECTED_FRESH_INSTANCE_VERIFIED");
+});
+
+test("G3 legacy evidence isolation: traversal entry budget accepts boundary and rejects overflow", t => {
+  const f = g3Fixture(t), logs = path.join(f.root, "logs"); fs.mkdirSync(logs, { mode: 0o700 });
+  for (let i = 0; i < 4095; i++) fs.writeFileSync(path.join(logs, `entry-${i}`), "", { mode: 0o600 });
+  assert.equal(inspectMacosExistingInstanceRecovery({ home: f.home, state: g3Intent }).legacy_evidence_isolation.classification, "OPAQUE_PRESERVED_NONAUTHORITY");
+  fs.writeFileSync(path.join(logs, "overflow"), "", { mode: 0o600 });
+  assert.equal(inspectMacosExistingInstanceRecovery({ home: f.home, state: g3Intent }).legacy_evidence_isolation.classification, "REJECTED");
+});
+
+test("G3 legacy evidence isolation: traversal rejects excessive depth", t => {
+  const f = g3Fixture(t); let dir = path.join(f.root, "logs"); fs.mkdirSync(dir, { mode: 0o700 });
+  for (let i = 0; i < 64; i++) { dir = path.join(dir, "x"); fs.mkdirSync(dir, { mode: 0o700 }); }
+  assert.equal(inspectMacosExistingInstanceRecovery({ home: f.home, state: g3Intent }).legacy_evidence_isolation.classification, "REJECTED");
+});
+
+test("G3 legacy evidence isolation: metadata identity matrix", t => {
+for (const [name, value] of [
+  ["wrong instance", { instance_id: "other" }], ["wrong installation", { installation_id: "other" }],
+  ["wrong control role", { control_repository: "owner/chatgpt-codex-orchestrator-sandbox-1832f0bb" }],
+  ["wrong role suffix", { sandbox_repository: "owner/chatgpt-codex-orchestrator-sandbox-other" }],
+  ["negative repository ID", { control_repository_id: -1 }], ["unsafe repository ID", { control_repository_id: 9007199254740992 }],
+  ["nonnumeric repository ID", { control_repository_id: "wrong" }], ["equal repository IDs", { control_repository_id: 101, sandbox_repository_id: 101 }],
+  ["conflicting generated identity", { control_repository: "owner/chatgpt-codex-orchestrator-control-1832f0bb", generated_repositories: { control: "different/chatgpt-codex-orchestrator-control-1832f0bb" } }],
+  ["foreign destination", { destination: { path: "/tmp/foreign" } }]
+]) { const f = g3Fixture(t); writeJson(path.join(f.root, "instance.json"), value); assert.equal(inspectMacosExistingInstanceRecovery({ home: f.home, state: g3Intent }).legacy_evidence_isolation.classification, "REJECTED"); }
+});
+
+test("G3 legacy evidence isolation: route validity matrix", t => {
+for (const [name, routes] of [
+  ["nonstring", [{ route: 42 }]], ["unsafe", [{ route: "../route" }]], ["case duplicate", [{ route: "chat-old" }, { route: "CHAT-OLD" }]],
+  ["object key mismatch", { "chat-one": { route: "chat-two" } }]
+]) { const f = g3Fixture(t); writeJson(path.join(f.root, "chat-routes.json"), { routes }); assert.equal(inspectMacosExistingInstanceRecovery({ home: f.home, state: g3Intent }).legacy_evidence_isolation.classification, "REJECTED"); }
+});
+
+test("G3 legacy evidence isolation: home canonicality matrix", t => {
+for (const [name, pathFor] of [["relative home", f => path.relative(process.cwd(), f.home)], ["dot-dot home", f => `${f.home}/../${path.basename(f.home)}`]]) {
+  const f = g3Fixture(t), home = pathFor(f), report = inspectMacosExistingInstanceRecovery({ home, state: g3Intent });
+  assert.equal(report.legacy_evidence_isolation.classification, "REJECTED");
+}
+});
+
+test("G3 legacy evidence isolation: diagnostic inode alias rejects", t => {
+  const f = g3Fixture(t), oldStat = fs.lstatSync(f.root);
+  const proxy = new Proxy(fs, { get(target, key) { if (key !== "lstatSync") return target[key]; return (...args) => { const stat = target.lstatSync(...args); if (args[0] !== f.diagnostics) return stat; return new Proxy(stat, { get(object, prop) { if (prop === "dev" || prop === "ino") return oldStat[prop]; const value = object[prop]; return typeof value === "function" ? value.bind(object) : value; } }); }; } });
+  assert.equal(inspectMacosExistingInstanceRecovery({ home: f.home, state: g3Intent, fsImpl: proxy }).legacy_evidence_isolation.classification, "REJECTED");
+});
+
+test("G3 legacy evidence isolation: metadata read failures and drift reject", t => {
+  for (const mode of ["open-error", "read-error", "fstat-drift"]) {
+    const f = g3Fixture(t), file = path.join(f.root, "instance.json"); writeJson(file, { instance_id: "1832f0bb" }); let fd = null, checks = 0;
+    const proxy = new Proxy(fs, { get(target, key) {
+      if (key === "openSync") return (...args) => { if (args[0] === file && mode === "open-error") throw Error("synthetic read error"); const result = target.openSync(...args); if (args[0] === file) fd = result; return result; };
+      if (key === "readSync") return (...args) => { if (args[0] === fd && mode === "read-error") throw Error("synthetic read error"); return target.readSync(...args); };
+      if (key === "fstatSync") return (...args) => { const stat = target.fstatSync(...args); if (args[0] !== fd || mode !== "fstat-drift" || ++checks < 2) return stat; return new Proxy(stat, { get(object, prop) { if (prop === "mtimeMs") return object.mtimeMs + 1; const value = object[prop]; return typeof value === "function" ? value.bind(object) : value; } }); };
+      return target[key];
+    } });
+    const report = inspectMacosExistingInstanceRecovery({ home: f.home, state: g3Intent, fsImpl: proxy }); assert.equal(report.legacy_evidence_isolation.classification, "REJECTED", mode); assert.equal(JSON.stringify(report).includes("synthetic read error"), false, mode);
+  }
+});
+
+test("G3 legacy evidence isolation: valid historical array and object routes stay nonauthoritative", t => {
+  for (const routes of [[{ route: "chat-old", active: true }], { "chat-old": { status: "active" } }]) {
+    const f = g3Fixture(t); writeJson(path.join(f.root, "chat-routes.json"), { routes });
+    const report = inspectMacosExistingInstanceRecovery({ home: f.home, state: g3Intent }); assert.equal(report.legacy_evidence_isolation.classification, "OPAQUE_PRESERVED_NONAUTHORITY"); assert.equal(Object.hasOwn(report.instances[0], "identity"), false);
+  }
+});
+
+test("G3 legacy evidence isolation: private roots reject permissive and special modes", t => {
+  for (const which of ["project", "instances", "root"]) for (const mode of [0o755, 0o1700]) {
+    const f = g3Fixture(t); f.project = path.dirname(f.instances); fs.chmodSync(f[which], mode);
+    const result = inspectMacosExistingInstanceRecovery({ home: f.home, state: g3Intent }); assert.equal(result.legacy_evidence_isolation.classification, "REJECTED", `${which} ${mode.toString(8)}`);
+  }
+});
+
+test("G3 legacy evidence isolation: symlink aliases for home and private roots reject", t => {
+  for (const which of ["home", "project", "instances"]) {
+    const f = g3Fixture(t); const project = path.dirname(f.instances); const target = which === "home" ? f.home : which === "project" ? project : f.instances;
+    const alias = `${target}-retained`; fs.renameSync(target, alias); fs.symlinkSync(alias, target);
+    try { const report = inspectMacosExistingInstanceRecovery({ home: f.home, state: g3Intent }); assert.equal(report.legacy_evidence_isolation.classification, "REJECTED", which); } finally { fs.unlinkSync(target); fs.renameSync(alias, target); }
+  }
+});
+
+test("G3 legacy evidence isolation: nonopaque special file proxy rejects", t => {
+  const f = g3Fixture(t), directory = path.join(f.root, "logs"), file = path.join(directory, "payload"); fs.mkdirSync(directory, { mode: 0o700 }); fs.writeFileSync(file, "x", { mode: 0o600 });
+  const proxy = new Proxy(fs, { get(target, key) { if (key !== "lstatSync") return target[key]; return (...args) => { const stat = target.lstatSync(...args); if (args[0] !== file) return stat; return new Proxy(stat, { get(object, prop) { if (prop === "isFile" || prop === "isDirectory" || prop === "isSymbolicLink") return () => false; const value = object[prop]; return typeof value === "function" ? value.bind(object) : value; } }); }; } });
+  assert.equal(inspectMacosExistingInstanceRecovery({ home: f.home, state: g3Intent, fsImpl: proxy }).legacy_evidence_isolation.classification, "REJECTED");
+});
+
+test("G3 legacy evidence isolation: growing metadata read is bounded and rejected", t => {
+  const f = g3Fixture(t), file = path.join(f.root, "instance.json"); writeJson(file, {}); let targetFd, reads = 0;
+  const proxy = new Proxy(fs, { get(target, key) {
+    if (key === "openSync") return (...args) => { const fd = target.openSync(...args); if (args[0] === file) targetFd = fd; return fd; };
+    if (key === "readSync") return (...args) => { if (args[0] !== targetFd) return target.readSync(...args); const count = target.readSync(...args); if (!count && reads++ === 0) { args[1][args[2]] = 0x20; return 1; } return count; };
+    return target[key];
+  } });
+  const report = inspectMacosExistingInstanceRecovery({ home: f.home, state: g3Intent, fsImpl: proxy }); assert.equal(report.legacy_evidence_isolation.classification, "REJECTED");
+});
+
+test("G3 legacy evidence isolation: snapshot and route identities cannot conflict", t => {
+  for (const source of ["snapshot", "route"]) {
+    const f = g3Fixture(t), control = "owner/chatgpt-codex-orchestrator-control-1832f0bb", conflicting = "other/chatgpt-codex-orchestrator-control-1832f0bb";
+    writeJson(path.join(f.root, "instance.json"), { control_repository: control });
+    if (source === "snapshot") writeJson(path.join(f.root, "control-routing-migration-test", "instance.json"), { control_repository: conflicting });
+    else writeJson(path.join(f.root, "chat-routes.json"), { routes: [{ route: "chat-old", control_repository: conflicting }] });
+    assert.equal(inspectMacosExistingInstanceRecovery({ home: f.home, state: g3Intent }).legacy_evidence_isolation.classification, "REJECTED", source);
+  }
+});
+
+test("G3 legacy evidence isolation: metadata opens without following links", t => {
+  const f = g3Fixture(t), file = path.join(f.root, "instance.json"), flagsSeen = []; writeJson(file, { instance_id: "1832f0bb" });
+  const proxy = new Proxy(fs, { get(target, key) { if (key !== "openSync") return target[key]; return (...args) => { if (args[0] === file) flagsSeen.push(args[1]); return target.openSync(...args); }; } });
+  const result = inspectMacosExistingInstanceRecovery({ home: f.home, state: g3Intent, fsImpl: proxy }); assert.equal(result.legacy_evidence_isolation.classification, "OPAQUE_PRESERVED_NONAUTHORITY"); assert.ok(flagsSeen.length); if (fs.constants.O_NOFOLLOW) assert.ok(flagsSeen.every(flags => (flags & fs.constants.O_NOFOLLOW) !== 0));
+});
+
+test("G3 legacy evidence isolation: traversal overflow stops before statting excess children", t => {
+  const f = g3Fixture(t), logs = path.join(f.root, "logs"); fs.mkdirSync(logs, { mode: 0o700 });
+  for (let i = 0; i < 4096; i++) fs.writeFileSync(path.join(logs, `entry-${i}`), "", { mode: 0o600 });
+  let childStats = 0; const proxy = new Proxy(fs, { get(target, key) { if (key !== "lstatSync") return target[key]; return (...args) => { if (typeof args[0] === "string" && args[0].startsWith(logs + path.sep)) childStats++; return target.lstatSync(...args); }; } });
+  assert.equal(inspectMacosExistingInstanceRecovery({ home: f.home, state: g3Intent, fsImpl: proxy }).legacy_evidence_isolation.classification, "REJECTED"); assert.equal(childStats, 0);
+});
+
+test("G3 legacy evidence isolation: private metadata rejects permissive mode and foreign owner", t => {
+  for (const kind of ["0644", "foreign uid"]) {
+    const f = g3Fixture(t), file = path.join(f.root, "instance.json"); writeJson(file, { instance_id: "1832f0bb" }); if (kind === "0644") fs.chmodSync(file, 0o644);
+    const proxy = new Proxy(fs, { get(target, key) { if (key !== "lstatSync" || kind !== "foreign uid") return target[key]; return (...args) => { const stat = target.lstatSync(...args); if (args[0] !== file) return stat; return new Proxy(stat, { get(object, prop) { if (prop === "uid") return (process.getuid?.() ?? 0) + 1; const value = object[prop]; return typeof value === "function" ? value.bind(object) : value; } }); }; } });
+    assert.equal(inspectMacosExistingInstanceRecovery({ home: f.home, state: g3Intent, fsImpl: proxy }).legacy_evidence_isolation.classification, "REJECTED", kind);
+  }
+});

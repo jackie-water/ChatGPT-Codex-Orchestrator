@@ -228,7 +228,7 @@ function macosRecoveryReport(state={}) {
     if(selected!==undefined&&selected!==state.instance_id) return {status:"CONFLICT",mutations_performed:false,missing_verification_gates:["exact_selected_instance_id"]};
     return inspectMacosSelectedFreshInstance({state:{...state,selected_fresh_instance:true},home:os.homedir(),githubApi:macosGithubApi()});
   }
-  return inspectMacosExistingInstanceRecovery({ home: os.homedir() });
+  return inspectMacosExistingInstanceRecovery({ home: os.homedir(), state });
 }
 
 function macosBootstrapMayAdvance(state, recovery, evidence) {
@@ -252,22 +252,27 @@ function macosFreshBootstrapMayAdvance(state, recovery, evidence) {
   const distinctRoots = instanceIds.length === 2 && new Set(instanceIds).size === 2 &&
     instanceIds.includes(state?.instance_id) && instanceIds.includes("1832f0bb") &&
     instances.length === 2 && instances.every(item => instanceIds.includes(item?.instance_id));
-  const singleSelectedNew = recovery?.status === "NEEDS_VERIFICATION" && instances.length === 1 &&
+  const marker = recovery?.legacy_evidence_isolation;
+  const hasMarker = Boolean((recovery && typeof recovery === "object" && Object.hasOwn(recovery, "legacy_evidence_isolation")) || instances.some(item => item && typeof item === "object" && Object.hasOwn(item, "legacy_evidence_isolation")));
+  const exactMarker = value => value?.schema_version === 1 && value.classification === "OPAQUE_PRESERVED_NONAUTHORITY" && value.instance_id === "1832f0bb" && value.diagnostics_subtree === "short-turn-evidence" && value.historical_instances_are_authority === false && value.descendants_inspected === false && value.runtime_activity_verified === false && value.reason === "continued_passive_legacy";
+  const markedValid = !hasMarker || (exactMarker(marker) && exactMarker(historical?.legacy_evidence_isolation) && recovery?.mutations_performed === false && state?.macos_setup_approved === true && state?.fresh_first_install_bootstrap === true && state?.fresh_first_install_legacy_instance_id === "1832f0bb" && distinctRoots && new Set(instances.map(item => item?.instance_id)).size === 2);
+  const singleSelectedNew = !hasMarker && recovery?.status === "NEEDS_VERIFICATION" && instances.length === 1 &&
     instanceIds.length === 1 && instanceIds[0] === state?.instance_id;
-  const benignHistorical = distinctRoots && historical?.status === "CONFLICT" &&
+  const benignHistorical = markedValid && distinctRoots && historical?.status === "CONFLICT" &&
     historical.fresh_first_install_candidate === true &&
     !Object.hasOwn(historical, "identity") &&
     JSON.stringify(historical.missing_verification_gates || []) === JSON.stringify(["safe_instance_tree"]);
   const exactInstanceSet = singleSelectedNew || (recovery?.status === "CONFLICT" && benignHistorical);
   const identity = selected?.identity;
-  const documentedIdentityOmission = !identity && selected?.missing_verification_gates?.length === 1 &&
-    selected.missing_verification_gates[0] === "verified_role_identities";
+  const markedIdentityOmission = Boolean(hasMarker && markedValid && benignHistorical && selected?.status === "NEEDS_VERIFICATION" && selected?.metadata?.instance === false && identity && ["instance_id", "installation_id", "control_repository", "sandbox_repository"].every(key => identity[key] == null));
+  const documentedIdentityOmission = (!hasMarker && !identity && selected?.missing_verification_gates?.length === 1 &&
+    selected.missing_verification_gates[0] === "verified_role_identities") || markedIdentityOmission;
   const exactIdentity = exactInstanceSet && selected?.status === "NEEDS_VERIFICATION" &&
     (documentedIdentityOmission || (identity?.instance_id === state?.instance_id &&
     identity?.installation_id === state?.installation_id &&
     identity?.control_repository === state?.control_repository &&
     identity?.sandbox_repository === state?.sandbox_repository)) &&
-    (selected.missing_verification_gates || []).every(gate => ["chat_routes_metadata", "migration_snapshot_metadata", "registered_route_evidence", "registered_route_identity", "verified_role_identities"].includes(gate));
+    (selected.missing_verification_gates || []).every(gate => ["chat_routes_metadata", "migration_snapshot_metadata", "registered_route_evidence", "registered_route_identity", "verified_role_identities", ...(markedIdentityOmission ? ["matching_route_identity"] : [])].includes(gate));
   const phase = evidence?.status;
   const issueId = Number(evidence?.provenance?.registration_issue_id);
   const expectedRoute = Number.isSafeInteger(issueId) && issueId > 0 ? `chat-${issueId}` : null;
@@ -276,10 +281,10 @@ function macosFreshBootstrapMayAdvance(state, recovery, evidence) {
     selected.route_names[0] === expectedRoute && routeBindings.length === 1 &&
     routeBindings[0]?.route === expectedRoute && routeBindings[0]?.status === "active" &&
     routeBindings[0]?.project === state?.sandbox_project_key &&
-    routeBindings[0]?.instance_id === state?.instance_id &&
-    routeBindings[0]?.installation_id === state?.installation_id &&
-    routeBindings[0]?.control_repository === state?.control_repository &&
-    routeBindings[0]?.sandbox_repository === state?.sandbox_repository &&
+    Object.hasOwn(routeBindings[0], "installation_id") && routeBindings[0].installation_id === state?.installation_id &&
+    ["instance_id", "control_repository", "sandbox_repository"].every(key => markedIdentityOmission
+      ? (!Object.hasOwn(routeBindings[0], key) || routeBindings[0][key] === state?.[key])
+      : routeBindings[0][key] === state?.[key]) &&
     String(state?.sandbox_chat_registration_issue || "") === `https://github.com/${state?.control_repository}/issues/${issueId}`);
   const phaseRoutesBound = phase === "NEW_INSTALL_AWAITING_CONNECTOR_AUTH"
     ? selected?.route_names?.length === 0 && routeBindings.length === 0
@@ -453,6 +458,10 @@ function dryRun() {
   const lang=ensureStateLanguage(state);
   const existingInstanceRecovery=process.platform==="darwin"?macosRecoveryReport(state):null;
   if(existingInstanceRecovery?.selection_mode&&existingInstanceRecovery.status!=="SELECTED_FRESH_INSTANCE_VERIFIED") return emit({status:existingInstanceRecovery.status==="CONFLICT"?"ERROR":"NEEDS_USER_ACTION",action_id:"macos_selected_fresh_instance_approval",error_id:"MACOS-SELECTED-FRESH-INSTANCE",dry_run:true,existing_instance_recovery:existingInstanceRecovery,approval_challenge:existingInstanceRecovery.approval_challenge,mutations_performed:false,plan:[]},1);
+  if(existingInstanceRecovery && typeof existingInstanceRecovery === "object" && Object.hasOwn(existingInstanceRecovery,"legacy_evidence_isolation") && existingInstanceRecovery.legacy_evidence_isolation?.reason !== "continued_passive_legacy") {
+    const eligible=existingInstanceRecovery.legacy_evidence_isolation?.classification === "OPAQUE_PRESERVED_NONAUTHORITY" && isMacosFreshFirstInstallBootstrap({state,recovery:existingInstanceRecovery});
+    return emit({status:eligible?"NEEDS_USER_ACTION":"ERROR",action_id:eligible?"macos_official_fresh_preparation":undefined,official_fresh_first_install_bootstrap_eligible:eligible,runtime_readiness:"NOT_ASSESSED",installation_authorized:false,message:eligible?"Official fresh preparation requires its own action authorization.":"Legacy evidence classification was rejected.",dry_run:true,existing_instance_recovery:existingInstanceRecovery,mutations_performed:false,plan:[]},1);
+  }
   const trustedRecoveryEvidence=process.platform==="darwin"?macosTrustedRecoveryEvidence(state,{requireReceipt:Boolean(state.sandbox_review_route)}):null;
   const freshBootstrap = process.platform==="darwin" && macosFreshBootstrapMayAdvance(state, existingInstanceRecovery, trustedRecoveryEvidence);
   if(existingInstanceRecovery && existingInstanceRecovery.status!=="ABSENT" && !freshBootstrap && !macosBootstrapMayAdvance(state, existingInstanceRecovery, trustedRecoveryEvidence) && (!macosStateBound(state, existingInstanceRecovery) || existingInstanceRecovery.status==="CONFLICT")) {
@@ -1451,8 +1460,12 @@ function recoveryPreflight() {
   let stateInvalid=false;
   try { state=loadState({create:false}); } catch { state={}; stateInvalid=true; }
   const report=macosRecoveryReport(state);
+  if(!stateInvalid && report && typeof report === "object" && Object.hasOwn(report,"legacy_evidence_isolation") && report.legacy_evidence_isolation?.reason !== "continued_passive_legacy") {
+    const eligible=report.legacy_evidence_isolation?.classification === "OPAQUE_PRESERVED_NONAUTHORITY" && isMacosFreshFirstInstallBootstrap({state,recovery:report});
+    return emit({status:eligible?"NEEDS_USER_ACTION":"ERROR",action_id:eligible?"macos_official_fresh_preparation":undefined,official_fresh_first_install_bootstrap_eligible:eligible,runtime_readiness:"NOT_ASSESSED",installation_authorized:false,message:eligible?"Official fresh preparation requires its own action authorization.":"Legacy evidence classification was rejected.",existing_instance_recovery:report,mutations_performed:false},1);
+  }
   const trustedEvidence=stateInvalid?{status:"CONFLICT",missing_verification_gates:["installer_state"]}:macosTrustedRecoveryEvidence(state,{requireReceipt:Boolean(state.sandbox_review_route)});
-  const blocked=stateInvalid || (report.status!=="ABSENT" && !macosBootstrapMayAdvance(state, report, trustedEvidence) && (!macosStateBound(state, report) || report.status==="CONFLICT"));
+  const blocked=stateInvalid || (report.status!=="ABSENT" && !macosBootstrapMayAdvance(state, report, trustedEvidence) && !macosFreshBootstrapMayAdvance(state, report, trustedEvidence) && (!macosStateBound(state, report) || report.status==="CONFLICT"));
   const evidenceBlocked=trustedEvidence.status==="CONFLICT"||(trustedEvidence.status==="NEEDS_HUMAN_LEGACY"&&!macosSelectedAwaitingFirstRoute(state,report));
   const finalBlocked=blocked||evidenceBlocked;
   emit({status:finalBlocked?(blocked?(report.status==="CONFLICT"?"ERROR":"NEEDS_USER_ACTION"):"NEEDS_USER_ACTION"):"PASS",error_id:finalBlocked?(blocked?"MACOS-EXISTING-INSTANCE-REVIEW":"MACOS-TRUSTED-RECOVERY-EVIDENCE"):undefined,preferred_language:"en",message:finalBlocked?"Existing macOS evidence requires separate human review; no activation or adoption was performed.":"macOS existing-instance recovery preflight completed without mutation.",existing_instance_recovery:report,trusted_recovery_evidence:trustedEvidence,mutations_performed:false},finalBlocked?1:0);
