@@ -281,6 +281,11 @@ const LEGACY_AUDIT = Object.freeze({ schema_version: 1, classification: "OPAQUE_
 // as route, installation, Runner, review, or execution evidence.  They never
 // enter the recursive legacy tree inspection or metadata identity collection.
 const LEGACY_EXTRA_OPAQUE_ROOTS = Object.freeze(["manual-codex-evidence", "review-evidence"]);
+// Historical inert file leaves under the exactly selected 1832f0bb isolation
+// classifier.  These modes are NEVER permitted by general safeInstanceTree,
+// safeLegacyFreshTree, installer-state parsing, or new-instance checks. No
+// historical leaf is executed, opened, read, or adopted as trusted evidence.
+const LEGACY_PASSIVE_LEAF_MODES = new Set([0o400, 0o444, 0o600, 0o644, 0o700]);
 
 function legacyAudit(classification, reason, extraRoots = []) {
   return {
@@ -347,9 +352,15 @@ function noDuplicateJsonKeys(text) {
   value(); ws(); if (i !== text.length) throw new Error("trailing data");
 }
 
-function legacyJson(fsImpl, file) {
+function legacyJson(fsImpl, file, { passiveSnapshot = false } = {}) {
+  // Only the immediate instance.json in a recognized historical migration
+  // snapshot may be 0644. The top-level chat routes, instance, and migration
+  // intent metadata remain exact 0600. Historical JSON remains identity data,
+  // never an approval, active route, or new instance authority.
+  const allowedMode = stat => (stat.mode & 0o7777) === 0o600 ||
+    (passiveSnapshot && (stat.mode & 0o7777) === 0o644);
   const before = lstat(fsImpl, file);
-  if (!before.ok || before.stat.isSymbolicLink() || !before.stat.isFile() || !strictOwner(before.stat) || before.stat.nlink !== 1 || (before.stat.mode & 0o7777) !== 0o600 || before.stat.size > 1024 * 1024) throw new LegacyPolicyError("metadata_integrity");
+  if (!before.ok || before.stat.isSymbolicLink() || !before.stat.isFile() || !strictOwner(before.stat) || before.stat.nlink !== 1 || !allowedMode(before.stat) || before.stat.size > 1024 * 1024) throw new LegacyPolicyError("metadata_integrity");
   let fd;
   try {
     fd = fsImpl.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
@@ -360,7 +371,7 @@ function legacyJson(fsImpl, file) {
     if (length !== opened.size || length > 1024 * 1024) throw new LegacyPolicyError("metadata_size");
     const data = buffer.subarray(0, length);
     const finalOpened = fsImpl.fstatSync(fd);
-    if (!sameStat(opened, finalOpened) || finalOpened.size !== opened.size || finalOpened.nlink !== 1 || !strictOwner(finalOpened) || (finalOpened.mode & 0o7777) !== 0o600) throw new LegacyPolicyError("metadata_drift");
+    if (!sameStat(opened, finalOpened) || finalOpened.size !== opened.size || finalOpened.nlink !== 1 || !strictOwner(finalOpened) || !allowedMode(finalOpened)) throw new LegacyPolicyError("metadata_drift");
     const text = new TextDecoder("utf-8", { fatal: true }).decode(data);
     noDuplicateJsonKeys(text);
     const result = JSON.parse(text);
@@ -412,7 +423,7 @@ function classifyLegacyIsolation({ fsImpl, home, instancesRoot, entries, state }
           .some(stat => stat.dev === item.stat.dev && stat.ino === item.stat.ino)) throw new LegacyPolicyError("opaque_root_alias");
       opaqueRoots.push({ file, stat: item.stat });
     }
-    const records = [], routes = [], pending = [];
+    const records = [], routes = [], pending = [], retainedSnapshotModes = [];
     for (const name of top) {
       if (name === "short-turn-evidence" || LEGACY_EXTRA_OPAQUE_ROOTS.includes(name)) continue;
       const snapshot = name.startsWith("control-routing-migration-") && safeName(name.slice("control-routing-migration-".length));
@@ -423,6 +434,9 @@ function classifyLegacyIsolation({ fsImpl, home, instancesRoot, entries, state }
       pending.push({ file, depth: 1, snapshot });
       if (allowedFiles.has(name)) { const value = legacyJson(fsImpl, file); records.push(value); if (name === "chat-routes.json") { const parsed = selectedRoutes(value); if (!parsed) throw new LegacyPolicyError("routes_shape"); routes.push(...parsed); } }
     }
+    // Freeze the identity of every newly admitted passive-mode leaf. A change
+    // while inspecting the old tree is a conflict, not a reason to adopt it.
+    const newlyAdmittedLeaves = [];
     let visited = 0, enqueued = pending.length;
     if (enqueued > MAX_TREE_ENTRIES) throw new LegacyPolicyError("tree_bound");
     while (pending.length) {
@@ -434,10 +448,19 @@ function classifyLegacyIsolation({ fsImpl, home, instancesRoot, entries, state }
           if (!safeTreeBasename(entry.name)) throw new LegacyPolicyError("unsafe_basename");
           const child = path.join(file, entry.name);
           if (++enqueued > MAX_TREE_ENTRIES) throw new LegacyPolicyError("tree_bound");
-          if (snapshot && depth === 1 && entry.name === "instance.json") records.push(legacyJson(fsImpl, child));
+          if (snapshot && depth === 1 && entry.name === "instance.json") {
+            records.push(legacyJson(fsImpl, child, { passiveSnapshot: true }));
+            // A historical 0644 metadata exception must remain the same inode
+            // and mode until classification finishes, not merely while parsed.
+            const checked = fsImpl.lstatSync(child);
+            if ((checked.mode & 0o7777) === 0o644) retainedSnapshotModes.push({ file: child, stat: checked });
+          }
           pending.push({ file: child, depth: depth + 1, snapshot: false });
         }
-      } else if (!st.isFile() || st.nlink !== 1 || ![0o600, 0o644].includes(st.mode & 0o7777)) throw new LegacyPolicyError("unsafe_legacy_leaf");
+      } else {
+        if (!st.isFile() || st.nlink !== 1 || !LEGACY_PASSIVE_LEAF_MODES.has(st.mode & 0o7777)) throw new LegacyPolicyError("unsafe_legacy_leaf");
+        if ([0o400, 0o444, 0o700].includes(st.mode & 0o7777)) newlyAdmittedLeaves.push({ file, stat: st });
+      }
     }
     const routeIds = routes.map(route => route.route.toLowerCase());
     if (new Set(routeIds).size !== routeIds.length) throw new LegacyPolicyError("duplicate_routes");
@@ -466,6 +489,11 @@ function classifyLegacyIsolation({ fsImpl, home, instancesRoot, entries, state }
       const selected = candidate(fsImpl, instancesRoot, state.instance_id);
       if (selected.status === "CONFLICT" || selected.route_names.some(name => routeIds.includes(name.toLowerCase()))) throw new LegacyPolicyError("new_candidate_or_route_collision");
       instances.push(selected);
+    }
+    for (const leaf of [...newlyAdmittedLeaves, ...retainedSnapshotModes]) {
+      const after = lstat(fsImpl, leaf.file);
+      if (!after.ok || !after.stat.isFile() || after.stat.nlink !== 1 || !strictOwner(after.stat) ||
+          !sameStat(leaf.stat, after.stat) || after.stat.size !== leaf.stat.size) throw new LegacyPolicyError("passive_leaf_drift");
     }
     for (const [index, item] of opaqueRoots.entries()) {
       const after = fsImpl.lstatSync(item.file);

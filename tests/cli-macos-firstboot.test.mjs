@@ -1171,3 +1171,115 @@ test("G3 legacy evidence isolation 02: pending first registration with v2 marker
   assert.equal(result.mutations_performed, false);
   assert.equal(JSON.stringify(f.state), original);
 });
+
+// G3-LEGACY-SAFE-PASSIVE-MODE-COMPAT-03: existing CLI authority remains
+// unchanged. Only the historical scanner recognizes inert passive file modes.
+function g303CliModeFixture(oldRoot) {
+  const snapshotDir = path.join(oldRoot, "control-routing-migration-passive-history");
+  fs.mkdirSync(snapshotDir, { mode: 0o700 });
+  const snapshot = path.join(snapshotDir, "instance.json");
+  fs.writeFileSync(snapshot, '{"instance_id":"1832f0bb"}', { mode: 0o644 });
+  fs.chmodSync(snapshot, 0o644);
+  const logs = path.join(oldRoot, "logs");
+  fs.mkdirSync(logs, { mode: 0o700 });
+  for (const [i, mode] of [...Array(14).fill(0o700), ...Array(29).fill(0o444), ...Array(9).fill(0o400)].entries()) {
+    const file = path.join(logs, `historical-${String(i).padStart(3, "0")}.dat`);
+    fs.writeFileSync(file, "opaque", { mode });
+    fs.chmodSync(file, mode);
+  }
+  return { snapshot, logs };
+}
+
+test("G3 passive modes 03: official initial Mac dry-run and preflight stop at preparation approval after all 53 anomalies", async t => {
+  const { inspectMacosExistingInstanceRecovery } = await import("../src/lib/macos-existing-instance-recovery.mjs");
+  const home = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "g303-cli-initial-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  fs.chmodSync(home, 0o700);
+  const old = g302CliHistoricalRoots(path.join(home, ".chatgpt-codex-orchestrator", "instances", "1832f0bb"));
+  g303CliModeFixture(old);
+  const state = { preferred_language: "en", macos_setup_approved: true,
+    fresh_first_install_bootstrap: true, fresh_first_install_legacy_instance_id: "1832f0bb" };
+  const report = inspectMacosExistingInstanceRecovery({ home, state });
+  assert.equal(report.legacy_evidence_isolation.classification, "OPAQUE_PRESERVED_NONAUTHORITY");
+  assert.equal(isMacosFreshFirstInstallBootstrap({ state, recovery: report }), true);
+  const before = JSON.stringify(state), emitted = [];
+  const forbidden = () => assert.fail("passive old files cannot trigger external commands or installation");
+  const ctx = vm.createContext({ process: { platform: "darwin" }, loadState: () => state,
+    ensureStateLanguage: () => "en", macosRecoveryReport: () => inspectMacosExistingInstanceRecovery({ home, state }),
+    isMacosFreshFirstInstallBootstrap, emit: result => emitted.push(result), macosTrustedRecoveryEvidence: forbidden,
+    macosPrerequisites: forbidden, macosStateBound: forbidden, commandExists: forbidden,
+    migrationPreflight: forbidden, saveState: forbidden, prepareMigrationIntent: forbidden,
+    prepareControlEnvironment: forbidden, ensureInstallerChatRegistration: forbidden });
+  vm.runInContext(cli.slice(cli.indexOf("function dryRun() {"), cli.indexOf("function codexLogin()")) +
+    cli.slice(cli.indexOf("function recoveryPreflight() {"), cli.indexOf("function reportProblem()")) +
+    "\nthis.dry=dryRun;this.preflight=recoveryPreflight;", ctx);
+  ctx.dry(); ctx.preflight();
+  assert.equal(emitted.length, 2);
+  for (const value of emitted) {
+    assert.equal(value.status, "NEEDS_USER_ACTION");
+    assert.equal(value.action_id, "macos_official_fresh_preparation");
+    assert.equal(value.official_fresh_first_install_bootstrap_eligible, true);
+    assert.equal(value.installation_authorized, false);
+    assert.equal(value.runtime_readiness, "NOT_ASSESSED");
+    assert.equal(value.mutations_performed, false);
+    assert.equal(value.existing_instance_recovery.status, "CONFLICT");
+    assert.equal(value.existing_instance_recovery.legacy_evidence_isolation.runtime_activity_verified, false);
+  }
+  assert.equal(JSON.stringify(state), before);
+});
+
+test("G3 passive modes 03: wrong historical metadata and unsafe passive modes stop both CLI reports before prerequisites", async t => {
+  const { inspectMacosExistingInstanceRecovery } = await import("../src/lib/macos-existing-instance-recovery.mjs");
+  for (const kind of ["snapshot-wrong-mode", "top-level-wrong-mode", "unsafe-leaf", "unknown-sibling"]) {
+    const home = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "g303-cli-deny-"));
+    t.after(() => fs.rmSync(home, { recursive: true, force: true })); fs.chmodSync(home, 0o700);
+    const root = g302CliHistoricalRoots(path.join(home, ".chatgpt-codex-orchestrator", "instances", "1832f0bb"));
+    const built = g303CliModeFixture(root);
+    if (kind === "snapshot-wrong-mode") fs.chmodSync(built.snapshot, 0o444);
+    if (kind === "top-level-wrong-mode") { const p = path.join(root, "instance.json"); fs.writeFileSync(p, "{}", { mode: 0o644 }); fs.chmodSync(p, 0o644); }
+    if (kind === "unsafe-leaf") fs.chmodSync(path.join(built.logs, "historical-000.dat"), 0o755);
+    if (kind === "unknown-sibling") fs.mkdirSync(path.join(root, "not-approved"), { mode: 0o700 });
+    const state = { preferred_language: "en", macos_setup_approved: true,
+      fresh_first_install_bootstrap: true, fresh_first_install_legacy_instance_id: "1832f0bb" };
+    const emitted = [], forbidden = () => assert.fail("invalid historical metadata must not allow external action");
+    const ctx = vm.createContext({ process: { platform: "darwin" }, loadState: () => state,
+      ensureStateLanguage: () => "en", macosRecoveryReport: () => inspectMacosExistingInstanceRecovery({ home, state }),
+      isMacosFreshFirstInstallBootstrap, emit: v => emitted.push(v), macosTrustedRecoveryEvidence: forbidden,
+      macosPrerequisites: forbidden, commandExists: forbidden, migrationPreflight: forbidden,
+      saveState: forbidden, prepareControlEnvironment: forbidden });
+    vm.runInContext(cli.slice(cli.indexOf("function dryRun() {"), cli.indexOf("function codexLogin()")) +
+      cli.slice(cli.indexOf("function recoveryPreflight() {"), cli.indexOf("function reportProblem()")) +
+      "\nthis.dry=dryRun;this.preflight=recoveryPreflight;", ctx);
+    ctx.dry(); ctx.preflight();
+    assert.equal(emitted.length, 2, kind);
+    for (const report of emitted) {
+      assert.equal(report.status, "ERROR", kind);
+      assert.equal(report.mutations_performed, false, kind);
+      assert.equal(report.existing_instance_recovery.legacy_evidence_isolation.classification, "REJECTED", kind);
+      assert.notEqual(report.official_fresh_first_install_bootstrap_eligible, true, kind);
+    }
+  }
+});
+
+test("G3 passive modes 03: two-root continuation retains independent provenance and no fallback Chat", async t => {
+  const { inspectMacosExistingInstanceRecovery } = await import("../src/lib/macos-existing-instance-recovery.mjs");
+  const f = g3RegistrationFixture(t);
+  Object.assign(f.state, { fresh_first_install_bootstrap: true, fresh_first_install_legacy_instance_id: "1832f0bb" });
+  const old = g302CliHistoricalRoots(path.join(path.dirname(f.instance), "1832f0bb"));
+  g303CliModeFixture(old);
+  const recovery = inspectMacosExistingInstanceRecovery({ home: f.home, state: f.state }), evidence = f.verify();
+  assert.equal(recovery.status, "CONFLICT");
+  assert.equal(recovery.legacy_evidence_isolation.reason, "continued_passive_legacy");
+  assert.equal(recovery.legacy_evidence_isolation.schema_version, 2);
+  assert.equal(recovery.legacy_evidence_isolation.historical_instances_are_authority, false);
+  const context = vm.createContext({ path, os: { homedir: () => f.home }, canonicalInstallationId, findRegisteredChatRoute });
+  vm.runInContext(cli.slice(cli.indexOf("function macosBootstrapMayAdvance("), cli.indexOf("function macosSelectedAwaitingFirstRoute(")) +
+    "\nthis.fresh=macosFreshBootstrapMayAdvance;", context);
+  assert.equal(context.fresh(f.state, recovery, evidence), true);
+  const copy = structuredClone(recovery);
+  copy.instances[0].legacy_evidence_isolation.runtime_activity_verified = true;
+  assert.equal(context.fresh(f.state, copy, evidence), false);
+  assert.equal(findRegisteredChatRoute(f.state, { projectKey: f.state.sandbox_project_key, chatUrl: f.state.reviewer_chat_url }), null);
+  assert.equal(f.state.sandbox_review_route, undefined);
+  assert.notEqual(f.state.target_environment_ready, true);
+});

@@ -920,7 +920,9 @@ test("G3 legacy evidence isolation: unsafe names, roots, modes and metadata reje
     ["unknown directory", root => fs.mkdirSync(path.join(root, "unknown"))],
     ["unknown file", root => fs.writeFileSync(path.join(root, "unknown"), "x")],
     ["legacy receipt", root => fs.writeFileSync(path.join(root, "trusted-recovery-evidence-v1.json"), "{}")],
-    ["outside executable", root => { fs.mkdirSync(path.join(root, "logs")); fs.writeFileSync(path.join(root, "logs", "helper"), "x", { mode: 0o700 }); }],
+    // 0700 regular files are now explicitly permitted as inert legacy leaves.
+    // Retain the executable rejection using the still-unapproved 0755 mode.
+    ["outside shared executable", root => { fs.mkdirSync(path.join(root, "logs")); fs.writeFileSync(path.join(root, "logs", "helper"), "x", { mode: 0o755 }); }],
     ["outside symlink", root => fs.symlinkSync("/does-not-exist", path.join(root, "logs"))],
     ["invalid UTF-8", root => fs.writeFileSync(path.join(root, "instance.json"), Buffer.from([0xff]), { mode: 0o600 })],
     ["oversize JSON", root => fs.writeFileSync(path.join(root, "instance.json"), Buffer.alloc(1024 * 1024 + 1, 0x20), { mode: 0o600 })],
@@ -1423,5 +1425,253 @@ test("G3 legacy evidence isolation 02: a private additional root does not bypass
   for (const bad of [{ ...g3Intent, macos_setup_approved: 1 }, { ...g3Intent, fresh_first_install_bootstrap: "true" }, { ...g3Intent, fresh_first_install_legacy_instance_id: "other" }, {}]) {
     const report = inspectMacosExistingInstanceRecovery({ home: f.home, state: bad });
     assert.equal(isMacosFreshFirstInstallBootstrap({ state: bad, recovery: report }), false);
+  }
+});
+
+// G3-LEGACY-SAFE-PASSIVE-MODE-COMPAT-03. All fixtures are newly-created
+// synthetic homes. These tests never contact the user's actual old instance.
+const g303Modes = [0o400, 0o444, 0o600, 0o644, 0o700];
+function g303Snapshot(f, mode = 0o644, value = { instance_id: "1832f0bb" }) {
+  const dir = path.join(f.root, "control-routing-migration-passive-history");
+  fs.mkdirSync(dir, { mode: 0o700 });
+  const file = path.join(dir, "instance.json");
+  writeJson(file, value, mode);
+  return file;
+}
+function g303Leaf(f, mode = 0o400, relative = "logs/retained-old-payload") {
+  const file = path.join(f.root, relative);
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(file, Buffer.from("passive historical bytes"), { mode });
+  fs.chmodSync(file, mode);
+  return file;
+}
+function g303AssertOpaque(report) {
+  assert.equal(report.status, "CONFLICT");
+  assert.equal(report.legacy_evidence_isolation.classification, "OPAQUE_PRESERVED_NONAUTHORITY");
+  assert.equal(report.legacy_evidence_isolation.reason, "initial_passive_legacy");
+  assert.equal(report.legacy_evidence_isolation.schema_version, 2);
+  assert.deepEqual(report.legacy_evidence_isolation.opaque_evidence_subtrees,
+    ["short-turn-evidence", "manual-codex-evidence", "review-evidence"]);
+  for (const name of ["historical_instances_are_authority", "descendants_inspected", "runtime_activity_verified"])
+    assert.equal(report.legacy_evidence_isolation[name], false, name);
+  assert.equal(report.fresh_first_install_candidate, true);
+  assert.equal(report.mutations_performed, false);
+  assert.equal(isMacosFreshFirstInstallBootstrap({ state: g3Intent, recovery: report }), true);
+}
+
+test("G3 passive modes 03: all 53 observed mode anomalies admit one nonauthority historical classification", t => {
+  const f = g302Fixture(t), snapshot = g303Snapshot(f), leaves = [];
+  const modes = [...Array(14).fill(0o700), ...Array(29).fill(0o444), ...Array(9).fill(0o400)];
+  for (const [i, mode] of modes.entries()) leaves.push(g303Leaf(f, mode, `logs/history-${String(i).padStart(3, "0")}.dat`));
+  const originals = [snapshot, ...leaves].map(file => ({ file, contents: fs.readFileSync(file), stat: fs.lstatSync(file) }));
+  const report = inspectMacosExistingInstanceRecovery({ home: f.home, state: g3Intent });
+  g303AssertOpaque(report);
+  for (const record of originals) {
+    assert.deepEqual(fs.readFileSync(record.file), record.contents);
+    const after = fs.lstatSync(record.file);
+    for (const field of ["dev", "ino", "uid", "mode", "nlink", "size", "mtimeMs", "ctimeMs"])
+      assert.equal(after[field], record.stat[field], `${path.basename(record.file)} ${field}`);
+  }
+  assert.equal(leaves.filter(file => (fs.lstatSync(file).mode & 0o7777) === 0o700).length, 14);
+  assert.equal(leaves.filter(file => (fs.lstatSync(file).mode & 0o7777) === 0o444).length, 29);
+  assert.equal(leaves.filter(file => (fs.lstatSync(file).mode & 0o7777) === 0o400).length, 9);
+});
+
+test("G3 passive modes 03: only the listed exact passive file modes pass and no files are executed", t => {
+  for (const mode of g303Modes) {
+    const f = g302Fixture(t), leaf = g303Leaf(f, mode), snapshot = g303Snapshot(f);
+    const report = inspectMacosExistingInstanceRecovery({ home: f.home, state: g3Intent });
+    g303AssertOpaque(report);
+    assert.equal(fs.lstatSync(leaf).mode & 0o7777, mode);
+    assert.equal(fs.lstatSync(snapshot).mode & 0o7777, 0o644);
+  }
+});
+
+// Model uncommon special-mode bits in the injected lstat boundary. APFS and
+// other filesystems may silently clear setuid/sticky bits on ordinary files;
+// the test must still exercise the actual denial without relying on chmod.
+function g303ModeProxy(file, mode) {
+  return new Proxy(fs, { get(target, key) {
+    if (key !== "lstatSync") return target[key];
+    return (...args) => {
+      const actual = target.lstatSync(...args);
+      if (args[0] !== file) return actual;
+      return new Proxy(actual, { get(object, prop) {
+        if (prop === "mode") return (object.mode & ~0o7777) | mode;
+        const value = object[prop]; return typeof value === "function" ? value.bind(object) : value;
+      } });
+    };
+  } });
+}
+
+test("G3 passive modes 03: only immediate migration snapshot instance.json permits legacy 0644", t => {
+  for (const mode of [0o600, 0o644]) {
+    const f = g302Fixture(t); g303Snapshot(f, mode);
+    g303AssertOpaque(inspectMacosExistingInstanceRecovery({ home: f.home, state: g3Intent }));
+  }
+  for (const name of ["instance.json", "chat-routes.json", "migration-intent.json"]) {
+    const f = g302Fixture(t); g303Snapshot(f);
+    const meta = path.join(f.root, name); writeJson(meta, name === "chat-routes.json" ? { routes: [] } : {}, 0o644);
+    const report = inspectMacosExistingInstanceRecovery({ home: f.home, state: g3Intent });
+    assert.equal(report.legacy_evidence_isolation.classification, "REJECTED", name);
+    assert.equal(report.legacy_evidence_isolation.reason, "metadata_integrity", name);
+  }
+  for (const mode of [0o400, 0o444, 0o700, 0o755, 0o666, 0o1644]) {
+    const f = g302Fixture(t);
+    const special = (mode & 0o7000) !== 0;
+    const file = g303Snapshot(f, special ? 0o600 : mode);
+    const result = inspectMacosExistingInstanceRecovery({ home: f.home, state: g3Intent,
+      ...(special ? { fsImpl: g303ModeProxy(file, mode) } : {}) });
+    assert.equal(result.legacy_evidence_isolation.classification, "REJECTED", mode.toString(8));
+    assert.equal(result.legacy_evidence_isolation.reason, "metadata_integrity", mode.toString(8));
+  }
+});
+
+test("G3 passive modes 03: passive leaf special bits, write bits and unlisted modes remain rejected", t => {
+  for (const mode of [0o000, 0o200, 0o500, 0o555, 0o640, 0o755, 0o777, 0o601, 0o404, 0o704, 0o1700, 0o2400, 0o4600]) {
+    const f = g302Fixture(t); g303Snapshot(f);
+    const special = (mode & 0o7000) !== 0;
+    const file = g303Leaf(f, special ? 0o600 : mode);
+    const r = inspectMacosExistingInstanceRecovery({ home: f.home, state: g3Intent,
+      ...(special ? { fsImpl: g303ModeProxy(file, mode) } : {}) });
+    assert.equal(r.legacy_evidence_isolation.classification, "REJECTED", mode.toString(8));
+    assert.equal(r.fresh_first_install_candidate, false, mode.toString(8));
+    assert.ok(["unsafe_legacy_tree", "unsafe_legacy_leaf"].includes(r.legacy_evidence_isolation.reason), mode.toString(8));
+  }
+});
+
+test("G3 passive modes 03: mode exception does not apply to nonapproved recovery paths", t => {
+  for (const mode of [0o400, 0o444, 0o700]) {
+    const f = g302Fixture(t); g303Leaf(f, mode);
+    const withoutIntent = inspectMacosExistingInstanceRecovery({ home: f.home, state: {} });
+    assert.ok(["CONFLICT", "NEEDS_VERIFICATION"].includes(withoutIntent.status));
+    assert.notEqual(withoutIntent.fresh_first_install_candidate, true);
+    assert.equal(withoutIntent.legacy_evidence_isolation, undefined);
+  }
+});
+
+test("G3 passive modes 03: mode exception never promotes old instance metadata or active Chat routes", t => {
+  const f = g302Fixture(t); g303Leaf(f, 0o700); g303Snapshot(f);
+  const privateUrl = "https://chatgpt.com/c/private-historical-route";
+  writeJson(path.join(f.root, "chat-routes.json"), { routes: [{ route: "chat-historical", status: "active", project: "old-project", chat_url: privateUrl }] }, 0o600);
+  const r = inspectMacosExistingInstanceRecovery({ home: f.home, state: g3Intent });
+  g303AssertOpaque(r);
+  assert.equal(Object.hasOwn(r.instances[0], "identity"), false);
+  assert.equal(JSON.stringify(r).includes(privateUrl), false);
+  assert.equal(Object.hasOwn(r, "review_route"), false);
+  assert.equal(Object.hasOwn(r.legacy_evidence_isolation, "installation_authorized"), false);
+});
+
+test("G3 passive modes 03: legacy 0644 snapshot still rejects duplicate keys, malformed data and hostile identities", t => {
+  const values = [
+    '{"instance_id":"1832f0bb","instance_id":"1832f0bb"}',
+    '{"instance_id":"foreign"}',
+    '{"destination":{"path":"/unrelated"}}',
+    '{"installation_id":"foreign"}',
+    '{"control_repository":"other/forged-control"}',
+    '[{"instance_id":"1832f0bb"}]',
+    '{"instance_id":"1832f0bb",',
+  ];
+  for (const [i, content] of values.entries()) {
+    const f = g302Fixture(t), snapshot = g303Snapshot(f);
+    fs.writeFileSync(snapshot, content); fs.chmodSync(snapshot, 0o644);
+    const r = inspectMacosExistingInstanceRecovery({ home: f.home, state: g3Intent });
+    assert.equal(r.legacy_evidence_isolation.classification, "REJECTED", i);
+    assert.equal(r.fresh_first_install_candidate, false);
+  }
+  for (const bytes of [Buffer.from([0xff, 0xfe]), Buffer.alloc(1024 * 1024 + 1, 0x20)]) {
+    const f = g302Fixture(t), snapshot = g303Snapshot(f);
+    fs.writeFileSync(snapshot, bytes); fs.chmodSync(snapshot, 0o644);
+    assert.equal(inspectMacosExistingInstanceRecovery({ home: f.home, state: g3Intent }).legacy_evidence_isolation.classification, "REJECTED");
+  }
+});
+
+test("G3 passive modes 03: 0644 snapshot and passive file symlinks or hard links are not permitted", t => {
+  for (const which of ["snapshot", "leaf"]) for (const kind of ["symlink", "hardlink"]) {
+    const f = g302Fixture(t), file = which === "snapshot" ? g303Snapshot(f) : g303Leaf(f, 0o444);
+    const outside = path.join(f.root, "logs", "link-target");
+    fs.mkdirSync(path.dirname(outside), { recursive: true, mode: 0o700 });
+    if (kind === "hardlink") fs.linkSync(file, outside);
+    else { fs.unlinkSync(file); fs.symlinkSync(outside, file); }
+    const r = inspectMacosExistingInstanceRecovery({ home: f.home, state: g3Intent });
+    assert.equal(r.legacy_evidence_isolation.classification, "REJECTED", `${which}-${kind}`);
+    assert.equal(r.fresh_first_install_candidate, false);
+  }
+});
+
+test("G3 passive modes 03: foreign owner and inode drift still reject observed historical modes", t => {
+  for (const which of ["snapshot", "leaf"]) {
+    const f = g302Fixture(t), file = which === "snapshot" ? g303Snapshot(f) : g303Leaf(f, 0o400);
+    for (const prop of ["uid", "mode", "ino", "ctimeMs"]) {
+      let seen = 0;
+      const proxy = new Proxy(fs, { get(target, key) {
+        if (key !== "lstatSync" && key !== "fstatSync") return target[key];
+        return (...args) => {
+          const stat = target[key](...args);
+          if (key === "lstatSync" && args[0] !== file) return stat;
+          // Inert leaves are inspected once; uid/mode/inode violation alone
+          // suffices. Snapshot is also rechecked around the bounded read.
+          const changed = prop === "uid" || (prop === "mode" && which === "leaf") || ++seen > 1;
+          return new Proxy(stat, { get(obj, field) {
+            if (changed && field === prop) return field === "mode" ? (obj[field] & ~0o7777) | 0o666 : obj[field] + 1;
+            const value = obj[field]; return typeof value === "function" ? value.bind(obj) : value;
+          } });
+        };
+      } });
+      const r = inspectMacosExistingInstanceRecovery({ home: f.home, state: g3Intent, fsImpl: proxy });
+      assert.equal(r.legacy_evidence_isolation.classification, "REJECTED", `${which}/${prop}`);
+    }
+  }
+});
+
+test("G3 passive modes 03: legacy file payloads and all opaque evidence descendants are never read", t => {
+  const f = g302Fixture(t), retained = g303Leaf(f, 0o700), snapshot = g303Snapshot(f);
+  for (const name of g302OpaqueNames) {
+    const deep = path.join(f.root, name, "do-not-read");
+    fs.writeFileSync(deep, "sensitive", { mode: 0o400 });
+  }
+  const forbidden = [], fsImpl = new Proxy(fs, { get(target, key) {
+    const fn = target[key]; if (typeof fn !== "function") return fn;
+    return (...args) => {
+      const file = args[0];
+      if (typeof file === "string" && (
+        (file === retained && ["openSync", "readFileSync", "readSync"].includes(key)) ||
+        g302OpaqueNames.some(name => file.startsWith(path.join(f.root, name) + path.sep)) ||
+        (file === snapshot && key === "readFileSync")
+      )) { forbidden.push({ key, file }); throw new Error("forbidden passive read"); }
+      return fn(...args);
+    };
+  } });
+  g303AssertOpaque(inspectMacosExistingInstanceRecovery({ home: f.home, state: g3Intent, fsImpl }));
+  assert.deepEqual(forbidden, []);
+});
+
+test("G3 passive modes 03: mode repair retains strict depth bounds and unknown top-level rejection", t => {
+  for (const kind of ["extra-top", "deep-tree", "third-instance"]) {
+    const f = g302Fixture(t); g303Snapshot(f); g303Leaf(f, 0o444);
+    if (kind === "extra-top") fs.mkdirSync(path.join(f.root, "old-extra"), { mode: 0o700 });
+    else if (kind === "third-instance") fs.mkdirSync(path.join(f.instances, "unexpected-third"), { mode: 0o700 });
+    else {
+      let dir = path.join(f.root, "logs");
+      for (let i = 0; i < 66; i++) { dir = path.join(dir, `n${i}`); fs.mkdirSync(dir, { mode: 0o700 }); }
+    }
+    const r = inspectMacosExistingInstanceRecovery({ home: f.home, state: g3Intent });
+    assert.equal(r.legacy_evidence_isolation.classification, "REJECTED", kind);
+    assert.equal(r.fresh_first_install_candidate, false);
+  }
+});
+
+test("G3 passive modes 03: identical historical classification is idempotent and no data changes", t => {
+  const f = g302Fixture(t), snapshot = g303Snapshot(f), leaf = g303Leaf(f, 0o444);
+  const original = [snapshot, leaf].map(file => ({ file, stat: fs.lstatSync(file), content: fs.readFileSync(file) }));
+  const first = inspectMacosExistingInstanceRecovery({ home: f.home, state: g3Intent });
+  const second = inspectMacosExistingInstanceRecovery({ home: f.home, state: g3Intent });
+  assert.deepEqual(first, second);
+  g303AssertOpaque(first);
+  for (const item of original) {
+    assert.deepEqual(fs.readFileSync(item.file), item.content);
+    const st = fs.lstatSync(item.file);
+    for (const field of ["dev", "ino", "mode", "uid", "nlink", "size", "mtimeMs", "ctimeMs"])
+      assert.equal(st[field], item.stat[field]);
   }
 });
