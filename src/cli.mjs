@@ -15,7 +15,7 @@ import { ensureInstallerChatRegistration, findRegisteredChatRoute, normalizeChat
 import { pendingCallbackCount, doctorHealth, repairHealth } from "./lib/runtime-health.mjs";
 import { macosPrerequisites, migrationPreflight, macosRuntimeAction, prepareMigrationIntent, trustedClaimRead } from "./lib/macos-platform.mjs";
 import { macosNativeHelperPreflight, prepareMacosNativeHelper, verifyMacosNativeCapability } from "./lib/macos-native-helper-install.mjs";
-import { inspectMacosExistingInstanceRecovery, inspectMacosSelectedFreshInstance, approveMacosSelectedFreshInstance, isMacosFreshFirstInstallBootstrap } from "./lib/macos-existing-instance-recovery.mjs";
+import { inspectMacosExistingInstanceRecovery, inspectMacosSelectedFreshInstance, approveMacosSelectedFreshInstance, isMacosFreshFirstInstallBootstrap, macosOfficialFreshPreparationChallenge, hasMacosOfficialFreshPreparationApproval, macosOfficialFreshPreparationReceipt } from "./lib/macos-existing-instance-recovery.mjs";
 import { MACOS_PERSONAL_USE_POLICY, hasMacosPersonalUsePolicy, hasTrustedSingleUserReadinessProfile, hasTrustedSingleUserReadinessProfileMarker, hasTrustedSingleUserReadinessIdentity, macosPersonalUsePolicyChallenge, trustedSingleUserReadinessProfileChallenge, TRUSTED_SINGLE_USER_READINESS_PROFILE } from "./lib/macos-personal-use-service.mjs";
 import { inspectMacosRunnerBootstrap, approveMacosRunnerBootstrap } from "./lib/macos-runner-bootstrap.mjs";
 import { verifyTrustedRecoveryEvidence, issueTrustedRecoveryEvidence, githubReadOnlyApi } from "./lib/macos-trusted-recovery-evidence.mjs";
@@ -31,6 +31,7 @@ const argv = process.argv.slice(2);
 const command = argv[0] || "help";
 const wantsJson = argv.includes("--json");
 const productConfig = JSON.parse(fs.readFileSync(new URL("../product.json", import.meta.url),"utf8"));
+const OFFICIAL_SOURCE_ROOT = fs.realpathSync(new URL("../", import.meta.url));
 
 function macosStateFile({create=false}={}){
   const root=path.resolve(stateRoot({create:false})),home=path.resolve(os.homedir());
@@ -472,7 +473,17 @@ function dryRun() {
   if(existingInstanceRecovery?.selection_mode&&existingInstanceRecovery.status!=="SELECTED_FRESH_INSTANCE_VERIFIED") return emit({status:existingInstanceRecovery.status==="CONFLICT"?"ERROR":"NEEDS_USER_ACTION",action_id:"macos_selected_fresh_instance_approval",error_id:"MACOS-SELECTED-FRESH-INSTANCE",dry_run:true,existing_instance_recovery:existingInstanceRecovery,approval_challenge:existingInstanceRecovery.approval_challenge,mutations_performed:false,plan:[]},1);
   if(existingInstanceRecovery && typeof existingInstanceRecovery === "object" && Object.hasOwn(existingInstanceRecovery,"legacy_evidence_isolation") && existingInstanceRecovery.legacy_evidence_isolation?.reason !== "continued_passive_legacy") {
     const eligible=existingInstanceRecovery.legacy_evidence_isolation?.classification === "OPAQUE_PRESERVED_NONAUTHORITY" && isMacosFreshFirstInstallBootstrap({state,recovery:existingInstanceRecovery});
-    return emit({status:eligible?"NEEDS_USER_ACTION":"ERROR",action_id:eligible?"macos_official_fresh_preparation":undefined,official_fresh_first_install_bootstrap_eligible:eligible,runtime_readiness:"NOT_ASSESSED",installation_authorized:false,message:eligible?"Official fresh preparation requires its own action authorization.":"Legacy evidence classification was rejected.",dry_run:true,existing_instance_recovery:existingInstanceRecovery,mutations_performed:false,plan:[]},1);
+    const challenge=eligible?macosOfficialFreshPreparationChallenge({state,recovery:existingInstanceRecovery,home:os.homedir(),sourceRoot:OFFICIAL_SOURCE_ROOT}):null;
+    const approved=Boolean(challenge && hasMacosOfficialFreshPreparationApproval({state,recovery:existingInstanceRecovery,home:os.homedir(),sourceRoot:OFFICIAL_SOURCE_ROOT}));
+    const stale=state.macos_official_fresh_preparation_approval !== undefined && !approved;
+    return emit({status:stale||!eligible||!challenge?"ERROR":approved?"PASS":"NEEDS_USER_ACTION",
+      action_id:!approved&&eligible&&challenge&&!stale?"macos_official_fresh_preparation":undefined,
+      approval_challenge:!approved&&eligible&&challenge&&!stale?challenge:undefined,
+      error_id:stale?"MACOS-OFFICIAL-FRESH-APPROVAL-STALE":!eligible||!challenge?"MACOS-OFFICIAL-FRESH-REVIEW":undefined,
+      official_fresh_first_install_bootstrap_eligible:eligible,official_fresh_preparation_approved:approved,
+      runtime_readiness:"NOT_ASSESSED",installation_authorized:false,
+      message:approved?"Separate official fresh-preparation consent is verified; setup remains separately gated.":eligible&&challenge&&!stale?"Explicit user authorization is required before any official preparation write.":"Legacy evidence or its separate approval is rejected.",
+      dry_run:true,existing_instance_recovery:existingInstanceRecovery,mutations_performed:false,plan:[]},stale||!eligible||!challenge||!approved?1:0);
   }
   const trustedRecoveryEvidence=process.platform==="darwin"?macosTrustedRecoveryEvidence(state,{requireReceipt:Boolean(state.sandbox_review_route)}):null;
   const freshBootstrap = process.platform==="darwin" && macosFreshBootstrapMayAdvance(state, existingInstanceRecovery, trustedRecoveryEvidence);
@@ -580,7 +591,13 @@ function answer() {
 
   const bool = v => /^(true|yes|y|1|done|completed)$/i.test(String(v || ""));
 
-  if(actionId === "macos_selected_fresh_instance_approval"){
+  if(actionId === "macos_official_fresh_preparation"){
+    if(process.platform!=="darwin")return emit({status:"ERROR",error_id:"MACOS-OFFICIAL-FRESH-APPROVAL-PLATFORM",mutations_performed:false},1);
+    const recovery=macosRecoveryReport(state);
+    const receipt=macosOfficialFreshPreparationReceipt({state,recovery,value,home:os.homedir(),sourceRoot:OFFICIAL_SOURCE_ROOT});
+    if(!receipt)return emit({status:"ERROR",error_id:"MACOS-OFFICIAL-FRESH-APPROVAL-MISMATCH",mutations_performed:false,existing_instance_recovery:recovery},1);
+    state.macos_official_fresh_preparation_approval=receipt;
+  } else if(actionId === "macos_selected_fresh_instance_approval"){
     if(process.platform!=="darwin"||valueOf("--selected-fresh-instance")!==state.instance_id) return emit({status:"ERROR",error_id:"MACOS-SELECTED-FRESH-APPROVAL",message:"Select the exact prepared fresh instance ID for this separate approval.",mutations_performed:false},1);
     try{
       const selectedState={...state,selected_fresh_instance:true};
@@ -708,6 +725,23 @@ function runSetup() {
     if(hasTrustedSingleUserReadinessProfileMarker(state)&&!hasTrustedSingleUserReadinessProfile(state)) return emit({status:"ERROR",error_id:"MACOS-READINESS-PROFILE-INVALID",recoverable:false,preferred_language:lang,mutations_performed:false},1);
     const existingInstanceRecovery=macosRecoveryReport(state);
     const initialFreshFirstInstall=isMacosFreshFirstInstallBootstrap({state,recovery:existingInstanceRecovery,installStateMissing:state.__macos_install_state_missing===true});
+    if(existingInstanceRecovery && Object.hasOwn(existingInstanceRecovery,"legacy_evidence_isolation") &&
+        existingInstanceRecovery.legacy_evidence_isolation?.reason !== "continued_passive_legacy" &&
+        existingInstanceRecovery.legacy_evidence_isolation?.reason !== "initial_passive_legacy")
+      return emit({status:"ERROR",error_id:"MACOS-OFFICIAL-FRESH-REVIEW",preferred_language:lang,
+        message:"Historical isolation classification is rejected; setup stopped before external actions.",
+        existing_instance_recovery:existingInstanceRecovery,mutations_performed:false},1);
+    if(existingInstanceRecovery?.legacy_evidence_isolation?.reason === "initial_passive_legacy"){
+      const challenge=macosOfficialFreshPreparationChallenge({state,recovery:existingInstanceRecovery,home:os.homedir(),sourceRoot:OFFICIAL_SOURCE_ROOT});
+      const approved=Boolean(challenge && hasMacosOfficialFreshPreparationApproval({state,recovery:existingInstanceRecovery,home:os.homedir(),sourceRoot:OFFICIAL_SOURCE_ROOT}));
+      if(!approved) return emit({status:challenge&&state.macos_official_fresh_preparation_approval===undefined?"NEEDS_USER_ACTION":"ERROR",
+        action_id:challenge&&state.macos_official_fresh_preparation_approval===undefined?"macos_official_fresh_preparation":undefined,
+        approval_challenge:challenge&&state.macos_official_fresh_preparation_approval===undefined?challenge:undefined,
+        error_id:state.macos_official_fresh_preparation_approval!==undefined?"MACOS-OFFICIAL-FRESH-APPROVAL-STALE":undefined,
+        official_fresh_first_install_bootstrap_eligible:Boolean(challenge),installation_authorized:false,
+        message:"A separate exact official fresh-preparation authorization is required; setup stopped before mutation.",
+        existing_instance_recovery:existingInstanceRecovery,mutations_performed:false},1);
+    }
     let earlyTrustedEvidence=null;
     const freshFirstInstall=initialFreshFirstInstall;
     if(existingInstanceRecovery.selection_mode&&existingInstanceRecovery.status!=="SELECTED_FRESH_INSTANCE_VERIFIED") return emit({status:existingInstanceRecovery.status==="CONFLICT"?"ERROR":"NEEDS_USER_ACTION",action_id:"macos_selected_fresh_instance_approval",error_id:"MACOS-SELECTED-FRESH-INSTANCE",preferred_language:lang,existing_instance_recovery:existingInstanceRecovery,approval_challenge:existingInstanceRecovery.approval_challenge,mutations_performed:false,message:"A separate exact approval of this independently verified fresh instance is required; historical instances confer no authority."},1);
@@ -1474,7 +1508,17 @@ function recoveryPreflight() {
   const report=macosRecoveryReport(state);
   if(!stateInvalid && report && typeof report === "object" && Object.hasOwn(report,"legacy_evidence_isolation") && report.legacy_evidence_isolation?.reason !== "continued_passive_legacy") {
     const eligible=report.legacy_evidence_isolation?.classification === "OPAQUE_PRESERVED_NONAUTHORITY" && isMacosFreshFirstInstallBootstrap({state,recovery:report});
-    return emit({status:eligible?"NEEDS_USER_ACTION":"ERROR",action_id:eligible?"macos_official_fresh_preparation":undefined,official_fresh_first_install_bootstrap_eligible:eligible,runtime_readiness:"NOT_ASSESSED",installation_authorized:false,message:eligible?"Official fresh preparation requires its own action authorization.":"Legacy evidence classification was rejected.",existing_instance_recovery:report,mutations_performed:false},1);
+    const challenge=eligible?macosOfficialFreshPreparationChallenge({state,recovery:report,home:os.homedir(),sourceRoot:OFFICIAL_SOURCE_ROOT}):null;
+    const approved=Boolean(challenge && hasMacosOfficialFreshPreparationApproval({state,recovery:report,home:os.homedir(),sourceRoot:OFFICIAL_SOURCE_ROOT}));
+    const stale=state.macos_official_fresh_preparation_approval !== undefined && !approved;
+    return emit({status:stale||!eligible||!challenge?"ERROR":approved?"PASS":"NEEDS_USER_ACTION",
+      action_id:!approved&&eligible&&challenge&&!stale?"macos_official_fresh_preparation":undefined,
+      approval_challenge:!approved&&eligible&&challenge&&!stale?challenge:undefined,
+      error_id:stale?"MACOS-OFFICIAL-FRESH-APPROVAL-STALE":!eligible||!challenge?"MACOS-OFFICIAL-FRESH-REVIEW":undefined,
+      official_fresh_first_install_bootstrap_eligible:eligible,official_fresh_preparation_approved:approved,
+      runtime_readiness:"NOT_ASSESSED",installation_authorized:false,
+      message:approved?"Separate official fresh-preparation consent is verified; setup remains separately gated.":eligible&&challenge&&!stale?"Explicit user authorization is required before any official preparation write.":"Legacy evidence or its separate approval is rejected.",
+      existing_instance_recovery:report,mutations_performed:false},stale||!eligible||!challenge||!approved?1:0);
   }
   const trustedEvidence=stateInvalid?{status:"CONFLICT",missing_verification_gates:["installer_state"]}:macosTrustedRecoveryEvidence(state,{requireReceipt:Boolean(state.sandbox_review_route)});
   const blocked=stateInvalid || (report.status!=="ABSENT" && !macosBootstrapMayAdvance(state, report, trustedEvidence) && !macosFreshBootstrapMayAdvance(state, report, trustedEvidence) && (!macosStateBound(state, report) || report.status==="CONFLICT"));

@@ -669,7 +669,7 @@ test("G3 legacy evidence isolation: CLI passive paths use real classification an
   fs.mkdirSync(path.join(root, "short-turn-evidence"), { recursive: true, mode: 0o700 });
   const state = { preferred_language: "en", macos_setup_approved: true, fresh_first_install_bootstrap: true, fresh_first_install_legacy_instance_id: "1832f0bb" };
   const before = JSON.stringify(state), emitted = [];
-  const context = vm.createContext({ path, os: { homedir: () => home }, process: { platform: "darwin" }, loadState: () => state, ensureStateLanguage: () => "en", valueOf: () => undefined, inspectMacosExistingInstanceRecovery, isMacosFreshFirstInstallBootstrap, emit: result => emitted.push(result), macosTrustedRecoveryEvidence: () => assert.fail("no external evidence calls"), commandExists: () => assert.fail("no commands") });
+  const context = vm.createContext({ OFFICIAL_SOURCE_ROOT:"/synthetic-scope", macosOfficialFreshPreparationChallenge:()=>"test-only-challenge", hasMacosOfficialFreshPreparationApproval:()=>false, path, os: { homedir: () => home }, process: { platform: "darwin" }, loadState: () => state, ensureStateLanguage: () => "en", valueOf: () => undefined, inspectMacosExistingInstanceRecovery, isMacosFreshFirstInstallBootstrap, emit: result => emitted.push(result), macosTrustedRecoveryEvidence: () => assert.fail("no external evidence calls"), commandExists: () => assert.fail("no commands") });
   const report = cli.slice(cli.indexOf("function macosRecoveryReport("), cli.indexOf("function macosBootstrapMayAdvance("));
   const dry = cli.slice(cli.indexOf("function dryRun() {"), cli.indexOf("function codexLogin()"));
   const preflight = cli.slice(cli.indexOf("function recoveryPreflight() {"), cli.indexOf("function reportProblem()"));
@@ -695,7 +695,7 @@ test("G3 legacy evidence isolation: actual migration preflight blocks old runner
     const state = { preferred_language: "en", macos_setup_approved: true, fresh_first_install_bootstrap: true, fresh_first_install_legacy_instance_id: "1832f0bb", ...stateExtra };
     const recovery = inspectMacosExistingInstanceRecovery({ home, state });
     const emitted = [], calls = [];
-    const context = vm.createContext({ process: { platform: "darwin" }, loadState: () => state, ensureStateLanguage: () => "en", hasTrustedSingleUserReadinessProfileMarker: () => false, macosRecoveryReport: () => recovery, isMacosFreshFirstInstallBootstrap, macosTrustedRecoveryEvidence: () => ({ status: "ABSENT" }), macosFreshBootstrapMayAdvance: () => false, macosPrerequisites: () => ({ node: true, git: true, gh: true, codex: true, session_auth: true, legacy_native_helper_gate: "PASS" }), migrationPreflight: ({ state: actual }) => migrationPreflight({ state: actual, home, commandRunner: (command, args) => { calls.push([command, args]); return response; } }), emit: result => emitted.push(result), saveState: () => assert.fail("save"), prepareMigrationIntent: () => assert.fail("intent"), prepareControlEnvironment: () => assert.fail("repositories") });
+    const context = vm.createContext({ OFFICIAL_SOURCE_ROOT:"/synthetic-scope", os:{homedir:()=>home}, macosOfficialFreshPreparationChallenge:()=>"test-only-challenge", hasMacosOfficialFreshPreparationApproval:()=>true, process: { platform: "darwin" }, loadState: () => state, ensureStateLanguage: () => "en", hasTrustedSingleUserReadinessProfileMarker: () => false, macosRecoveryReport: () => recovery, isMacosFreshFirstInstallBootstrap, macosTrustedRecoveryEvidence: () => ({ status: "ABSENT" }), macosFreshBootstrapMayAdvance: () => false, macosPrerequisites: () => ({ node: true, git: true, gh: true, codex: true, session_auth: true, legacy_native_helper_gate: "PASS" }), migrationPreflight: ({ state: actual }) => migrationPreflight({ state: actual, home, commandRunner: (command, args) => { calls.push([command, args]); return response; } }), emit: result => emitted.push(result), saveState: () => assert.fail("save"), prepareMigrationIntent: () => assert.fail("intent"), prepareControlEnvironment: () => assert.fail("repositories") });
     vm.runInContext(cli.slice(cli.indexOf("function runSetup() {"), cli.indexOf("function codexLogin()")) + "\nthis.run=runSetup;", context);
     context.run();
     assert.equal(emitted[0].error_id, "MACOS-PREREQUISITE-OR-MIGRATION", name);
@@ -1045,7 +1045,7 @@ test("G3 legacy evidence isolation 02: official first-install CLI reports the v2
   g302CliHistoricalRoots(path.join(home, ".chatgpt-codex-orchestrator", "instances", "1832f0bb"));
   const state = { preferred_language: "en", macos_setup_approved: true, fresh_first_install_bootstrap: true, fresh_first_install_legacy_instance_id: "1832f0bb" };
   const outputs = [], forbidden = () => assert.fail("initial v2 reports must not run prerequisites, install or external commands");
-  const context = vm.createContext({ process: { platform: "darwin" }, loadState: () => state, ensureStateLanguage: () => "en", macosRecoveryReport: () => inspectMacosExistingInstanceRecovery({ home, state }), isMacosFreshFirstInstallBootstrap, emit: result => outputs.push(result), macosTrustedRecoveryEvidence: forbidden, macosPrerequisites: forbidden, macosStateBound: forbidden, commandExists: forbidden, migrationPreflight: forbidden, macosNativeHelperPreflight: forbidden });
+  const context = vm.createContext({ OFFICIAL_SOURCE_ROOT:"/synthetic-scope", os:{homedir:()=>home}, macosOfficialFreshPreparationChallenge:()=>"test-only-challenge", hasMacosOfficialFreshPreparationApproval:()=>false, process: { platform: "darwin" }, loadState: () => state, ensureStateLanguage: () => "en", macosRecoveryReport: () => inspectMacosExistingInstanceRecovery({ home, state }), isMacosFreshFirstInstallBootstrap, emit: result => outputs.push(result), macosTrustedRecoveryEvidence: forbidden, macosPrerequisites: forbidden, macosStateBound: forbidden, commandExists: forbidden, migrationPreflight: forbidden, macosNativeHelperPreflight: forbidden });
   vm.runInContext(cli.slice(cli.indexOf("function dryRun() {"), cli.indexOf("function codexLogin()")) + cli.slice(cli.indexOf("function recoveryPreflight() {"), cli.indexOf("function reportProblem()")) + "\nthis.dry=dryRun;this.preflight=recoveryPreflight;", context);
   context.dry(); context.preflight();
   assert.equal(outputs.length, 2);
@@ -1204,7 +1204,7 @@ test("G3 passive modes 03: official initial Mac dry-run and preflight stop at pr
   assert.equal(isMacosFreshFirstInstallBootstrap({ state, recovery: report }), true);
   const before = JSON.stringify(state), emitted = [];
   const forbidden = () => assert.fail("passive old files cannot trigger external commands or installation");
-  const ctx = vm.createContext({ process: { platform: "darwin" }, loadState: () => state,
+  const ctx = vm.createContext({ OFFICIAL_SOURCE_ROOT:"/synthetic-scope", os:{homedir:()=>home}, macosOfficialFreshPreparationChallenge:()=>"test-only-challenge", hasMacosOfficialFreshPreparationApproval:()=>false, process: { platform: "darwin" }, loadState: () => state,
     ensureStateLanguage: () => "en", macosRecoveryReport: () => inspectMacosExistingInstanceRecovery({ home, state }),
     isMacosFreshFirstInstallBootstrap, emit: result => emitted.push(result), macosTrustedRecoveryEvidence: forbidden,
     macosPrerequisites: forbidden, macosStateBound: forbidden, commandExists: forbidden,
@@ -1282,4 +1282,121 @@ test("G3 passive modes 03: two-root continuation retains independent provenance 
   assert.equal(findRegisteredChatRoute(f.state, { projectKey: f.state.sandbox_project_key, chatUrl: f.state.reviewer_chat_url }), null);
   assert.equal(f.state.sandbox_review_route, undefined);
   assert.notEqual(f.state.target_environment_ready, true);
+});
+
+// G3-OFFICIAL-FIRST-PREP-ENTRYPOINT-01: separately scoped human approval.
+// The existing initial G3 fixture is reused: no change to legacy acceptance.
+test("G3 entrypoint 01: real historical classifier yields one source and legacy-bound approval challenge", async t => {
+  const mod=await import("../src/lib/macos-existing-instance-recovery.mjs");
+  const home=fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()),"g304-fresh-proof-"));
+  t.after(()=>fs.rmSync(home,{recursive:true,force:true}));fs.chmodSync(home,0o700);
+  const old=g302CliHistoricalRoots(path.join(home,".chatgpt-codex-orchestrator","instances","1832f0bb"));
+  g303CliModeFixture(old);
+  const state={macos_setup_approved:true,fresh_first_install_bootstrap:true,fresh_first_install_legacy_instance_id:"1832f0bb"};
+  const sourceRoot=process.cwd();
+  const recovery=mod.inspectMacosExistingInstanceRecovery({home,state});
+  assert.equal(recovery.status,"CONFLICT");
+  assert.equal(recovery.legacy_evidence_isolation.reason,"initial_passive_legacy");
+  const opts={state,recovery,home,sourceRoot};
+  const challenge=mod.macosOfficialFreshPreparationChallenge(opts);
+  assert.match(challenge,/^macos-official-fresh-preparation-v1:[0-9a-f]{64}$/);
+  assert.equal(challenge,mod.macosOfficialFreshPreparationChallenge(opts),"read-only challenge is stable");
+  assert.equal(mod.hasMacosOfficialFreshPreparationApproval(opts),false);
+  assert.equal(mod.macosOfficialFreshPreparationReceipt({...opts,value:"true"}),null);
+  assert.equal(mod.macosOfficialFreshPreparationReceipt({...opts,value:"yes"}),null);
+  assert.equal(mod.macosOfficialFreshPreparationReceipt({...opts,value:challenge.slice(1)}),null);
+  const receipt=mod.macosOfficialFreshPreparationReceipt({...opts,value:challenge});
+  assert.equal(receipt.action_id,"macos_official_fresh_preparation");
+  assert.equal(receipt.scope,"fresh-private-control-sandbox-only-v1");
+  state.macos_official_fresh_preparation_approval=receipt;
+  assert.equal(mod.hasMacosOfficialFreshPreparationApproval(opts),true);
+  assert.equal(mod.macosOfficialFreshPreparationReceipt({...opts,value:challenge}),null,"no replay");
+  for(const modified of [
+    {...receipt,scope:"runner-start"},{...receipt,challenge:"other"},{...receipt,approved_at:"invalid"},
+    {...receipt,extra:true},{...receipt,action_id:"macos_selected_fresh_instance_approval"}
+  ]){
+    state.macos_official_fresh_preparation_approval=modified;
+    assert.equal(mod.hasMacosOfficialFreshPreparationApproval(opts),false);
+  }
+  state.macos_official_fresh_preparation_approval=receipt;
+  fs.chmodSync(path.join(old,"review-evidence"),0o755);
+  const rejected=mod.inspectMacosExistingInstanceRecovery({home,state});
+  assert.notEqual(rejected.legacy_evidence_isolation?.classification,"OPAQUE_PRESERVED_NONAUTHORITY");
+  assert.equal(mod.macosOfficialFreshPreparationChallenge({...opts,recovery:rejected}),null);
+  assert.equal(mod.hasMacosOfficialFreshPreparationApproval({...opts,recovery:rejected}),false);
+});
+
+test("G3 entrypoint 01: candidate source drift and identity changes invalidate approval without touching actual HOME",async t=>{
+  const mod=await import("../src/lib/macos-existing-instance-recovery.mjs");
+  const home=fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()),"g304-source-bound-"));
+  t.after(()=>fs.rmSync(home,{recursive:true,force:true}));fs.chmodSync(home,0o700);
+  g302CliHistoricalRoots(path.join(home,".chatgpt-codex-orchestrator","instances","1832f0bb"));
+  const state={macos_setup_approved:true,fresh_first_install_bootstrap:true,fresh_first_install_legacy_instance_id:"1832f0bb"};
+  const recovery=mod.inspectMacosExistingInstanceRecovery({home,state});
+  const sourceRoot=path.join(home,"isolated source with spaces");fs.mkdirSync(sourceRoot,{mode:0o700});
+  for(const rel of ["install.sh","src/cli.mjs","src/lib/macos-existing-instance-recovery.mjs","AI_INSTALL.md"]){
+    const dst=path.join(sourceRoot,rel);fs.mkdirSync(path.dirname(dst),{recursive:true,mode:0o700});
+    fs.copyFileSync(path.join(process.cwd(),rel),dst);
+  }
+  const opts={state,recovery,home,sourceRoot};
+  const challenge=mod.macosOfficialFreshPreparationChallenge(opts);
+  assert.ok(challenge);
+  state.macos_official_fresh_preparation_approval=mod.macosOfficialFreshPreparationReceipt({...opts,value:challenge});
+  assert.equal(mod.hasMacosOfficialFreshPreparationApproval(opts),true);
+  fs.appendFileSync(path.join(sourceRoot,"AI_INSTALL.md"),"\nsource drift\n");
+  assert.notEqual(mod.macosOfficialFreshPreparationChallenge(opts),challenge);
+  assert.equal(mod.hasMacosOfficialFreshPreparationApproval(opts),false);
+  assert.equal(mod.macosOfficialFreshPreparationReceipt({...opts,value:challenge}),null,"replayed signed text cannot override existing receipt");
+  delete state.macos_official_fresh_preparation_approval;
+  assert.equal(mod.macosOfficialFreshPreparationReceipt({...opts,value:challenge}),null,"source drift cannot use old challenge");
+  const original=fs.readFileSync(path.join(process.cwd(),"AI_INSTALL.md"));
+  fs.writeFileSync(path.join(sourceRoot,"AI_INSTALL.md"),original);
+  state.fresh_first_install_legacy_instance_id="other";
+  assert.equal(mod.macosOfficialFreshPreparationChallenge(opts),null);
+  state.fresh_first_install_legacy_instance_id="1832f0bb";
+  state.target_environment_ready=true;
+  assert.equal(mod.macosOfficialFreshPreparationChallenge(opts),null);
+});
+
+test("G3 entrypoint 01: actual CLI initial/answer/setup gate is stopped unless exact approval was persisted",async t=>{
+  const mod=await import("../src/lib/macos-existing-instance-recovery.mjs");
+  const home=fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()),"g304-gated-cli-"));
+  t.after(()=>fs.rmSync(home,{recursive:true,force:true}));fs.chmodSync(home,0o700);
+  const old=g302CliHistoricalRoots(path.join(home,".chatgpt-codex-orchestrator","instances","1832f0bb"));
+  g303CliModeFixture(old);
+  const state={preferred_language:"en",macos_setup_approved:true,fresh_first_install_bootstrap:true,fresh_first_install_legacy_instance_id:"1832f0bb"};
+  const recovery=()=>mod.inspectMacosExistingInstanceRecovery({home,state});
+  const snapshot=JSON.stringify(state),records=[],forbidden=()=>assert.fail("must not call external installer or launch Runner");
+  const ctx=vm.createContext({OFFICIAL_SOURCE_ROOT:process.cwd(),os:{homedir:()=>home},process:{platform:"darwin"},
+    loadState:()=>state,ensureStateLanguage:()=>"en",macosRecoveryReport:recovery,
+    isMacosFreshFirstInstallBootstrap:mod.isMacosFreshFirstInstallBootstrap,
+    macosOfficialFreshPreparationChallenge:mod.macosOfficialFreshPreparationChallenge,
+    hasMacosOfficialFreshPreparationApproval:mod.hasMacosOfficialFreshPreparationApproval,
+    macosOfficialFreshPreparationReceipt:mod.macosOfficialFreshPreparationReceipt,
+    hasTrustedSingleUserReadinessProfileMarker:()=>false,
+    valueOf:flag=>flag==="--action"?"macos_official_fresh_preparation":flag==="--value"?ctx.requestValue:undefined,
+    emit:(v,code=0)=>{records.push({v,code});return v},t:()=>"Answer recorded",saveState:()=>{ctx.saves++;},
+    macosTrustedRecoveryEvidence:forbidden,macosPrerequisites:forbidden,commandExists:forbidden,
+    migrationPreflight:forbidden,prepareMigrationIntent:forbidden,prepareControlEnvironment:forbidden});
+  ctx.saves=0;
+  const snippets=cli.slice(cli.indexOf("function dryRun() {"),cli.indexOf("function codexLogin()"))+
+    cli.slice(cli.indexOf("function recoveryPreflight() {"),cli.indexOf("function reportProblem()"));
+  vm.runInContext(snippets+"\nthis.dry=dryRun;this.setup=runSetup;this.answer=answer;this.preflight=recoveryPreflight;",ctx);
+  ctx.dry();ctx.preflight();ctx.setup();
+  assert.deepEqual(records.map(x=>x.v.status),["NEEDS_USER_ACTION","NEEDS_USER_ACTION","NEEDS_USER_ACTION"]);
+  const challenge=records[0].v.approval_challenge;
+  assert.ok(challenge);assert.equal(records[1].v.approval_challenge,challenge);
+  assert.equal(records[2].v.approval_challenge,challenge);
+  assert.deepEqual(records.map(x=>x.code),[1,1,1]);
+  assert.equal(JSON.stringify(state),snapshot);assert.equal(ctx.saves,0);
+  ctx.requestValue="true";ctx.answer();assert.equal(records.at(-1).v.error_id,"MACOS-OFFICIAL-FRESH-APPROVAL-MISMATCH");assert.equal(ctx.saves,0);
+  ctx.requestValue=challenge;ctx.answer();assert.equal(records.at(-1).v.status,"PASS");assert.equal(ctx.saves,1);
+  assert.ok(state.macos_official_fresh_preparation_approval);
+  ctx.answer();assert.equal(records.at(-1).v.error_id,"MACOS-OFFICIAL-FRESH-APPROVAL-MISMATCH");assert.equal(ctx.saves,1);
+  ctx.dry();ctx.preflight();
+  assert.equal(records.at(-2).v.status,"PASS");assert.equal(records.at(-1).v.status,"PASS");
+  // If source/legacy proof drifts, every entrypoint rejects before other actions.
+  fs.chmodSync(path.join(old,"manual-codex-evidence"),0o755);
+  const stale=ctx.dry();assert.equal(stale.status,"ERROR");
+  const before=ctx.saves;ctx.setup();assert.equal(records.at(-1).v.status,"ERROR");assert.equal(ctx.saves,before);
 });

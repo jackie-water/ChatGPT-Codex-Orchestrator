@@ -580,6 +580,82 @@ export function isMacosFreshFirstInstallBootstrap({ state = {}, recovery, instal
     && (recovery.instances[0]?.identity?.installation_id === undefined || typeof recovery.instances[0]?.identity?.installation_id === "string"));
 }
 
+// A separate, source-bound *human* approval is required before the official
+// fresh preparation may progress past a preserved, conflicting legacy root.
+// This is not a recovery or Runner permission.  The challenge is read-only;
+// answer() persists a distinct receipt using the existing state journal.
+const OFFICIAL_FRESH_ACTION = "macos_official_fresh_preparation";
+const OFFICIAL_FRESH_SCOPE = "fresh-private-control-sandbox-only-v1";
+const OFFICIAL_SOURCE_PATHS = ["install.sh", "src/cli.mjs", "src/lib/macos-existing-instance-recovery.mjs", "AI_INSTALL.md"];
+
+function officialFreshContext({ state = {}, recovery, home = os.homedir(), sourceRoot = process.cwd() } = {}) {
+  if (state.macos_setup_approved !== true ||
+      !isMacosFreshFirstInstallBootstrap({ state, recovery }) ||
+      recovery?.legacy_evidence_isolation?.reason !== "initial_passive_legacy" ||
+      recovery?.legacy_evidence_isolation?.classification !== "OPAQUE_PRESERVED_NONAUTHORITY" ||
+      recovery?.mutations_performed !== false) return null;
+  try {
+    const absoluteHome = path.resolve(home);
+    const absoluteSource = fs.realpathSync(sourceRoot);
+    if (!path.isAbsolute(absoluteHome) || fs.realpathSync(absoluteHome) !== absoluteHome) return null;
+    const root = path.join(absoluteHome, INSTANCE_ROOT_NAME, "instances", "1832f0bb");
+    const marker = recovery.legacy_evidence_isolation;
+    const directories = Array.isArray(marker.opaque_evidence_subtrees)
+      ? marker.opaque_evidence_subtrees
+      : [marker.diagnostics_subtree];
+    if (!Array.isArray(directories) || directories.length < 1 || directories.length > 3 ||
+        !directories.every(value => ["short-turn-evidence", "manual-codex-evidence", "review-evidence"].includes(value)) ||
+        new Set(directories).size !== directories.length) return null;
+    const identity = file => {
+      const stat = fs.lstatSync(file);
+      if (stat.isSymbolicLink() || !stat.isDirectory() ||
+          (typeof process.getuid === "function" && stat.uid !== process.getuid()) ||
+          (stat.mode & 0o7777) !== 0o700) throw new Error("unsafe historical evidence root");
+      return [String(stat.dev), String(stat.ino), String(stat.uid),
+        String(stat.mode & 0o7777), String(stat.mtimeMs), String(stat.ctimeMs)];
+    };
+    const blobs = OFFICIAL_SOURCE_PATHS.map(name => {
+      const file = path.join(absoluteSource, ...name.split("/"));
+      const realFile = fs.realpathSync(file);
+      if (realFile !== file) throw new Error("source file alias");
+      const stat = fs.lstatSync(file);
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) throw new Error("unsafe installer source");
+      return [name, crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex")];
+    });
+    return {schema_version:1,action:OFFICIAL_FRESH_ACTION,scope:OFFICIAL_FRESH_SCOPE,
+      home:absoluteHome,source_root:absoluteSource,legacy_instance_id:"1832f0bb",
+      marker_schema_version:marker.schema_version,opaque_dirs:directories,
+      instance_root_identity:identity(root),
+      opaque_root_identities:directories.map(name => [name, identity(path.join(root, name))]),
+      files:blobs};
+  } catch { return null; }
+}
+
+export function macosOfficialFreshPreparationChallenge(options = {}) {
+  const context = officialFreshContext(options);
+  return context ? "macos-official-fresh-preparation-v1:" +
+    crypto.createHash("sha256").update(JSON.stringify(context)).digest("hex") : null;
+}
+
+export function hasMacosOfficialFreshPreparationApproval(options = {}) {
+  const receipt = options.state?.macos_official_fresh_preparation_approval;
+  const challenge = macosOfficialFreshPreparationChallenge(options);
+  return Boolean(challenge && receipt && typeof receipt === "object" && !Array.isArray(receipt) &&
+    Object.keys(receipt).length === 5 &&
+    receipt.schema_version === 1 && receipt.action_id === OFFICIAL_FRESH_ACTION &&
+    receipt.scope === OFFICIAL_FRESH_SCOPE && receipt.challenge === challenge &&
+    typeof receipt.approved_at === "string" && !Number.isNaN(Date.parse(receipt.approved_at)));
+}
+
+export function macosOfficialFreshPreparationReceipt({ state, recovery, value, home, sourceRoot } = {}) {
+  const options = {state,recovery,home,sourceRoot};
+  const challenge = macosOfficialFreshPreparationChallenge(options);
+  if (!challenge || typeof value !== "string" || value !== challenge ||
+      state?.macos_official_fresh_preparation_approval !== undefined) return null;
+  return {schema_version:1,action_id:OFFICIAL_FRESH_ACTION,scope:OFFICIAL_FRESH_SCOPE,
+    challenge,approved_at:new Date().toISOString()};
+}
+
 function selectedJson(fsImpl, file, { allowMissing = false, passive = false } = {}) {
   const parent = safeDirectory(fsImpl, path.dirname(file), { privateDirectory: false });
   if (!parent.ok) return { ok: false, reason: "unsafe-proof-parent" };
