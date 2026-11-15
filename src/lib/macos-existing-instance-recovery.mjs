@@ -277,6 +277,32 @@ function candidate(fsImpl, instancesRoot, id) {
 
 const LEGACY_ID = "1832f0bb";
 const LEGACY_AUDIT = Object.freeze({ schema_version: 1, classification: "OPAQUE_PRESERVED_NONAUTHORITY", instance_id: LEGACY_ID, diagnostics_subtree: "short-turn-evidence", historical_instances_are_authority: false, descendants_inspected: false, runtime_activity_verified: false });
+// These two observed historical roots are retained as opaque data, not adopted
+// as route, installation, Runner, review, or execution evidence.  They never
+// enter the recursive legacy tree inspection or metadata identity collection.
+const LEGACY_EXTRA_OPAQUE_ROOTS = Object.freeze(["manual-codex-evidence", "review-evidence"]);
+
+function legacyAudit(classification, reason, extraRoots = []) {
+  return {
+    ...LEGACY_AUDIT,
+    ...(extraRoots.length ? { schema_version: 2, opaque_evidence_subtrees: ["short-turn-evidence", ...extraRoots] } : {}),
+    classification, reason
+  };
+}
+
+function matchesLegacyAudit(marker, reason) {
+  if (!marker || typeof marker !== "object" || Array.isArray(marker)) return false;
+  const declared = marker.opaque_evidence_subtrees;
+  const extras = Array.isArray(declared) ? LEGACY_EXTRA_OPAQUE_ROOTS.filter(name => declared.includes(name)) : [];
+  const v1 = marker.schema_version === 1 && !Object.hasOwn(marker, "opaque_evidence_subtrees");
+  const v2 = marker.schema_version === 2 && extras.length > 0 && Array.isArray(declared) &&
+    JSON.stringify(declared) === JSON.stringify(["short-turn-evidence", ...extras]);
+  if (!v1 && !v2) return false;
+  const expected = legacyAudit("OPAQUE_PRESERVED_NONAUTHORITY", reason, v2 ? extras : []);
+  return Object.keys(marker).length === Object.keys(expected).length &&
+    Object.entries(expected).every(([key, value]) => key === "opaque_evidence_subtrees"
+      ? JSON.stringify(marker[key]) === JSON.stringify(value) : marker[key] === value);
+}
 const legacyIntent = state => state.macos_setup_approved === true && state.fresh_first_install_bootstrap === true && state.fresh_first_install_legacy_instance_id === LEGACY_ID;
 const validRepositoryId = value => (typeof value === "number" && Number.isSafeInteger(value) && value > 0) || (typeof value === "string" && /^[1-9]\d*$/.test(value));
 const legacyInitialAbsentFields = ["installation_id", "instance_id", "instance_root", "control_repository", "sandbox_repository", "control_repository_id", "sandbox_repository_id", "control_clone_path", "sandbox_clone_path", "sandbox_project_key", "chat_route_file", "sandbox_review_route", "review_route", "sandbox_chat_registration_issue"];
@@ -346,7 +372,7 @@ function legacyJson(fsImpl, file) {
 }
 
 function classifyLegacyIsolation({ fsImpl, home, instancesRoot, entries, state }) {
-  const audit = (classification, reason) => ({ ...LEGACY_AUDIT, classification, reason });
+  const audit = legacyAudit;
   const reject = reason => ({ status: "CONFLICT", mutations_performed: false, instances_root_present: true, instance_ids: entries.filter(safeName), instances: [{ instance_id: LEGACY_ID, status: "CONFLICT", missing_verification_gates: ["safe_instance_tree"], fresh_first_install_candidate: false, legacy_evidence_isolation: audit("REJECTED", reason) }], fresh_first_install_candidate: false, missing_verification_gates: ["safe_instance_tree"], legacy_evidence_isolation: audit("REJECTED", reason) });
   try {
     if (home !== path.resolve(home) || fsImpl.realpathSync(home) !== home) throw new LegacyPolicyError("noncanonical_home");
@@ -373,9 +399,22 @@ function classifyLegacyIsolation({ fsImpl, home, instancesRoot, entries, state }
     const allowedFiles = new Set(["chat-routes.json", "instance.json", "migration-intent.json"]);
     const top = fsImpl.readdirSync(oldRoot, { withFileTypes: true }).map(entry => entry.name);
     if (new Set(top.map(name => name.toLowerCase())).size !== top.length) throw new LegacyPolicyError("top_level_alias");
+    // Only the two exact, private top-level directory names receive the
+    // exception. Validate their root identities twice, without inspecting any
+    // child or interpreting any contents as authoritative evidence.
+    const opaqueRoots = [{ file: diagnostic, stat: before.stat }];
+    for (const name of LEGACY_EXTRA_OPAQUE_ROOTS) {
+      if (!top.includes(name)) continue;
+      const file = path.join(oldRoot, name), item = lstat(fsImpl, file);
+      if (!item.ok || item.stat.isSymbolicLink() || !item.stat.isDirectory() || !strictOwner(item.stat) ||
+          (item.stat.mode & 0o7777) !== 0o700 || fsImpl.realpathSync(file) !== file) throw new LegacyPolicyError("opaque_root_unsafe");
+      if ([...roots.map(root => fsImpl.lstatSync(root)), ...opaqueRoots.map(item => item.stat)]
+          .some(stat => stat.dev === item.stat.dev && stat.ino === item.stat.ino)) throw new LegacyPolicyError("opaque_root_alias");
+      opaqueRoots.push({ file, stat: item.stat });
+    }
     const records = [], routes = [], pending = [];
     for (const name of top) {
-      if (name === "short-turn-evidence") continue;
+      if (name === "short-turn-evidence" || LEGACY_EXTRA_OPAQUE_ROOTS.includes(name)) continue;
       const snapshot = name.startsWith("control-routing-migration-") && safeName(name.slice("control-routing-migration-".length));
       if (!allowedDirs.has(name) && !allowedFiles.has(name) && !snapshot) throw new LegacyPolicyError("unknown_top_level");
       const file = path.join(oldRoot, name), st = fsImpl.lstatSync(file);
@@ -420,7 +459,7 @@ function classifyLegacyIsolation({ fsImpl, home, instancesRoot, entries, state }
       }
     }
     if (values.has("control_repository_id") && values.get("control_repository_id") === values.get("sandbox_repository_id")) throw new LegacyPolicyError("old_identity_conflict");
-    const marker = audit("OPAQUE_PRESERVED_NONAUTHORITY", initial ? "initial_passive_legacy" : "continued_passive_legacy");
+    const marker = audit("OPAQUE_PRESERVED_NONAUTHORITY", initial ? "initial_passive_legacy" : "continued_passive_legacy", opaqueRoots.slice(1).map(item => path.basename(item.file)));
     const historical = { instance_id: LEGACY_ID, status: "CONFLICT", missing_verification_gates: ["safe_instance_tree"], fresh_first_install_candidate: true, legacy_evidence_isolation: marker };
     const instances = [historical];
     if (!initial) {
@@ -428,8 +467,13 @@ function classifyLegacyIsolation({ fsImpl, home, instancesRoot, entries, state }
       if (selected.status === "CONFLICT" || selected.route_names.some(name => routeIds.includes(name.toLowerCase()))) throw new LegacyPolicyError("new_candidate_or_route_collision");
       instances.push(selected);
     }
-    const after = fsImpl.lstatSync(diagnostic);
-    if (!sameStat(before.stat, after)) throw new LegacyPolicyError("diagnostics_drift");
+    for (const [index, item] of opaqueRoots.entries()) {
+      const after = fsImpl.lstatSync(item.file);
+      if (!sameStat(item.stat, after) || !after.isDirectory() || !strictOwner(after) ||
+          (index > 0 && ((after.mode & 0o7777) !== 0o700 || fsImpl.realpathSync(item.file) !== item.file))) {
+        throw new LegacyPolicyError(index === 0 ? "diagnostics_drift" : "opaque_root_drift");
+      }
+    }
     return { status: "CONFLICT", mutations_performed: false, instances_root_present: true, instance_ids: entries.slice().sort(), instances, fresh_first_install_candidate: initial, missing_verification_gates: [...new Set(instances.flatMap(item => item.missing_verification_gates))].sort(), legacy_evidence_isolation: marker };
   } catch (error) { return reject(error instanceof LegacyPolicyError ? error.reason : "classification_failed"); }
 }
@@ -489,7 +533,7 @@ function selectedResult(status, gates = [], extra = {}) {
 // selected or partially-created instance may use this path.
 export function isMacosFreshFirstInstallBootstrap({ state = {}, recovery, installStateMissing = false } = {}) {
   if ((recovery && typeof recovery === "object" && Object.hasOwn(recovery, "legacy_evidence_isolation")) || (Array.isArray(recovery?.instances) && recovery.instances.some(item => item && typeof item === "object" && Object.hasOwn(item, "legacy_evidence_isolation")))) {
-    const validMarker = marker => marker && Object.entries(LEGACY_AUDIT).every(([key, value]) => marker[key] === value) && marker.reason === "initial_passive_legacy";
+    const validMarker = marker => matchesLegacyAudit(marker, "initial_passive_legacy");
     const historical = recovery.instances?.[0];
     const exactGates = gates => Array.isArray(gates) && gates.length === 1 && gates[0] === "safe_instance_tree";
     return Boolean(legacyIntent(state) && legacyInitialAbsentFields.every(key => isAbsentLegacyField(state[key])) && state.control_environment_ready !== true && state.target_environment_ready !== true && validMarker(recovery.legacy_evidence_isolation) && recovery.status === "CONFLICT" && recovery.mutations_performed === false && recovery.fresh_first_install_candidate === true && exactGates(recovery.missing_verification_gates) && recovery.instance_ids?.length === 1 && recovery.instance_ids[0] === LEGACY_ID && recovery.instances?.length === 1 && historical?.instance_id === LEGACY_ID && historical.status === "CONFLICT" && historical.fresh_first_install_candidate === true && !Object.hasOwn(historical, "identity") && exactGates(historical.missing_verification_gates) && validMarker(historical.legacy_evidence_isolation));

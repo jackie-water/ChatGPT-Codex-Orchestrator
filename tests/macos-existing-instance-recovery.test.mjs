@@ -1196,3 +1196,232 @@ test("G3 legacy evidence isolation: private metadata rejects permissive mode and
     assert.equal(inspectMacosExistingInstanceRecovery({ home: f.home, state: g3Intent, fsImpl: proxy }).legacy_evidence_isolation.classification, "REJECTED", kind);
   }
 });
+
+// G3-LEGACY-EVIDENCE-ISOLATION-02: two observed top-level historical evidence
+// roots are opaque, never authoritative, and never recursively inspected.
+const g302OpaqueNames = ["manual-codex-evidence", "review-evidence"];
+function g302Fixture(t, names = g302OpaqueNames) {
+  const f = g3Fixture(t);
+  for (const name of names) fs.mkdirSync(path.join(f.root, name), { mode: 0o700 });
+  return f;
+}
+
+test("G3 legacy evidence isolation 02: each observed private root and their combination are admitted as v2 nonauthority", t => {
+  for (const names of [[g302OpaqueNames[0]], [g302OpaqueNames[1]], g302OpaqueNames]) {
+    const f = g302Fixture(t, names), report = inspectMacosExistingInstanceRecovery({ home: f.home, state: g3Intent });
+    assert.equal(report.status, "CONFLICT");
+    assert.equal(report.mutations_performed, false);
+    assert.deepEqual(report.instance_ids, ["1832f0bb"]);
+    assert.deepEqual(report.missing_verification_gates, ["safe_instance_tree"]);
+    assert.equal(report.fresh_first_install_candidate, true);
+    assert.equal(report.legacy_evidence_isolation.schema_version, 2);
+    assert.deepEqual(report.legacy_evidence_isolation.opaque_evidence_subtrees, ["short-turn-evidence", ...names]);
+    assert.equal(report.legacy_evidence_isolation.classification, "OPAQUE_PRESERVED_NONAUTHORITY");
+    assert.equal(report.legacy_evidence_isolation.reason, "initial_passive_legacy");
+    for (const field of ["historical_instances_are_authority", "descendants_inspected", "runtime_activity_verified"]) assert.equal(report.legacy_evidence_isolation[field], false, field);
+    assert.deepEqual(report.instances[0].legacy_evidence_isolation, report.legacy_evidence_isolation);
+    assert.equal(Object.hasOwn(report.instances[0], "identity"), false);
+    assert.equal(isMacosFreshFirstInstallBootstrap({ state: g3Intent, recovery: report }), true);
+  }
+});
+
+test("G3 legacy evidence isolation 02: original v1 audit and eligibility remain unchanged without additional roots", t => {
+  const f = g3Fixture(t), report = inspectMacosExistingInstanceRecovery({ home: f.home, state: g3Intent });
+  assert.equal(report.legacy_evidence_isolation.schema_version, 1);
+  assert.equal(Object.hasOwn(report.legacy_evidence_isolation, "opaque_evidence_subtrees"), false);
+  assert.equal(isMacosFreshFirstInstallBootstrap({ state: g3Intent, recovery: report }), true);
+});
+
+test("G3 legacy evidence isolation 02: arbitrary opaque descendants preserve bytes and cannot create route authority", t => {
+  const f = g302Fixture(t), children = [];
+  for (const name of g302OpaqueNames) {
+    const root = path.join(f.root, name), deep = path.join(root, "session", "instances", "1832f0bb");
+    fs.mkdirSync(deep, { recursive: true, mode: 0o700 });
+    for (const [relative, value, mode] of [["instance.json", '{"instance_id":"foreign"}', 0o644], ["chat-routes.json", '{"chat_url":"https://chatgpt.com/c/private-should-not-be-read"}', 0o600], ["credential\nbad", "opaque historical bytes", 0o700]]) {
+      const file = path.join(deep, relative);
+      fs.writeFileSync(file, value, { mode }); fs.chmodSync(file, mode); children.push({ file, data: fs.readFileSync(file), mode });
+    }
+    fs.symlinkSync("/nonexistent-target", path.join(deep, "link"));
+  }
+  const before = children.map(({ file }) => fs.lstatSync(file));
+  const result = inspectMacosExistingInstanceRecovery({ home: f.home, state: g3Intent });
+  assert.equal(result.legacy_evidence_isolation.schema_version, 2);
+  assert.equal(result.legacy_evidence_isolation.classification, "OPAQUE_PRESERVED_NONAUTHORITY");
+  assert.equal(result.legacy_evidence_isolation.runtime_activity_verified, false);
+  assert.equal(JSON.stringify(result).includes("private-should-not-be-read"), false);
+  assert.equal(JSON.stringify(result).includes("foreign"), false);
+  for (let i = 0; i < children.length; i++) {
+    const { file, data, mode } = children[i], now = fs.lstatSync(file);
+    assert.deepEqual(fs.readFileSync(file), data);
+    assert.equal(now.mode & 0o7777, mode);
+    for (const field of ["ino", "dev", "uid", "size", "mtimeMs", "ctimeMs"]) assert.equal(now[field], before[i][field], field);
+  }
+});
+
+test("G3 legacy evidence isolation 02: opaque descendants are never enumerated, read, resolved or statted", t => {
+  const f = g302Fixture(t), blocked = [];
+  for (const name of g302OpaqueNames) {
+    const root = path.join(f.root, name), child = path.join(root, "inaccessible", "nested");
+    fs.mkdirSync(child, { recursive: true, mode: 0o700 });
+    fs.symlinkSync("/outside", path.join(child, "link"));
+  }
+  const forbidden = new Set(["readdirSync", "opendirSync", "openSync", "readFileSync", "statSync", "lstatSync", "realpathSync", "accessSync"]);
+  const fsImpl = new Proxy(fs, { get(target, key) {
+    const fn = target[key];
+    if (typeof fn !== "function") return fn;
+    return (...args) => {
+      const file = args[0];
+      if (typeof file === "string" && g302OpaqueNames.some(name => {
+        const root = path.join(f.root, name);
+        return file.startsWith(root + path.sep) || (file === root && ["readdirSync", "opendirSync", "openSync", "readFileSync", "statSync", "accessSync"].includes(key));
+      }) && forbidden.has(key)) { blocked.push([key, file]); throw Error("opaque descendant read prohibited"); }
+      return fn(...args);
+    };
+  } });
+  const result = inspectMacosExistingInstanceRecovery({ home: f.home, state: g3Intent, fsImpl });
+  assert.equal(result.legacy_evidence_isolation.classification, "OPAQUE_PRESERVED_NONAUTHORITY");
+  assert.deepEqual(blocked, []);
+});
+
+test("G3 legacy evidence isolation 02: private 0700 directories are mandatory for both additional roots", t => {
+  for (const name of g302OpaqueNames) for (const mode of [0o500, 0o600, 0o701, 0o750, 0o755, 0o770, 0o777, 0o1700]) {
+    const f = g302Fixture(t), root = path.join(f.root, name);
+    fs.chmodSync(root, mode);
+    const report = inspectMacosExistingInstanceRecovery({ home: f.home, state: g3Intent });
+    assert.equal(report.legacy_evidence_isolation.classification, "REJECTED", `${name} ${mode.toString(8)}`);
+    assert.equal(report.legacy_evidence_isolation.reason, "opaque_root_unsafe", `${name} ${mode.toString(8)}`);
+    assert.equal(report.fresh_first_install_candidate, false);
+    assert.equal(isMacosFreshFirstInstallBootstrap({ state: g3Intent, recovery: report }), false);
+  }
+});
+
+test("G3 legacy evidence isolation 02: symlink, regular file and broken alias cannot impersonate an opaque root", t => {
+  for (const name of g302OpaqueNames) for (const kind of ["file", "symlink", "broken-symlink"]) {
+    const f = g302Fixture(t), file = path.join(f.root, name);
+    fs.rmdirSync(file);
+    if (kind === "file") fs.writeFileSync(file, "historical bytes", { mode: 0o600 });
+    else fs.symlinkSync(kind === "symlink" ? f.diagnostics : "/does-not-exist", file);
+    const report = inspectMacosExistingInstanceRecovery({ home: f.home, state: g3Intent });
+    assert.equal(report.legacy_evidence_isolation.classification, "REJECTED", `${name} ${kind}`);
+    assert.equal(report.legacy_evidence_isolation.reason, "opaque_root_unsafe", `${name} ${kind}`);
+  }
+});
+
+test("G3 legacy evidence isolation 02: exact-case allowlist never admits unknown siblings or lookalikes", t => {
+  for (const name of ["Manual-codex-evidence", "manual-codex-evidence-bak", "review-evidence-old", "review_evidence", "code-review-evidence", "review-evidence "]) {
+    const f = g302Fixture(t), lookalike = path.join(f.root, name);
+    // On case-insensitive APFS, the case-variant refers to the existing
+    // canonical fixture directory. Replace that empty fixture root before
+    // creating the mis-cased entry; on case-sensitive filesystems keep both
+    // names to exercise top-level alias rejection.
+    if (name === "Manual-codex-evidence" && fs.existsSync(lookalike)) {
+      fs.rmdirSync(path.join(f.root, "manual-codex-evidence"));
+    }
+    fs.mkdirSync(lookalike, { mode: 0o700 });
+    assert.ok(fs.readdirSync(f.root).includes(name), `${name}: fixture case must be preserved`);
+    const report = inspectMacosExistingInstanceRecovery({ home: f.home, state: g3Intent });
+    assert.equal(report.legacy_evidence_isolation.classification, "REJECTED", name);
+    assert.ok(["unknown_top_level", "top_level_alias"].includes(report.legacy_evidence_isolation.reason), name);
+  }
+});
+
+test("G3 legacy evidence isolation 02: additional roots must have the current user ownership", t => {
+  for (const name of g302OpaqueNames) {
+    const f = g302Fixture(t), file = path.join(f.root, name);
+    const proxy = new Proxy(fs, { get(target, key) {
+      if (key !== "lstatSync") return target[key];
+      return (...args) => {
+        const stat = target.lstatSync(...args);
+        if (args[0] !== file) return stat;
+        return new Proxy(stat, { get(object, prop) {
+          if (prop === "uid") return (process.getuid?.() ?? 0) + 1;
+          const value = object[prop]; return typeof value === "function" ? value.bind(object) : value;
+        } });
+      };
+    } });
+    const result = inspectMacosExistingInstanceRecovery({ home: f.home, state: g3Intent, fsImpl: proxy });
+    assert.equal(result.legacy_evidence_isolation.classification, "REJECTED", name);
+    assert.equal(result.legacy_evidence_isolation.reason, "opaque_root_unsafe", name);
+  }
+});
+
+test("G3 legacy evidence isolation 02: directory inode aliases to old, new or other opaque roots are rejected", t => {
+  for (const name of g302OpaqueNames) for (const target of ["legacy", "diagnostics", "other-opaque"]) {
+    const f = g302Fixture(t), file = path.join(f.root, name);
+    const alias = target === "legacy" ? f.root : target === "diagnostics" ? f.diagnostics : path.join(f.root, g302OpaqueNames.find(value => value !== name));
+    const aliasStat = fs.lstatSync(alias), proxy = new Proxy(fs, { get(obj, key) {
+      if (key !== "lstatSync") return obj[key];
+      return (...args) => {
+        const actual = obj.lstatSync(...args);
+        if (args[0] !== file) return actual;
+        return new Proxy(actual, { get(orig, prop) {
+          if (prop === "ino" || prop === "dev") return aliasStat[prop];
+          const value = orig[prop]; return typeof value === "function" ? value.bind(orig) : value;
+        } });
+      };
+    } });
+    const report = inspectMacosExistingInstanceRecovery({ home: f.home, state: g3Intent, fsImpl: proxy });
+    assert.equal(report.legacy_evidence_isolation.classification, "REJECTED", `${name}/${target}`);
+    assert.equal(report.legacy_evidence_isolation.reason, "opaque_root_alias", `${name}/${target}`);
+  }
+});
+
+test("G3 legacy evidence isolation 02: additional root identity drift rejects without mutating either directory", t => {
+  for (const name of g302OpaqueNames) for (const field of ["dev", "ino", "uid", "gid", "mode", "mtimeMs", "ctimeMs"]) {
+    const f = g302Fixture(t), file = path.join(f.root, name);
+    let observed = 0;
+    const proxy = new Proxy(fs, { get(target, key) {
+      if (key !== "lstatSync") return target[key];
+      return (...args) => {
+        const actual = target.lstatSync(...args);
+        if (args[0] !== file) return actual;
+        const changed = ++observed > 1;
+        return new Proxy(actual, { get(orig, prop) {
+          if (changed && prop === field) return orig[prop] + 1;
+          const value = orig[prop]; return typeof value === "function" ? value.bind(orig) : value;
+        } });
+      };
+    } });
+    const report = inspectMacosExistingInstanceRecovery({ home: f.home, state: g3Intent, fsImpl: proxy });
+    assert.equal(report.legacy_evidence_isolation.classification, "REJECTED", `${name}/${field}`);
+    assert.ok(observed > 1, `${name}/${field}`);
+  }
+});
+
+test("G3 legacy evidence isolation 02: initial versioned marker cannot be forged, reordered or promoted", t => {
+  const f = g302Fixture(t), original = inspectMacosExistingInstanceRecovery({ home: f.home, state: g3Intent });
+  assert.equal(isMacosFreshFirstInstallBootstrap({ state: g3Intent, recovery: original }), true);
+  const mutations = [
+    marker => { marker.schema_version = 1; },
+    marker => { marker.schema_version = 3; },
+    marker => { marker.opaque_evidence_subtrees = ["short-turn-evidence"]; },
+    marker => { marker.opaque_evidence_subtrees = ["review-evidence", "manual-codex-evidence", "short-turn-evidence"]; },
+    marker => { marker.opaque_evidence_subtrees = ["short-turn-evidence", "review-evidence", "manual-codex-evidence"]; },
+    marker => { marker.opaque_evidence_subtrees = ["short-turn-evidence", "manual-codex-evidence", "manual-codex-evidence"]; },
+    marker => { marker.opaque_evidence_subtrees.push("unauthorized"); },
+    marker => { marker.opaque_evidence_subtrees = "short-turn-evidence"; },
+    marker => { delete marker.opaque_evidence_subtrees; },
+    marker => { marker.runtime_activity_verified = true; },
+    marker => { marker.descendants_inspected = true; },
+    marker => { marker.historical_instances_are_authority = true; },
+    marker => { marker.installation_authorized = true; }
+  ];
+  for (const [index, mutate] of mutations.entries()) for (const location of ["aggregate", "historical"]) {
+    const copy = structuredClone(original), marker = location === "aggregate" ? copy.legacy_evidence_isolation : copy.instances[0].legacy_evidence_isolation;
+    mutate(marker);
+    assert.equal(isMacosFreshFirstInstallBootstrap({ state: g3Intent, recovery: copy }), false, `${index}/${location}`);
+  }
+  const reordered = structuredClone(original);
+  for (const holder of [reordered, reordered.instances[0]]) holder.legacy_evidence_isolation = Object.fromEntries(Object.entries(holder.legacy_evidence_isolation).reverse());
+  assert.equal(isMacosFreshFirstInstallBootstrap({ state: g3Intent, recovery: reordered }), true);
+});
+
+test("G3 legacy evidence isolation 02: a private additional root does not bypass exact fresh-install intent", t => {
+  const f = g302Fixture(t);
+  const good = inspectMacosExistingInstanceRecovery({ home: f.home, state: g3Intent });
+  assert.equal(isMacosFreshFirstInstallBootstrap({ state: g3Intent, recovery: good }), true);
+  for (const bad of [{ ...g3Intent, macos_setup_approved: 1 }, { ...g3Intent, fresh_first_install_bootstrap: "true" }, { ...g3Intent, fresh_first_install_legacy_instance_id: "other" }, {}]) {
+    const report = inspectMacosExistingInstanceRecovery({ home: f.home, state: bad });
+    assert.equal(isMacosFreshFirstInstallBootstrap({ state: bad, recovery: report }), false);
+  }
+});

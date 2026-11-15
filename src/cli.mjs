@@ -254,7 +254,19 @@ function macosFreshBootstrapMayAdvance(state, recovery, evidence) {
     instances.length === 2 && instances.every(item => instanceIds.includes(item?.instance_id));
   const marker = recovery?.legacy_evidence_isolation;
   const hasMarker = Boolean((recovery && typeof recovery === "object" && Object.hasOwn(recovery, "legacy_evidence_isolation")) || instances.some(item => item && typeof item === "object" && Object.hasOwn(item, "legacy_evidence_isolation")));
-  const exactMarker = value => value?.schema_version === 1 && value.classification === "OPAQUE_PRESERVED_NONAUTHORITY" && value.instance_id === "1832f0bb" && value.diagnostics_subtree === "short-turn-evidence" && value.historical_instances_are_authority === false && value.descendants_inspected === false && value.runtime_activity_verified === false && value.reason === "continued_passive_legacy";
+  const exactMarker = value => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    const declared = value.opaque_evidence_subtrees;
+    const extras = Array.isArray(declared) ? ["manual-codex-evidence", "review-evidence"].filter(name => declared.includes(name)) : [];
+    const v1 = value.schema_version === 1 && !Object.hasOwn(value, "opaque_evidence_subtrees");
+    const v2 = value.schema_version === 2 && extras.length > 0 && Array.isArray(declared) &&
+      JSON.stringify(declared) === JSON.stringify(["short-turn-evidence", ...extras]);
+    const expectedKeys = ["schema_version", "classification", "instance_id", "diagnostics_subtree", "historical_instances_are_authority", "descendants_inspected", "runtime_activity_verified", "reason", ...(v2 ? ["opaque_evidence_subtrees"] : [])];
+    return (v1 || v2) && Object.keys(value).length === expectedKeys.length && expectedKeys.every(key => Object.hasOwn(value, key)) &&
+      value.classification === "OPAQUE_PRESERVED_NONAUTHORITY" && value.instance_id === "1832f0bb" &&
+      value.diagnostics_subtree === "short-turn-evidence" && value.historical_instances_are_authority === false &&
+      value.descendants_inspected === false && value.runtime_activity_verified === false && value.reason === "continued_passive_legacy";
+  };
   const markedValid = !hasMarker || (exactMarker(marker) && exactMarker(historical?.legacy_evidence_isolation) && recovery?.mutations_performed === false && state?.macos_setup_approved === true && state?.fresh_first_install_bootstrap === true && state?.fresh_first_install_legacy_instance_id === "1832f0bb" && distinctRoots && new Set(instances.map(item => item?.instance_id)).size === 2);
   const singleSelectedNew = !hasMarker && recovery?.status === "NEEDS_VERIFICATION" && instances.length === 1 &&
     instanceIds.length === 1 && instanceIds[0] === state?.instance_id;

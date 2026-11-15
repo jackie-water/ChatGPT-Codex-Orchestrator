@@ -1028,3 +1028,146 @@ test("G3 legacy evidence isolation: real third root blocks two-root continuation
   fs.mkdirSync(path.join(instances, "unexpected-third"), { mode: 0o700 }); const rejected = inspectMacosExistingInstanceRecovery({ home: f.home, state: f.state }); assert.equal(rejected.legacy_evidence_isolation.classification, "REJECTED");
   const context = vm.createContext({ path, os: { homedir: () => f.home }, canonicalInstallationId, findRegisteredChatRoute }); vm.runInContext(cli.slice(cli.indexOf("function macosBootstrapMayAdvance("), cli.indexOf("function macosSelectedAwaitingFirstRoute(")) + "\nthis.fresh=macosFreshBootstrapMayAdvance;", context); assert.equal(context.fresh(f.state, rejected, evidence), false);
 });
+
+// G3-LEGACY-EVIDENCE-ISOLATION-02: the CLI must understand the v2 audit of the
+// two additional opaque evidence roots without treating that audit as authority.
+function g302CliHistoricalRoots(oldRoot, names = ["manual-codex-evidence", "review-evidence"]) {
+  fs.mkdirSync(path.join(oldRoot, "short-turn-evidence"), { recursive: true, mode: 0o700 });
+  for (const name of names) fs.mkdirSync(path.join(oldRoot, name), { mode: 0o700 });
+  return oldRoot;
+}
+
+test("G3 legacy evidence isolation 02: official first-install CLI reports the v2 opaque roots but never authorizes setup", async t => {
+  const { inspectMacosExistingInstanceRecovery } = await import("../src/lib/macos-existing-instance-recovery.mjs");
+  const home = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "g302-cli-initial-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  fs.chmodSync(home, 0o700);
+  g302CliHistoricalRoots(path.join(home, ".chatgpt-codex-orchestrator", "instances", "1832f0bb"));
+  const state = { preferred_language: "en", macos_setup_approved: true, fresh_first_install_bootstrap: true, fresh_first_install_legacy_instance_id: "1832f0bb" };
+  const outputs = [], forbidden = () => assert.fail("initial v2 reports must not run prerequisites, install or external commands");
+  const context = vm.createContext({ process: { platform: "darwin" }, loadState: () => state, ensureStateLanguage: () => "en", macosRecoveryReport: () => inspectMacosExistingInstanceRecovery({ home, state }), isMacosFreshFirstInstallBootstrap, emit: result => outputs.push(result), macosTrustedRecoveryEvidence: forbidden, macosPrerequisites: forbidden, macosStateBound: forbidden, commandExists: forbidden, migrationPreflight: forbidden, macosNativeHelperPreflight: forbidden });
+  vm.runInContext(cli.slice(cli.indexOf("function dryRun() {"), cli.indexOf("function codexLogin()")) + cli.slice(cli.indexOf("function recoveryPreflight() {"), cli.indexOf("function reportProblem()")) + "\nthis.dry=dryRun;this.preflight=recoveryPreflight;", context);
+  context.dry(); context.preflight();
+  assert.equal(outputs.length, 2);
+  for (const result of outputs) {
+    assert.equal(result.status, "NEEDS_USER_ACTION");
+    assert.equal(result.action_id, "macos_official_fresh_preparation");
+    assert.equal(result.official_fresh_first_install_bootstrap_eligible, true);
+    assert.equal(result.runtime_readiness, "NOT_ASSESSED");
+    assert.equal(result.installation_authorized, false);
+    assert.equal(result.mutations_performed, false);
+    assert.equal(result.existing_instance_recovery.status, "CONFLICT");
+    assert.equal(result.existing_instance_recovery.legacy_evidence_isolation.schema_version, 2);
+    assert.equal(result.existing_instance_recovery.legacy_evidence_isolation.runtime_activity_verified, false);
+    assert.equal(result.existing_instance_recovery.legacy_evidence_isolation.historical_instances_are_authority, false);
+    assert.equal(result.existing_instance_recovery.legacy_evidence_isolation.descendants_inspected, false);
+  }
+});
+
+test("G3 legacy evidence isolation 02: unknown sibling in addition to allowed private evidence still blocks both CLI reports", async t => {
+  const { inspectMacosExistingInstanceRecovery } = await import("../src/lib/macos-existing-instance-recovery.mjs");
+  const home = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "g302-cli-reject-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  fs.chmodSync(home, 0o700);
+  const root = g302CliHistoricalRoots(path.join(home, ".chatgpt-codex-orchestrator", "instances", "1832f0bb"));
+  fs.mkdirSync(path.join(root, "foreign-approval"), { mode: 0o700 });
+  const state = { macos_setup_approved: true, fresh_first_install_bootstrap: true, fresh_first_install_legacy_instance_id: "1832f0bb" };
+  const emitted = [], forbidden = () => assert.fail("rejected v2 evidence must stop before external effects");
+  const context = vm.createContext({ process: { platform: "darwin" }, loadState: () => state, ensureStateLanguage: () => "en", macosRecoveryReport: () => inspectMacosExistingInstanceRecovery({ home, state }), isMacosFreshFirstInstallBootstrap, emit: result => emitted.push(result), macosTrustedRecoveryEvidence: forbidden, macosPrerequisites: forbidden, commandExists: forbidden, migrationPreflight: forbidden });
+  vm.runInContext(cli.slice(cli.indexOf("function dryRun() {"), cli.indexOf("function codexLogin()")) + cli.slice(cli.indexOf("function recoveryPreflight() {"), cli.indexOf("function reportProblem()")) + "\nthis.dry=dryRun;this.preflight=recoveryPreflight;", context);
+  context.dry(); context.preflight();
+  assert.equal(emitted.length, 2);
+  for (const result of emitted) {
+    assert.equal(result.status, "ERROR");
+    assert.equal(result.mutations_performed, false);
+    assert.equal(result.existing_instance_recovery.legacy_evidence_isolation.classification, "REJECTED");
+    assert.equal(result.existing_instance_recovery.legacy_evidence_isolation.reason, "unknown_top_level");
+    assert.notEqual(result.official_fresh_first_install_bootstrap_eligible, true);
+  }
+});
+
+test("G3 legacy evidence isolation 02: v2 continuation passes only with independent two-root provenance", async t => {
+  const { inspectMacosExistingInstanceRecovery } = await import("../src/lib/macos-existing-instance-recovery.mjs");
+  const f = g3RegistrationFixture(t);
+  Object.assign(f.state, { preferred_language: "en", fresh_first_install_bootstrap: true, fresh_first_install_legacy_instance_id: "1832f0bb" });
+  g302CliHistoricalRoots(path.join(path.dirname(f.instance), "1832f0bb"));
+  const recovery = inspectMacosExistingInstanceRecovery({ home: f.home, state: f.state }), evidence = f.verify();
+  assert.equal(recovery.status, "CONFLICT");
+  assert.equal(recovery.legacy_evidence_isolation.schema_version, 2);
+  assert.equal(recovery.legacy_evidence_isolation.reason, "continued_passive_legacy");
+  assert.equal(evidence.status, "NEW_INSTALL_CONTROL_PREPARED_AWAITING_ROUTE");
+  const context = vm.createContext({ path, os: { homedir: () => f.home }, canonicalInstallationId, findRegisteredChatRoute });
+  vm.runInContext(cli.slice(cli.indexOf("function macosBootstrapMayAdvance("), cli.indexOf("function macosSelectedAwaitingFirstRoute(")) + "\nthis.fresh=macosFreshBootstrapMayAdvance;", context);
+  assert.equal(context.fresh(f.state, recovery, evidence), true);
+  assert.equal(findRegisteredChatRoute(f.state, { projectKey: f.state.sandbox_project_key, chatUrl: f.state.reviewer_chat_url }), null);
+  assert.equal(f.state.sandbox_review_route, undefined);
+  assert.notEqual(f.state.target_environment_ready, true);
+  assert.equal(recovery.legacy_evidence_isolation.runtime_activity_verified, false);
+});
+
+test("G3 legacy evidence isolation 02: v2 continuation CLI dry-run and preflight retain their independent gates", async t => {
+  const { inspectMacosExistingInstanceRecovery } = await import("../src/lib/macos-existing-instance-recovery.mjs");
+  const f = g3RegistrationFixture(t); Object.assign(f.state, { preferred_language: "en", fresh_first_install_bootstrap: true, fresh_first_install_legacy_instance_id: "1832f0bb" });
+  g302CliHistoricalRoots(path.join(path.dirname(f.instance), "1832f0bb"));
+  const outputs = [], context = vm.createContext({ path, os: { homedir: () => f.home }, process: { platform: "darwin" }, canonicalInstallationId, findRegisteredChatRoute, loadState: () => f.state, ensureStateLanguage: () => "en", macosRecoveryReport: () => inspectMacosExistingInstanceRecovery({ home: f.home, state: f.state }), macosTrustedRecoveryEvidence: () => f.verify(), macosStateBound: () => false, macosSelectedAwaitingFirstRoute: () => false, emit: result => outputs.push(result), commandExists: () => ({ ok: true }), macosPrerequisites: () => ({ node: true, session_auth: true, native_helper: { status: "PASS" } }), migrationPreflight: () => ({ status: "READY" }), macosNativeHelperPreflight: () => ({ status: "PASS" }) });
+  vm.runInContext(cli.slice(cli.indexOf("function macosBootstrapMayAdvance("), cli.indexOf("function macosSelectedAwaitingFirstRoute(")) + cli.slice(cli.indexOf("function dryRun() {"), cli.indexOf("function codexLogin()")) + cli.slice(cli.indexOf("function recoveryPreflight() {"), cli.indexOf("function reportProblem()")) + "\nthis.dry=dryRun;this.preflight=recoveryPreflight;", context);
+  context.dry(); context.preflight();
+  assert.equal(outputs.length, 2);
+  for (const result of outputs) {
+    assert.equal(result.status, "PASS");
+    assert.equal(result.mutations_performed, false);
+    assert.equal(result.existing_instance_recovery.legacy_evidence_isolation.schema_version, 2);
+    assert.equal(result.existing_instance_recovery.legacy_evidence_isolation.historical_instances_are_authority, false);
+    assert.equal(result.existing_instance_recovery.legacy_evidence_isolation.runtime_activity_verified, false);
+  }
+});
+
+test("G3 legacy evidence isolation 02: continued v2 marker arrays and authority bits fail closed on mutation", async t => {
+  const { inspectMacosExistingInstanceRecovery } = await import("../src/lib/macos-existing-instance-recovery.mjs");
+  const f = g3RegistrationFixture(t);
+  Object.assign(f.state, { fresh_first_install_bootstrap: true, fresh_first_install_legacy_instance_id: "1832f0bb" });
+  g302CliHistoricalRoots(path.join(path.dirname(f.instance), "1832f0bb"));
+  const actual = inspectMacosExistingInstanceRecovery({ home: f.home, state: f.state }), evidence = f.verify();
+  const context = vm.createContext({ path, os: { homedir: () => f.home }, canonicalInstallationId, findRegisteredChatRoute });
+  vm.runInContext(cli.slice(cli.indexOf("function macosBootstrapMayAdvance("), cli.indexOf("function macosSelectedAwaitingFirstRoute(")) + "\nthis.fresh=macosFreshBootstrapMayAdvance;", context);
+  assert.equal(context.fresh(f.state, actual, evidence), true);
+  const mutate = [
+    marker => { marker.schema_version = 1; },
+    marker => { marker.schema_version = 3; },
+    marker => { marker.opaque_evidence_subtrees = ["short-turn-evidence"]; },
+    marker => { marker.opaque_evidence_subtrees = ["short-turn-evidence", "review-evidence", "manual-codex-evidence"]; },
+    marker => { marker.opaque_evidence_subtrees = ["review-evidence", "short-turn-evidence", "manual-codex-evidence"]; },
+    marker => { marker.opaque_evidence_subtrees = ["short-turn-evidence", "manual-codex-evidence", "manual-codex-evidence"]; },
+    marker => { marker.opaque_evidence_subtrees.push("unknown-root"); },
+    marker => { delete marker.opaque_evidence_subtrees; },
+    marker => { marker.historical_instances_are_authority = true; },
+    marker => { marker.runtime_activity_verified = true; },
+    marker => { marker.descendants_inspected = true; },
+    marker => { marker.review_route = "forged"; }
+  ];
+  for (const [index, change] of mutate.entries()) for (const location of ["aggregate", "historical"]) {
+    const copy = structuredClone(actual), legacy = copy.instances.find(item => item.instance_id === "1832f0bb");
+    change(location === "aggregate" ? copy.legacy_evidence_isolation : legacy.legacy_evidence_isolation);
+    assert.equal(context.fresh(f.state, copy, evidence), false, `${index}/${location}`);
+  }
+  const reordered = structuredClone(actual);
+  for (const holder of [reordered, reordered.instances.find(item => item.instance_id === "1832f0bb")]) holder.legacy_evidence_isolation = Object.fromEntries(Object.entries(holder.legacy_evidence_isolation).reverse());
+  assert.equal(context.fresh(f.state, reordered, evidence), true);
+});
+
+test("G3 legacy evidence isolation 02: pending first registration with v2 marker must wait before mutating services", async t => {
+  const { inspectMacosExistingInstanceRecovery } = await import("../src/lib/macos-existing-instance-recovery.mjs");
+  const f = g3RegistrationFixture(t);
+  Object.assign(f.state, { preferred_language: "en", fresh_first_install_bootstrap: true, fresh_first_install_legacy_instance_id: "1832f0bb" });
+  g302CliHistoricalRoots(path.join(path.dirname(f.instance), "1832f0bb"));
+  f.queue();
+  const recovery = inspectMacosExistingInstanceRecovery({ home: f.home, state: f.state }), evidence = f.verify(), original = JSON.stringify(f.state);
+  assert.equal(evidence.status, "NEW_INSTALL_REGISTRATION_PENDING");
+  const forbidden = () => assert.fail("v2 cannot bypass explicit-route-v1 or invoke services"), context = vm.createContext({ path, os: { homedir: () => f.home }, process: { platform: "darwin" }, canonicalInstallationId, findRegisteredChatRoute, isMacosFreshFirstInstallBootstrap, loadState: () => f.state, ensureStateLanguage: () => "en", hasTrustedSingleUserReadinessProfileMarker: () => false, macosRecoveryReport: () => recovery, macosTrustedRecoveryEvidence: () => evidence, emit: result => result, macosPrerequisites: forbidden, migrationPreflight: forbidden, saveState: forbidden, prepareMigrationIntent: forbidden, prepareControlEnvironment: forbidden, ensureInstallerChatRegistration: forbidden, advanceMacosFirstBootRunner: forbidden });
+  vm.runInContext(cli.slice(cli.indexOf("function macosBootstrapMayAdvance("), cli.indexOf("function macosSelectedAwaitingFirstRoute(")) + cli.slice(cli.indexOf("function runSetup() {"), cli.indexOf("function codexLogin()")) + "\nthis.run=runSetup;", context);
+  const result = context.run();
+  assert.equal(result.status, "WAITING");
+  assert.equal(result.action_id, "sandbox_chat_registration");
+  assert.equal(result.mutations_performed, false);
+  assert.equal(JSON.stringify(f.state), original);
+});
