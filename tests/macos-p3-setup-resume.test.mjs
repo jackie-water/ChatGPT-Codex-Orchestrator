@@ -59,7 +59,7 @@ test("Darwin first boot remains blocked and idempotent without an independently 
   const helperEnd=cli.indexOf("function dryRun()",helperStart);
   assert.ok(helperStart>=0&&helperEnd>helperStart);
   const unexpected=()=>assert.fail("synthetic first boot cannot compile helpers, start services, publish issues or invoke Codex");
-  const context=vm.createContext({crypto,os,inspectMacosRunnerBootstrap:unexpected,macosRuntimeAction:unexpected,saveState:unexpected});
+  const context=vm.createContext({crypto,os,hasTrustedSingleUserReadinessProfile:()=>true,hasMacosPersonalUsePolicy:()=>false,inspectMacosRunnerBootstrap:unexpected,macosRuntimeAction:unexpected,saveState:unexpected});
   vm.runInContext(cli.slice(helperStart,helperEnd)+"\nthis.advance=advanceMacosFirstBootRunner;",context);
   const state={installation_id:"fixture-22A1",instance_id:"fixture2",instance_root:path.join(home,".chatgpt-codex-orchestrator","instances","fixture2"),
     control_repository:"owner/chatgpt-codex-orchestrator-control-fixture2",control_repository_id:"101",sandbox_repository:"owner/chatgpt-codex-orchestrator-sandbox-fixture2",sandbox_repository_id:"202",

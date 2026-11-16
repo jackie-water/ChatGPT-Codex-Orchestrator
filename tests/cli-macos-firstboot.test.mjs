@@ -700,7 +700,8 @@ test("G3 legacy evidence isolation: actual migration preflight blocks old runner
     context.run();
     assert.equal(emitted[0].error_id, "MACOS-PREREQUISITE-OR-MIGRATION", name);
     assert.equal(emitted[0].migration.status, "CONFLICT", name);
-    assert.equal(calls.length, 1, name);
+    assert.equal(calls.length, response.ok ? 2 : 1, name);
+    assert.ok(calls.every(([command,args]) => command === "launchctl" && args[0] === "list"), name);
   }
 });
 

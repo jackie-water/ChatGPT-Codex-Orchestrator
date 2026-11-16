@@ -185,23 +185,248 @@ export function migrationInventory({state={}, home=HOME()}={}) {
     launch_agents:{directory:launchDir,exists:fs.existsSync(launchDir)}};
 }
 
-export function detectConcurrentRunner({state={},commandRunner=cmd}={}) {
-  const r=commandRunner("launchctl",["list"]);
-  const label=state.launch_agent_label||"", legacyLabel=state.runner_label||"";
-  const labels=r.ok?String(r.output||"").split("\n").map(line=>line.trim().split(/\s+/).at(-1)).filter(Boolean):[];
-  const relevant=labels.filter(value=>value.startsWith("com.chatgpt.codex.")||value.startsWith("actions.runner.")||value===legacyLabel);
-  const found=relevant.some(value=>value!==label),ownLoaded=Boolean(label&&labels.includes(label));
-  const known=Boolean(state.runner_label||state.runner_path||state.instance_id);
-  return {checked:r.ok,found,own_loaded:ownLoaded,unknown:!r.ok||(!label&&known),fail_closed:!r.ok||(!label&&known),output:r.output};
+// This is an inspection-only exception for independently identified foreign
+// GitHub Actions runners. It does not grant task, route, installation or
+// activation authority to the foreign runner. Failure to bind any source of
+// identity continues to block first installation.
+const FOREIGN_RUNNER_PRINT_MAX = 131072;
+const FOREIGN_RUNNER_CONFIG_MAX = 65536;
+const RUNNER_LIST_MAX = 1024 * 1024;
+const RUNNER_LIST_LINES = 20000;
+const RUNNER_LABEL = /^actions\.runner\.[A-Za-z0-9_.-]+\.[A-Za-z0-9_-]+$/;
+const ORCHESTRATOR_RUNNER = /(?:^|[-.])chatgpt-codex-orchestrator-(?:control|sandbox)-[A-Za-z0-9_-]+(?:\.|$)/i;
+const STAT_KEYS = ["dev", "ino", "uid", "gid", "mode", "nlink", "size", "mtimeMs", "ctimeMs"];
+const equalStat = (a, b) => STAT_KEYS.every(key => a?.[key] === b?.[key]);
+const equalJson = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const safeUid = owner();
+// macOS launchctl print repeats keys such as type/state inside nested blocks.
+// The seven service-identity scalars must be taken only from the direct child
+// level (one indentation unit in launchctl's print format). Never trim a
+// line before classifying its scope: that would promote nested metadata to
+// service authority. Missing, duplicate or mixed-indentation root fields
+// remain an unsafe / unverified Runner rather than being silently accepted.
+const FOREIGN_LAUNCH_SCALARS = ["path", "type", "state", "program", "working directory", "pid", "domain"];
+// ps(1) uses a locale-sensitive strftime("%c") representation for lstart.
+// Normalise each read to an English C locale and UTC, and strictly validate
+// both the macOS BSD day-before-month and month-before-day layouts. This only
+// binds an already independently verified PID; it is not Runner authority.
+const FOREIGN_PS_ENV = Object.freeze({PATH:"/usr/bin:/bin:/usr/sbin:/sbin",LC_ALL:"C",LANG:"C",TZ:"UTC"});
+const FOREIGN_WEEKDAYS = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+const FOREIGN_MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+function foreignRunnerStartStamp(value) {
+  const input=String(value||"").trim();
+  if (input.length<20 || input.length>96 || /[^\x20-\x7e]/.test(input)) throw new Error("Foreign Runner PID start-time output is unsafe");
+  // macOS: Wed  1 Nov 12:36:15 2017; GNU/BSD variants: Wed Nov  1 12:36:15 2017.
+  const first=/^([A-Z][a-z]{2})\s+(\d{1,2})\s+([A-Z][a-z]{2})\s+(\d{2}):(\d{2}):(\d{2})\s+(\d{4})$/.exec(input);
+  const second=first?null:/^([A-Z][a-z]{2})\s+([A-Z][a-z]{2})\s+(\d{1,2})\s+(\d{2}):(\d{2}):(\d{2})\s+(\d{4})$/.exec(input);
+  const parts=first||second;
+  if (!parts) throw new Error("Foreign Runner PID start-time format is not recognized");
+  const weekday=FOREIGN_WEEKDAYS.indexOf(parts[1]);
+  const month=FOREIGN_MONTHS.indexOf(first?parts[3]:parts[2]);
+  const day=Number(first?parts[2]:parts[3]);
+  const hour=Number(parts[4]),minute=Number(parts[5]),secondOfMinute=Number(parts[6]),year=Number(parts[7]);
+  if (weekday<0 || month<0 || year<1970 || year>9999 || day<1 || day>31 || hour>23 || minute>59 || secondOfMinute>59) throw new Error("Foreign Runner PID start-time fields are invalid");
+  const stamp=new Date(Date.UTC(year,month,day,hour,minute,secondOfMinute));
+  if (stamp.getUTCFullYear()!==year || stamp.getUTCMonth()!==month || stamp.getUTCDate()!==day || stamp.getUTCDay()!==weekday) throw new Error("Foreign Runner PID start-time calendar is invalid");
+  return stamp.toISOString();
+}
+
+function foreignLaunchRootScalars(text) {
+  const wanted = new Set(FOREIGN_LAUNCH_SCALARS);
+  const values = new Map();
+  let rootIndent = null;
+  for (const line of String(text).split("\n")) {
+    // launchctl's immediate service properties are indented with exactly one
+    // space or one tab. Nested property collections have deeper indentation.
+    const found = /^([ \t])([^ \t=][^=]*?) = (.*)$/.exec(line);
+    if (!found || !wanted.has(found[2])) continue;
+    if (values.has(found[2]) || (rootIndent !== null && rootIndent !== found[1])) {
+      throw new Error("Ambiguous LaunchAgent metadata field");
+    }
+    rootIndent = found[1];
+    values.set(found[2], found[3]);
+  }
+  if (values.size !== wanted.size) throw new Error("Ambiguous LaunchAgent metadata field");
+  return Object.fromEntries(values);
+}
+function runnerTable(output) {
+  const text = String(output || "");
+  if (text.length > RUNNER_LIST_MAX || /[\x00-\x08\x0b-\x1f]/.test(text)) throw new Error("Unbounded or malformed LaunchAgent list");
+  const rows = text.split("\n");
+  if (rows.length > RUNNER_LIST_LINES) throw new Error("Unbounded LaunchAgent list rows");
+  const relevant = new Map();
+  for (const line of rows) {
+    if (!line.trim() || /^\s*PID\s+Status\s+Label\s*$/.test(line)) continue;
+    const columns = line.trim().split(/\s+/), label = columns.at(-1);
+    if (!label?.startsWith("actions.runner.") && !label?.startsWith("com.chatgpt.codex.")) continue;
+    if (columns.length !== 3 || !/^(?:-|[1-9]\d*)$/.test(columns[0]) || !/^-?\d+$/.test(columns[1]) || relevant.has(label)) throw new Error("Ambiguous or repeated Runner label");
+    const pid = columns[0] === "-" ? null : Number(columns[0]);
+    if (pid !== null && (!Number.isSafeInteger(pid) || pid < 2)) throw new Error("Invalid Runner PID");
+    relevant.set(label, { label, pid, status: Number(columns[1]) });
+  }
+  return relevant;
+}
+function pathUnderHome(value, home) {
+  if (typeof value !== "string" || !path.isAbsolute(value)) throw new Error("Runner path is not absolute");
+  const resolved = path.resolve(value), resolvedHome = path.resolve(home);
+  if (resolved === resolvedHome || !resolved.startsWith(resolvedHome + path.sep)) throw new Error("Foreign Runner path is outside the user's HOME");
+  let cursor = resolved;
+  while (cursor !== resolvedHome) {
+    const stat = fs.lstatSync(cursor);
+    if (stat.isSymbolicLink() || stat.uid !== safeUid || (stat.mode & 0o022)) throw new Error("Foreign Runner path ownership or permissions are unsafe");
+    cursor = path.dirname(cursor);
+  }
+  const rootStat = fs.lstatSync(resolvedHome);
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink() || rootStat.uid !== safeUid || (rootStat.mode & 0o022)) throw new Error("Foreign Runner HOME is unsafe");
+  return resolved;
+}
+function readForeignRunnerConfig(root, home) {
+  const file = pathUnderHome(path.join(root, ".runner"), home), before = fs.lstatSync(file);
+  if (!fs.constants.O_NOFOLLOW || !before.isFile() || before.isSymbolicLink() || before.nlink !== 1 || before.uid !== safeUid || (before.mode & 0o022) || before.size <= 0 || before.size > FOREIGN_RUNNER_CONFIG_MAX) throw new Error("Foreign Runner config is not a stable regular file");
+  const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+  try {
+    const current = fs.fstatSync(fd);
+    if (!equalStat(before, current)) throw new Error("Foreign Runner config identity changed");
+    const bytes = Buffer.alloc(current.size); let done = 0;
+    while (done < bytes.length) {
+      const count = fs.readSync(fd, bytes, done, bytes.length - done, done);
+      if (!count) throw new Error("Foreign Runner config is truncated"); done += count;
+    }
+    if (fs.readSync(fd, Buffer.alloc(1), 0, 1, bytes.length) !== 0 || !equalStat(current, fs.fstatSync(fd)) || !equalStat(current, fs.lstatSync(file))) throw new Error("Foreign Runner config changed during read");
+    // Official .runner configuration is inert metadata; do not inspect .credentials,
+    // repo contents, browser data, token stores, or other projects' task state.
+    const input = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    noDuplicateRunnerKeys(input);
+    const config = JSON.parse(input);
+    if (!config || typeof config !== "object" || Array.isArray(config)) throw new Error("Foreign Runner config is not an object");
+    return {config, identity: current};
+  } finally { fs.closeSync(fd); }
+}
+// Reject duplicate JSON names, including escaped aliases. Do not accept the
+// last of two conflicting gitHubUrl/agentName fields as a trustworthy binding.
+function noDuplicateRunnerKeys(text) {
+  let i = 0;
+  const ws = () => { while (i < text.length && /\s/.test(text[i])) i++; };
+  function str() {
+    const start = i++;
+    while (i < text.length) {
+      if (text[i] === "\\") { i += 2; continue; }
+      if (text[i++] === '"') return JSON.parse(text.slice(start, i));
+    }
+    throw new Error("Malformed Runner JSON string");
+  }
+  function value() {
+    ws();
+    if (text[i] === '"') { str(); return; }
+    if (text[i] === "{") {
+      i++; ws(); const keys = new Set(); if (text[i] === "}") { i++; return; }
+      while (true) {
+        ws(); if (text[i] !== '"') throw new Error("Malformed Runner JSON object");
+        const name = str(); if (keys.has(name)) throw new Error("Duplicate Runner JSON key"); keys.add(name);
+        ws(); if (text[i++] !== ":") throw new Error("Malformed Runner JSON colon");
+        value(); ws(); const separator = text[i++]; if (separator === "}") return; if (separator !== ",") throw new Error("Malformed Runner JSON separator");
+      }
+    }
+    if (text[i] === "[") {
+      i++; ws(); if (text[i] === "]") { i++; return; }
+      while (true) { value(); ws(); const sep = text[i++]; if (sep === "]") return; if (sep !== ",") throw new Error("Malformed Runner JSON array"); }
+    }
+    const number = /^(?:true|false|null|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?)/.exec(text.slice(i));
+    if (!number) throw new Error("Malformed Runner JSON primitive"); i += number[0].length;
+  }
+  value(); ws(); if (i !== text.length) throw new Error("Trailing Runner JSON");
+}
+function inspectForeignLaunchAgent(entry, {state, home, commandRunner}) {
+  // A label alone is not evidence of a different project. All five observations
+  // must agree: list, print, the exact service executable/working directory,
+  // official .runner binding, and a stable PID/start-time observation.
+  const {label, pid, status} = entry, uid = owner();
+  if (!RUNNER_LABEL.test(label) || ORCHESTRATOR_RUNNER.test(label) || pid === null || status !== 0) throw new Error("Foreign Runner label or run state is not eligible");
+  const domain = `gui/${uid || 0}/${label}`;
+  const inspectPrint = () => {
+    const result = commandRunner("launchctl", ["print", domain]);
+    const txt = String(result?.output || "");
+    if (!result?.ok || txt.length > FOREIGN_RUNNER_PRINT_MAX || /[\x00-\x08\x0b-\x1f]/.test(txt)) throw new Error("Foreign Runner launchctl print is unavailable");
+    if (!txt.trimStart().startsWith(`${domain} = {`)) throw new Error("Foreign Runner service identity differs from requested label");
+    const {path: plist, type, state: mode, program, "working directory": working, pid: observedPid, domain: loadedDomain} = foreignLaunchRootScalars(txt);
+    if (type !== "LaunchAgent" || mode !== "running" || observedPid !== String(pid) || !new RegExp(`^gui/${uid || 0} \\[\\d+\\]$`).test(loadedDomain)) throw new Error("Foreign Runner service is not the same running user job");
+    const root = pathUnderHome(working, home);
+    const plistPath = pathUnderHome(plist, home);
+    if (plistPath !== path.join(path.resolve(home), "Library", "LaunchAgents", `${label}.plist`)) throw new Error("Foreign Runner LaunchAgent path or label mismatches");
+    const plistStat = fs.lstatSync(plistPath);
+    if (!plistStat.isFile() || plistStat.isSymbolicLink() || plistStat.uid !== safeUid || plistStat.nlink !== 1 || (plistStat.mode & 0o022)) throw new Error("Foreign Runner LaunchAgent leaf is unsafe");
+    const svc = path.join(root, "runsvc.sh");
+    pathUnderHome(svc, home);
+    const serviceStat = fs.lstatSync(svc);
+    if (!serviceStat.isFile() || serviceStat.isSymbolicLink() || serviceStat.uid !== safeUid || serviceStat.nlink !== 1 || (serviceStat.mode & 0o022) || !(serviceStat.mode & 0o100)) throw new Error("Foreign Runner service script is unsafe");
+    const parsed = txt.match(/(?:^|\n)\s*arguments = \{\s*\n([\s\S]*?)\n\s*\}/);
+    if (!parsed || txt.match(/(?:^|\n)\s*arguments = \{/g)?.length !== 1) throw new Error("Foreign Runner arguments cannot be verified");
+    const argumentsList = parsed[1].split("\n").map(s => s.trim()).filter(Boolean);
+    if (!([svc, "/bin/bash"].includes(program) && (equalJson(argumentsList, [svc]) || (program === "/bin/bash" && equalJson(argumentsList, ["/bin/bash",svc]))))) throw new Error("Foreign Runner program or arguments are not the canonical service");
+    return {root,svc,plistStat,serviceStat,signature:[root,svc,program,plistPath,mode,observedPid,loadedDomain,...argumentsList]};
+  };
+  const first = inspectPrint();
+  const {config,identity} = readForeignRunnerConfig(first.root, home);
+  if (!((typeof config.agentId === "number" && Number.isSafeInteger(config.agentId) && config.agentId > 0) || (typeof config.agentId === "string" && /^[1-9]\d*$/.test(config.agentId))) || typeof config.agentName !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(config.agentName) || typeof config.gitHubUrl !== "string" || !/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(config.gitHubUrl) || config.workFolder !== "_work") throw new Error("Foreign Runner configuration identity is not complete");
+  const repository = config.gitHubUrl.slice("https://github.com/".length);
+  const expectedLabel = `actions.runner.${repository.replace("/", "-")}.${config.agentName}`;
+  if (expectedLabel !== label || ORCHESTRATOR_RUNNER.test(expectedLabel) || [state.control_repository,state.sandbox_repository,state.target_repository].includes(repository) || /^(?:ChatGPT-Codex-Orchestrator|ChatGPT-Codex-Orchestrator-E2E-Target)$/i.test(repository.split("/")[1]) || /^chatgpt-codex-orchestrator-(?:control|sandbox)-/i.test(repository.split("/")[1])) throw new Error("Runner repository is not independently unrelated to Orchestrator");
+  const observe = () => {
+    const options={env:FOREIGN_PS_ENV};
+    const observed = commandRunner("/bin/ps", ["-ww", "-p", String(pid), "-o", "command="],options);
+    const command = String(observed?.output || "").trim();
+    if (!observed?.ok || ![`${first.svc}`,`/bin/bash ${first.svc}`].includes(command)) throw new Error("Foreign Runner PID is not its approved service supervisor");
+    const started = commandRunner("/bin/ps", ["-ww", "-p", String(pid), "-o", "lstart="],options);
+    if (!started?.ok) throw new Error("Foreign Runner PID start-time query failed");
+    const stamp=foreignRunnerStartStamp(started.output);
+    return {command,stamp};
+  };
+  const start1 = observe(), second = inspectPrint(), start2 = observe();
+  const {config:finalConfig,identity:finalIdentity} = readForeignRunnerConfig(first.root,home);
+  if (!equalJson(start1,start2) || !equalJson(first.signature,second.signature) || !equalStat(first.plistStat,second.plistStat) || !equalStat(first.serviceStat,second.serviceStat) || !equalStat(identity,finalIdentity) || !equalJson(config,finalConfig)) throw new Error("Foreign Runner identity changed during inspection");
+  return {label,repository,agent_id:config.agentId,observed_pid:pid};
+}
+
+export function detectConcurrentRunner({state={},home=HOME(),commandRunner=cmd}={}) {
+  let initial;
+  try {
+    const listed = commandRunner("launchctl", ["list"]);
+    if (!listed?.ok) throw new Error("launchctl list failed");
+    initial = runnerTable(listed.output);
+  } catch (error) {
+    const duplicated=error?.message==="Ambiguous or repeated Runner label";
+    return {checked:false,found:duplicated,own_loaded:false,unknown:!duplicated,fail_closed:true,foreign_runners:[],unresolved_count:1,reason:duplicated?"duplicate_runner_label":"runner_inventory_unverified"};
+  }
+  const label=state.launch_agent_label||"", known=Boolean(state.runner_label||state.runner_path||state.instance_id);
+  const own = initial.get(label);
+  const foreign = []; let unknown = false, found = false, reason = null;
+  if (!label && known) {unknown=true;reason="missing_current_instance_label";}
+  for (const entry of initial.values()) {
+    if (label && entry.label === label) continue;
+    if (entry.label.startsWith("com.chatgpt.codex.") || ORCHESTRATOR_RUNNER.test(entry.label)) { found=true; reason="orchestrator_runner_conflict"; continue; }
+    if (!entry.label.startsWith("actions.runner.")) { found=true; reason="unexpected_runner_label"; continue; }
+    try {foreign.push(inspectForeignLaunchAgent(entry,{state,home,commandRunner}));}
+    catch(error) {unknown=true;reason=String(error?.message||"foreign_runner_identity_unverified").slice(0,120);}
+  }
+  // The original label inventory must still match after all read-only
+  // observations. A new Runner starting during inspection is not safe to skip.
+  try {
+    const reread = commandRunner("launchctl",["list"]);
+    if (!reread?.ok || !equalJson([...initial].sort(([a],[b])=>a.localeCompare(b)),[...runnerTable(reread.output)].sort(([a],[b])=>a.localeCompare(b)))) throw new Error("Runner inventory drift");
+  } catch {unknown=true;reason="runner_inventory_drift";}
+  return {checked:true,found,own_loaded:Boolean(own),unknown,fail_closed:unknown,foreign_runners:foreign,unresolved_count:unknown?1:0,reason};
 }
 
 export function migrationPreflight({state={},home=HOME(),commandRunner=cmd}={}) {
   const inventory=migrationInventory({state,home});
-  const concurrent=detectConcurrentRunner({state,commandRunner});
-  inventory.runner.concurrent=concurrent.found;
-  inventory.runner.ownership=concurrent.unknown?"UNKNOWN":(concurrent.found?"OTHER_OR_CURRENT":concurrent.own_loaded?"OWN_VERIFIED_LABEL":"NONE_DETECTED");
+  const concurrent=detectConcurrentRunner({state,home,commandRunner});
+  inventory.runner.concurrent=concurrent.found||concurrent.fail_closed;
+  inventory.runner.ownership=concurrent.unknown?"UNKNOWN":(concurrent.found?"OTHER_OR_CURRENT":concurrent.own_loaded?"OWN_VERIFIED_LABEL":concurrent.foreign_runners.length?"INDEPENDENT_FOREIGN_RUNNERS_VERIFIED":"NONE_DETECTED");
+  inventory.runner.foreign_runner_count=concurrent.foreign_runners.length;
+  inventory.runner.foreign_runner_evidence="READONLY_VERIFIED_OTHER_REPO_NO_AUTHORITY";
   const conflicts=[];
-  if(concurrent.found||concurrent.fail_closed) conflicts.push({kind:concurrent.found?"concurrent_runner":"runner_ownership_unknown",action:"stop_and_resolve_manually"});
+  if(concurrent.found) conflicts.push({kind:"concurrent_runner",action:"stop_and_resolve_manually"});
+  if(concurrent.fail_closed) conflicts.push({kind:"runner_ownership_unknown",detail:concurrent.reason||"UNVERIFIED",action:"inspect_and_resolve_manually"});
   if(inventory.git.dirty) conflicts.push({kind:"dirty_repository",action:"preserve_and_resolve_manually"});
   return {status:conflicts.length?"CONFLICT":"READY",inventory,conflicts,mutations_performed:false,rollback:{available:true,automatic:false}};
 }
@@ -286,7 +511,7 @@ function macosRuntimeActionImpl(action,{state={},commandRunner=cmd,home=HOME(),p
   if(!readonly&&trusted&&!trustedActionApproved&&!preclaimPreflight) return {status:"NEEDS_USER_ACTION",error_id:"MACOS-ACTION-APPROVAL",mutations_performed:false,action:"Approve this exact trusted macOS action through the official installer."};
   const preflight=migrationPreflight({state,home,commandRunner});
   if(preflight.status!=="READY") {
-    const unknown=preflight.conflicts.some(x=>x.kind==="runner_ownership_unknown");
+    const unknown=!preflight.conflicts.some(x=>x.kind==="concurrent_runner")&&preflight.conflicts.some(x=>x.kind==="runner_ownership_unknown");
     return {status:unknown?"NEEDS_USER_ACTION":"ERROR",action_id:unknown?"resolve_runner_ownership":undefined,error_id:"MACOS-RUNNER-OWNERSHIP",launchctl_state:"unknown",mutations_performed:false,preflight,action:"Resolve runner ownership manually; no existing runner was stopped."};
   }
   let runner;
@@ -382,7 +607,7 @@ function macosRuntimeActionImpl(action,{state={},commandRunner=cmd,home=HOME(),p
     if(action==="start") {
       const checked=recheckRunnerAuthorization();if(checked.error)return checked.error;
       const boundary=migrationPreflight({state,home,commandRunner}),existing=commandRunner("launchctl",["print",job]);
-      if(boundary.status!=="READY"||boundary.inventory.runner.ownership!=="NONE_DETECTED"||existing.ok||personal&&!launchAgentAbsent(existing,label))return unknown("MACOS-LAUNCHCTL-IDENTITY","A loaded or ambiguous LaunchAgent appeared before bootstrap.");
+      if(boundary.status!=="READY"||!["NONE_DETECTED","INDEPENDENT_FOREIGN_RUNNERS_VERIFIED"].includes(boundary.inventory.runner.ownership)||existing.ok||personal&&!launchAgentAbsent(existing,label))return unknown("MACOS-LAUNCHCTL-IDENTITY","A loaded or ambiguous LaunchAgent appeared before bootstrap.");
     } else {
       const existing=commandRunner("launchctl",["print",job]);
       if(!existing.ok)return unknown("MACOS-LAUNCHCTL-IDENTITY",existing.output);
