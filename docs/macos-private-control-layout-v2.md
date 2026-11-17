@@ -32,9 +32,18 @@ The six roles are instance root, target automation parent, Control parent and
 clone, browser profile, and pending-wake outbox, including their ancestors.
 For a nonempty preexisting Control, the audit additionally reads only bounded
 `instance.json` identity metadata and checks the local Git origin and clean
-worktree. It reports role/reason without private paths or general payload
-contents. Missing or ambiguous metadata, a foreign origin or dirty checkout
-halts before remote preparation. No directory is adopted, relocated or chmod'ed.
+worktree. Its Git clean-tree check uses non-mutating tree/index/untracked plumbing
+(with filesystem-monitor and untracked-cache extensions disabled) plus direct
+Node Git-blob hashes of tracked working-tree bytes. It **never calls `git
+status`/diff** or configured clean filters, executable fsmonitor hooks or
+diff drivers. Staged, modified and untracked files are rejected; unsupported
+index entries, unsafe path components and unreadable data fail closed rather
+than attempting a filter-based comparison. This is a conservative *byte-clean*
+check; a checkout requiring content transformations may need separate
+read-only reconciliation, not automatic adoption. It reports role/reason without
+private paths or general payload contents. Missing or ambiguous metadata,
+a foreign origin or dirty checkout halts before remote preparation. No
+directory is adopted, relocated or chmod'ed.
 
 A verified **v1** Control checkout may retain owner-owned 0755 permissions
 only under its private 0700 parent, when the exact installation, role, owner,

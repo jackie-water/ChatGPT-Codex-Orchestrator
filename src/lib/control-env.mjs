@@ -79,6 +79,82 @@ export function verifyMacosGeneratedRepositories({state,commandRunner=run}){
   return {...ids,github_owner_id:String(user.id)};
 }
 
+// Avoid `git status`/`git diff`: even with --no-optional-locks they can
+// execute core.fsmonitor and filter.*.clean from a Control checkout's config.
+// The plumbing commands below enumerate only object/index/path identities;
+// actual worktree bytes are hashed by Node, WITHOUT invoking Git filters.
+// Unknown formats, missing files, staged changes and unsafe symlinks fail closed.
+function inspectControlCleanTreeWithoutGitExtensions({control,fsImpl,gitRunner}){
+  const gitRead=args=>{
+    const r=gitRunner("git",[
+      "--no-optional-locks","-c","core.fsmonitor=false",
+      "-c","core.untrackedCache=false",...args
+    ],{cwd:control,allowFailure:true});
+    if(!r?.ok||typeof r.stdout!=="string"||r.stdout.length>2_000_000||
+        r.stdout.includes("\ufffd")) throw new Error("Git read-only identity unavailable");
+    return r.stdout;
+  };
+  const records=(raw,kind)=>{
+    if(!raw)return [];
+    if(!raw.endsWith("\0"))throw new Error("Unterminated Git record");
+    const values=raw.slice(0,-1).split("\0");
+    if(values.length>10000)throw new Error("Unbounded Git index");
+    return values.map(value=>{
+      const delimiter=value.indexOf("\t");
+      if(delimiter<0)throw new Error("Malformed Git record");
+      const header=value.slice(0,delimiter),file=value.slice(delimiter+1);
+      const match=kind==="tree"
+        ? /^(100644|100755|120000) blob ([0-9a-f]{40})$/.exec(header)
+        : /^(100644|100755|120000) ([0-9a-f]{40}) 0$/.exec(header);
+      if(!match||!file||path.posix.isAbsolute(file)||file.split("/").some(p=>
+          !p||p==="."||p===".."||p===".git")) throw new Error("Unsafe Git index entry");
+      return {file,mode:match[1],blob:match[2]};
+    });
+  };
+  try{
+    const head=records(gitRead(["ls-tree","-r","-z","HEAD"]),"tree");
+    const index=records(gitRead(["ls-files","--stage","-z"]),"index");
+    // `--others --exclude-standard` follows ordinary Git untracked semantics
+    // but never invokes a clean/smudge/diff/filter executable.
+    if(gitRead(["ls-files","--others","--exclude-standard","-z"]))
+      return {ok:false,reason:"existing_control_dirty"};
+    const indexed=new Map(index.map(x=>[x.file,x]));
+    // The authority-bearing identity file itself must be part of the
+    // committed checkout; an ignored, locally planted marker is not enough.
+    if(!indexed.has("instance.json")||!head.some(x=>x.file==="instance.json"))
+      return {ok:false,reason:"existing_control_git_unverified"};
+    if(indexed.size!==index.length||head.length!==index.length)
+      return {ok:false,reason:"existing_control_dirty"};
+    let totalBytes=0;
+    for(const tracked of head){
+      const entry=indexed.get(tracked.file);
+      if(!entry||entry.mode!==tracked.mode||entry.blob!==tracked.blob)
+        return {ok:false,reason:"existing_control_dirty"};
+      let current=control,stat;
+      const parts=tracked.file.split("/");
+      for(let i=0;i<parts.length;i++){
+        current=path.join(current,parts[i]);
+        stat=fsImpl.lstatSync(current);
+        if(i<parts.length-1&&(stat.isSymbolicLink()||!stat.isDirectory()))
+          throw new Error("Unsafe tracked path component");
+      }
+      const isLink=entry.mode==="120000";
+      if(isLink?!stat.isSymbolicLink():(!stat.isFile()||stat.isSymbolicLink()))
+        return {ok:false,reason:"existing_control_dirty"};
+      if(!isLink&&Boolean(stat.mode&0o111)!==(entry.mode==="100755"))
+        return {ok:false,reason:"existing_control_dirty"};
+      if(stat.size>8*1024*1024||totalBytes+stat.size>64*1024*1024)
+        throw new Error("Unbounded tracked file");
+      let bytes=isLink?fsImpl.readlinkSync(current,{encoding:"buffer"}):fsImpl.readFileSync(current);
+      if(!Buffer.isBuffer(bytes))bytes=Buffer.from(bytes);
+      totalBytes+=bytes.length;
+      if(crypto.createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex")!==entry.blob)
+        return {ok:false,reason:"existing_control_dirty"};
+    }
+    return {ok:true};
+  }catch{return {ok:false,reason:"existing_control_git_unverified"};}
+}
+
 // A pre-existing Control checkout is authority-bearing state, not merely a
 // directory with acceptable mode bits. Check its saved installation identity,
 // local Git origin, and clean worktree BEFORE touching target/Sandbox repos.
@@ -121,16 +197,15 @@ function inspectMacosControlCheckoutReadOnly({control,installationId,macosContro
         ? metadata.macos_control_layout!==MACOS_PRIVATE_CONTROL_LAYOUT_V2
         : metadata.macos_control_layout!==undefined&&metadata.macos_control_layout!==null))
     return {ok:false,reason:"existing_control_metadata_mismatch"};
-  // --no-optional-locks keeps a read-only inspection from refreshing the index.
-  let origin,status;
+  // A remote URL query does not fetch. Dirty-state inspection must not run
+  // status/diff or any attribute/config-driven executable Git extension.
   try{
-    origin=gitRunner("git",["--no-optional-locks","remote","get-url","origin"],{cwd:control,allowFailure:true});
-    if(!origin.ok||normalizedGithubRepository(origin.stdout)!==repo.toLowerCase())
+    const origin=gitRunner("git",["--no-optional-locks","remote","get-url","origin"],{cwd:control,allowFailure:true});
+    if(!origin?.ok||normalizedGithubRepository(origin.stdout)!==repo.toLowerCase())
       return {ok:false,reason:"existing_control_foreign_origin"};
-    status=gitRunner("git",["--no-optional-locks","status","--porcelain","--untracked-files=all"],{cwd:control,allowFailure:true});
+    const clean=inspectControlCleanTreeWithoutGitExtensions({control,fsImpl,gitRunner});
+    if(!clean.ok)return clean;
   }catch{return {ok:false,reason:"existing_control_git_unverified"};}
-  if(!status.ok) return {ok:false,reason:"existing_control_git_unverified"};
-  if(status.stdout) return {ok:false,reason:"existing_control_dirty"};
   return {ok:true,empty:false};
 }
 

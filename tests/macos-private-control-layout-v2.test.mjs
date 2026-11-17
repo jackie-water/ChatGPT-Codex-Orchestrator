@@ -366,3 +366,150 @@ reason:String(error.message).includes('existing_control_unbound')?'existing_cont
   assert.equal(fs.existsSync(path.join(f.base,'pending-wakes')),false);
   assert.equal(fs.existsSync(path.join(f.base,'automation')),false);
 });
+
+// G3-RV-04: A clean-state check is NOT allowed to execute Git extensions.
+// All fixtures are per-test local Git repositories; no network or real setup.
+function rv04ExternalProgram(f,name,marker){
+  const file=path.join(f.home,`${name}.sh`);
+  fs.writeFileSync(file,`#!/bin/sh\nprintf 'EXECUTED' >> ${JSON.stringify(marker)}\ncat >/dev/null\nprintf 'same\\n'\n`,{mode:0o700});
+  fs.chmodSync(file,0o700);
+  return file;
+}
+
+for(const [layout,mode] of [[null,0o755],[V2,0o700]]){
+  const label=layout===V2?'v2-private':'v1-legacy';
+  test(`G3-RV-04 ${label} clean checkout with configured executable fsmonitor never starts hook`,t=>{
+    const f=localControlFixture(t,{layout,mode});
+    const sentinel=path.join(f.home,'fsmonitor-executed');
+    const script=rv04ExternalProgram(f,'fsmonitor',sentinel);
+    f.git('config','core.fsmonitor',script);
+    const index=fs.readFileSync(path.join(f.control,'.git','index'));
+    const result=f.audit();
+    assert.equal(result.status,'PASS',JSON.stringify(result.issues));
+    assert.equal(result.mutations_performed,false);
+    assert.equal(fs.existsSync(sentinel),false,'Git fsmonitor must never run');
+    assert.deepEqual(fs.readFileSync(path.join(f.control,'.git','index')),index);
+  });
+}
+
+test('G3-RV-04 injected global fsmonitor config cannot override safe plumbing inspection',t=>{
+  const f=localControlFixture(t,{mode:0o755});
+  const sentinel=path.join(f.home,'global-hook-executed');
+  const script=rv04ExternalProgram(f,'global-monitor',sentinel);
+  const config=path.join(f.home,'external-gitconfig');
+  fs.writeFileSync(config,`[core]\n fsmonitor = ${script}\n`,{mode:0o600});
+  const old=process.env.GIT_CONFIG_GLOBAL;
+  try{
+    process.env.GIT_CONFIG_GLOBAL=config;
+    const report=f.audit();
+    assert.equal(report.status,'PASS',JSON.stringify(report.issues));
+    assert.equal(fs.existsSync(sentinel),false);
+  }finally{
+    if(old===undefined)delete process.env.GIT_CONFIG_GLOBAL;
+    else process.env.GIT_CONFIG_GLOBAL=old;
+  }
+});
+
+test('G3-RV-04 configured clean filter remains inert for a clean v2 checkout',t=>{
+  const f=localControlFixture(t,{layout:V2});
+  const sentinel=path.join(f.home,'clean-filter-executed');
+  const script=rv04ExternalProgram(f,'clean-filter',sentinel);
+  fs.writeFileSync(path.join(f.control,'.gitattributes'),'note.txt filter=rv04\n');
+  fs.writeFileSync(path.join(f.control,'note.txt'),'same\n');
+  f.git('add','.gitattributes','note.txt');
+  f.git('-c','user.name=Fixture','-c','user.email=fixture@example.test','commit','-qm','clean filter fixture');
+  f.git('config','filter.rv04.clean',script);
+  f.git('config','core.fsmonitor','false');
+  const report=f.audit();
+  assert.equal(report.status,'PASS',JSON.stringify(report.issues));
+  assert.equal(fs.existsSync(sentinel),false,'Git clean filter must never run');
+});
+
+test('G3-RV-04 modified tracked bytes cannot be hidden by clean filter even with fsmonitor false',t=>{
+  const f=localControlFixture(t,{layout:V2});
+  const sentinel=path.join(f.home,'clean-filter-executed');
+  const script=rv04ExternalProgram(f,'dirty-filter',sentinel);
+  fs.writeFileSync(path.join(f.control,'.gitattributes'),'note.txt filter=rv04\n');
+  fs.writeFileSync(path.join(f.control,'note.txt'),'same\n');
+  f.git('add','.gitattributes','note.txt');
+  f.git('-c','user.name=Fixture','-c','user.email=fixture@example.test','commit','-qm','raw fixture');
+  f.git('config','filter.rv04.clean',script);
+  f.git('config','core.fsmonitor','false');
+  fs.writeFileSync(path.join(f.control,'note.txt'),'evil\n');
+  const report=f.audit();
+  assert.deepEqual(roleIssues(report,'control_clone'),[{role:'control_clone',reason:'existing_control_dirty'}]);
+  assert.equal(report.mutations_performed,false);
+  assert.equal(fs.existsSync(sentinel),false,'Dirty check cannot run filter to hide changed bytes');
+});
+
+test('G3-RV-04 staged change, untracked file and changed executable mode all fail closed',t=>{
+  const f=localControlFixture(t,{layout:V2});
+  assert.equal(f.audit().status,'PASS');
+  const state=f.metadataFile;
+  fs.writeFileSync(state,JSON.stringify({...f.metadata,arch:'x86_64'})+'\n',{mode:0o600});
+  assert.deepEqual(roleIssues(f.audit(),'control_clone'),[{role:'control_clone',reason:'existing_control_dirty'}]);
+  // The staging operation must not make a modified checkout appear clean.
+  f.git('add','instance.json');
+  assert.deepEqual(roleIssues(f.audit(),'control_clone'),[{role:'control_clone',reason:'existing_control_dirty'}]);
+  f.git('reset','-q','HEAD','--','instance.json');
+  fs.writeFileSync(state,JSON.stringify(f.metadata,null,2)+'\n',{mode:0o600});
+  assert.equal(f.audit().status,'PASS');
+  fs.writeFileSync(path.join(f.control,'untracked'), 'do not delete');
+  assert.deepEqual(roleIssues(f.audit(),'control_clone'),[{role:'control_clone',reason:'existing_control_dirty'}]);
+  fs.unlinkSync(path.join(f.control,'untracked'));
+  fs.chmodSync(state,0o700);
+  assert.deepEqual(roleIssues(f.audit(),'control_clone'),[{role:'control_clone',reason:'existing_control_dirty'}]);
+});
+
+test('G3-RV-04 malformed plumbing output, command failure and unsupported index fail without side effects',t=>{
+  const f=localControlFixture(t,{layout:V2});
+  const allowed=['remote','ls-tree','ls-files'];
+  let calls=[];
+  const runner=(cmd,args,options)=>{
+    assert.equal(cmd,'git');
+    assert.equal(options.cwd,f.control);
+    assert.equal(options.allowFailure,true);
+    const sub=args.includes('remote')?'remote':args.includes('ls-tree')?'ls-tree':args.includes('ls-files')?'ls-files':'INVALID';
+    assert.ok(allowed.includes(sub),JSON.stringify(args));
+    if(sub==='ls-files'||sub==='ls-tree'){
+      assert.ok(args.includes('core.fsmonitor=false'));
+      assert.ok(args.includes('core.untrackedCache=false'));
+      assert.ok(!args.includes('status'));
+    }
+    calls.push(sub);
+    return {ok:true,stdout:sub==='remote'?`https://github.com/${f.repo}.git`:'bad line without NUL',stderr:'',status:0};
+  };
+  assert.deepEqual(roleIssues(f.audit({gitRunner:runner}),'control_clone'),[{role:'control_clone',reason:'existing_control_git_unverified'}]);
+  assert.deepEqual(calls,['remote','ls-tree']);
+  assert.equal(f.audit({gitRunner:()=>({ok:false,stdout:'',status:1})}).status,'BLOCKED');
+});
+
+test('G3-RV-04 preserved state is not overwritten when Git identity is dirty or unsafe',t=>{
+  const f=localControlFixture(t,{layout:V2});
+  const statePath=path.join(f.base,'install-state.json');
+  fs.mkdirSync(f.base,{recursive:true,mode:0o700});
+  fs.writeFileSync(statePath,'saved-G3-SETUP-011-state\n',{mode:0o600});
+  const original=fs.readFileSync(statePath);
+  const beforeNames=fs.readdirSync(f.base);
+  fs.writeFileSync(path.join(f.control,'dirty-new-file'),'retain as forensic evidence');
+  const result=f.audit();
+  assert.equal(result.status,'BLOCKED');
+  assert.equal(result.mutations_performed,false);
+  assert.deepEqual(fs.readFileSync(statePath),original);
+  assert.deepEqual(fs.readdirSync(f.base),beforeNames);
+  assert.equal(fs.existsSync(path.join(f.base,'automation')),false);
+  assert.equal(fs.readFileSync(path.join(f.control,'dirty-new-file'),'utf8'),'retain as forensic evidence');
+});
+
+
+test('G3-RV-04 an ignored untracked identity marker cannot authenticate an otherwise clean Control',t=>{
+  const f=localControlFixture(t,{layout:V2});
+  f.git('rm','--cached','-q','instance.json');
+  f.git('-c','user.name=Fixture','-c','user.email=fixture@example.test','commit','-qm','untrack authority marker');
+  fs.writeFileSync(path.join(f.control,'.git','info','exclude'),'instance.json\n');
+  assert.equal(f.git('status','--porcelain'),'','Git considers ignored local marker clean');
+  assert.equal(fs.existsSync(f.metadataFile),true);
+  const report=f.audit();
+  assert.deepEqual(roleIssues(report,'control_clone'),[{role:'control_clone',reason:'existing_control_git_unverified'}]);
+  assert.equal(report.mutations_performed,false);
+});
