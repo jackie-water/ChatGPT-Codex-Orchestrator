@@ -25,11 +25,25 @@ An unknown or inconsistent marker fails closed. The old `docs/recovery-evidence-
 contract is unchanged for legacy instances; the v2 layout does not establish
 Control authority, Chat registration, runner readiness or any merge approval.
 
-A complete, read-only path audit must precede the first preparation mutation.
-The audit checks the instance root, target automation parent, Control parent
-and clone, browser profile and pending-wake outbox and their ancestors. It
-returns role/reason only, without printing private paths or reading payloads.
-An unsafe or ambiguous path halts before any GitHub repository creation,
-`setup` retry, permission repair or token handling. The already-saved G3
-challenge/intent is **not** a new-source authorization and must not be reused
-after the source SHA or source location changes.
+A complete, read-only path and existing-Control identity audit precedes
+**new G3 migration intent and installer-state writes**, private directory
+creation, local target checkout and remote Control/Sandbox repository effects.
+The six roles are instance root, target automation parent, Control parent and
+clone, browser profile, and pending-wake outbox, including their ancestors.
+For a nonempty preexisting Control, the audit additionally reads only bounded
+`instance.json` identity metadata and checks the local Git origin and clean
+worktree. It reports role/reason without private paths or general payload
+contents. Missing or ambiguous metadata, a foreign origin or dirty checkout
+halts before remote preparation. No directory is adopted, relocated or chmod'ed.
+
+A verified **v1** Control checkout may retain owner-owned 0755 permissions
+only under its private 0700 parent, when the exact installation, role, owner,
+repository and local Git identity all match. The **v2** Control checkout still
+requires 0700 without exception. An empty existing Control directory must be
+0700 in either mode; a nonempty unbound directory is not an approved recovery.
+An interrupted clone with missing metadata fails closed for manual recovery.
+
+The saved G3 challenge/intent is **not** new-source authorization and must not
+be reused after the source SHA or source location changes. Existing state
+reads and prior approved intent are retained as historical evidence; a new
+unsafe-path rejection does not overwrite either one.

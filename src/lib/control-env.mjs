@@ -79,12 +79,67 @@ export function verifyMacosGeneratedRepositories({state,commandRunner=run}){
   return {...ids,github_owner_id:String(user.id)};
 }
 
+// A pre-existing Control checkout is authority-bearing state, not merely a
+// directory with acceptable mode bits. Check its saved installation identity,
+// local Git origin, and clean worktree BEFORE touching target/Sandbox repos.
+// These bounded reads never clone, fetch, chmod, or create a repository.
+function inspectMacosControlCheckoutReadOnly({control,installationId,macosControlLayout,expectedGithubLogin,fsImpl=fs,gitRunner=run}){
+  let names;
+  try{names=fsImpl.readdirSync(control);}catch{return {ok:false,reason:"existing_control_unreadable"};}
+  if(names.length===0) return {ok:true,empty:true};
+  if(!names.includes("instance.json")||!names.includes(".git")) return {ok:false,reason:"existing_control_unbound"};
+  const uid=typeof process.getuid==="function"?process.getuid():null;
+  const owned=st=>uid===null||st.uid===uid;
+  const gitDir=path.join(control,".git"),gitConfig=path.join(gitDir,"config"),metadataFile=path.join(control,"instance.json");
+  let metadataStat,gitStat,configStat;
+  try{
+    metadataStat=fsImpl.lstatSync(metadataFile);
+    gitStat=fsImpl.lstatSync(gitDir);
+    configStat=fsImpl.lstatSync(gitConfig);
+  }catch{return {ok:false,reason:"existing_control_identity_unreadable"};}
+  if(!metadataStat.isFile()||metadataStat.isSymbolicLink()||!owned(metadataStat)||metadataStat.nlink!==1||
+      (metadataStat.mode&0o077)!==0||metadataStat.size>65536||
+      !gitStat.isDirectory()||gitStat.isSymbolicLink()||!owned(gitStat)||(gitStat.mode&0o022)!==0||
+      !configStat.isFile()||configStat.isSymbolicLink()||!owned(configStat)||configStat.nlink!==1||
+      (configStat.mode&0o022)!==0||configStat.size>65536)
+    return {ok:false,reason:"existing_control_identity_unsafe"};
+  let metadata;
+  try{metadata=JSON.parse(fsImpl.readFileSync(metadataFile,"utf8"));}
+  catch{return {ok:false,reason:"existing_control_metadata_invalid"};}
+  const short=canonicalInstallationId(installationId);
+  const login=String(expectedGithubLogin||metadata?.trusted_github_username||"");
+  const repo=`${login}/chatgpt-codex-orchestrator-control-${short}`;
+  const sandbox=`${login}/chatgpt-codex-orchestrator-sandbox-${short}`;
+  if(!metadata||typeof metadata!=="object"||Array.isArray(metadata)||
+     !/^[A-Za-z0-9-]+$/.test(login)||metadata.trusted_github_username!==login||
+     metadata.installation_id!==installationId||metadata.instance_id!==short||
+     metadata.role!=="control"||metadata.platform!=="darwin"||
+     metadata.control_repository!==repo||metadata.sandbox_repository!==sandbox||
+     normalizedGithubRepository(metadata.origin)!==repo.toLowerCase()||
+     normalizedGithubRepository(metadata.remote_origin)!==repo.toLowerCase()||
+     (macosControlLayout===MACOS_PRIVATE_CONTROL_LAYOUT_V2
+        ? metadata.macos_control_layout!==MACOS_PRIVATE_CONTROL_LAYOUT_V2
+        : metadata.macos_control_layout!==undefined&&metadata.macos_control_layout!==null))
+    return {ok:false,reason:"existing_control_metadata_mismatch"};
+  // --no-optional-locks keeps a read-only inspection from refreshing the index.
+  let origin,status;
+  try{
+    origin=gitRunner("git",["--no-optional-locks","remote","get-url","origin"],{cwd:control,allowFailure:true});
+    if(!origin.ok||normalizedGithubRepository(origin.stdout)!==repo.toLowerCase())
+      return {ok:false,reason:"existing_control_foreign_origin"};
+    status=gitRunner("git",["--no-optional-locks","status","--porcelain","--untracked-files=all"],{cwd:control,allowFailure:true});
+  }catch{return {ok:false,reason:"existing_control_git_unverified"};}
+  if(!status.ok) return {ok:false,reason:"existing_control_git_unverified"};
+  if(status.stdout) return {ok:false,reason:"existing_control_dirty"};
+  return {ok:true,empty:false};
+}
+
 // Read-only inventory before the first filesystem mutation. Inspect all five
 // canonical preparation paths, rather than hiding later blockers behind the
 // first unsafe ancestor. Names and absolute paths never appear in the report.
 // Missing paths are eligible for the ordinary private 0700 mkdir operation;
 // pre-existing unsafe paths are NEVER adopted or chmod'ed.
-export function auditMacosPrivatePreparationPaths({home,installationId,projectKey,macosControlLayout=null,fsImpl=fs}={}){
+export function auditMacosPrivatePreparationPaths({home,installationId,projectKey,macosControlLayout=null,expectedGithubLogin=null,fsImpl=fs,gitRunner=run}={}){
   const base=path.resolve(home||""),paths=defaultLocalPaths({home:base,installationId,projectKey,platform:"darwin",macosControlLayout});
   const instanceRoot=path.join(base,".chatgpt-codex-orchestrator","instances",canonicalInstallationId(installationId));
   const targets=[
@@ -118,8 +173,19 @@ export function auditMacosPrivatePreparationPaths({home,installationId,projectKe
       if(st.isSymbolicLink()||!st.isDirectory()||!owned||writable){
         issues.push({role,reason:st.isSymbolicLink()?"symlink":!st.isDirectory()?"not_directory":!owned?"foreign_owner":"unsafe_writable_ancestor"});break;
       }
-      if(cursor===absolute&&(st.mode&0o7777)!==0o700){
+      const legacyControlLeaf=role==="control_clone"&&macosControlLayout!==MACOS_PRIVATE_CONTROL_LAYOUT_V2;
+      if(cursor===absolute&&(st.mode&0o7777)!==0o700&&
+          !(legacyControlLeaf&&(st.mode&0o7000)===0&&(st.mode&0o700)===0o700&&(st.mode&0o022)===0)){
         issues.push({role,reason:"existing_leaf_not_private"});break;
+      }
+    }
+    if(role==="control_clone"&&!missing&&!issues.some(x=>x.role===role)){
+      const checkout=inspectMacosControlCheckoutReadOnly({control:absolute,installationId,macosControlLayout,expectedGithubLogin,fsImpl,gitRunner});
+      if(!checkout.ok) issues.push({role,reason:checkout.reason});
+      else if(checkout.empty){
+        // An unbound checkout can only be created in a strictly private leaf.
+        try{if((fsImpl.lstatSync(absolute).mode&0o7777)!==0o700)issues.push({role,reason:"existing_control_unbound_nonprivate"});}
+        catch{issues.push({role,reason:"existing_control_unreadable"});}
       }
     }
     observed.push({role,exists:!missing});
@@ -137,7 +203,7 @@ export function auditMacosPrivatePreparationPaths({home,installationId,projectKe
   return {status:issues.length?"BLOCKED":"PASS",issues,observed,mutations_performed:false};
 }
 
-function preparePrivateMacDirectory(directory,home){
+function preparePrivateMacDirectory(directory,home,{verifiedLegacyControl=null}={}){
   const absolute=path.resolve(directory),base=path.resolve(home);
   if(absolute!==directory||!absolute.startsWith(base+path.sep)) throw new Error("macOS installation path escapes canonical HOME");
   let cursor=path.parse(absolute).root;
@@ -148,7 +214,11 @@ function preparePrivateMacDirectory(directory,home){
     const inside=cursor===base||cursor.startsWith(base+path.sep);
     const owned=typeof process.getuid!=="function"||st.uid===process.getuid()||(!inside&&st.uid===0);
     const writable=(st.mode&0o022)!==0&&!(st.uid===0&&(st.mode&0o1000)!==0&&!inside);
-    if(st.isSymbolicLink()||!st.isDirectory()||!owned||writable||(cursor===absolute&&(st.mode&0o077)!==0)) throw new Error("Unsafe macOS private installation path; no permission repair or adoption is allowed");
+    const legacyLeaf=cursor===absolute&&directory===verifiedLegacyControl&&
+      (st.mode&0o7000)===0&&(st.mode&0o700)===0o700&&(st.mode&0o022)===0;
+    if(st.isSymbolicLink()||!st.isDirectory()||!owned||writable||
+        (cursor===absolute&&(st.mode&0o077)!==0&&!legacyLeaf))
+      throw new Error("Unsafe macOS private installation path; no permission repair or adoption is allowed");
   }
 }
 
@@ -642,9 +712,11 @@ export function prepareControlEnvironment({
   const chatRouteFile=path.join(instanceRoot,"chat-routes.json");
   const pendingWakeOutbox=path.join(instanceRoot,"pending-wakes");
   if(process.platform==="darwin"){
-    const checked=auditMacosPrivatePreparationPaths({home,installationId,projectKey,macosControlLayout});
+    const checked=auditMacosPrivatePreparationPaths({home,installationId,projectKey,macosControlLayout,expectedGithubLogin:login});
     if(checked.status!=="PASS") throw new Error("MACOS-PRIVATE-PATH-AUDIT:"+checked.issues.map(x=>x.role+":"+x.reason).join(","));
-    for(const directory of [instanceRoot,path.dirname(paths.project),path.dirname(paths.control),paths.control,browserProfile,pendingWakeOutbox]) preparePrivateMacDirectory(directory,home);
+    const verifiedLegacyControl=macosControlLayout===MACOS_PRIVATE_CONTROL_LAYOUT_V2?null:paths.control;
+    for(const directory of [instanceRoot,path.dirname(paths.project),path.dirname(paths.control),paths.control,browserProfile,pendingWakeOutbox])
+      preparePrivateMacDirectory(directory,home,{verifiedLegacyControl});
     if(fs.existsSync(paths.control)&&fs.existsSync(path.join(paths.control,"instance.json"))){
       assertSafeRuntimePath(path.join(paths.control,"instance.json"),{type:"file"});
       const prior=JSON.parse(fs.readFileSync(path.join(paths.control,"instance.json"),"utf8"));

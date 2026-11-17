@@ -6,7 +6,8 @@ import path from "node:path";
 import crypto from "node:crypto";
 import vm from "node:vm";
 import { MACOS_PERSONAL_USE_POLICY, TRUSTED_SINGLE_USER_READINESS_PROFILE, hasMacosPersonalUsePolicy, hasTrustedSingleUserReadinessProfile, hasTrustedSingleUserReadinessProfileMarker, hasTrustedSingleUserReadinessIdentity, macosPersonalUsePolicyChallenge, trustedSingleUserReadinessProfileChallenge } from "../src/lib/macos-personal-use-service.mjs";
-import {canonicalInstallationId, defaultLocalPaths} from "../src/lib/control-render.mjs";
+import {canonicalInstallationId, defaultLocalPaths, safeKey, MACOS_PRIVATE_CONTROL_LAYOUT_V2} from "../src/lib/control-render.mjs";
+import {auditMacosPrivatePreparationPaths} from "../src/lib/control-env.mjs";
 import {ensureInstallerChatRegistration, findRegisteredChatRoute, normalizeChatUrl} from "../src/lib/chat-registration.mjs";
 import {githubReadOnlyApi, issueTrustedRecoveryEvidence, verifyTrustedRecoveryEvidence} from "../src/lib/macos-trusted-recovery-evidence.mjs";
 import {isMacosFreshFirstInstallBootstrap} from "../src/lib/macos-existing-instance-recovery.mjs";
@@ -359,6 +360,7 @@ function pendingRegistrationResume(t){
     macosTrustedRecoveryEvidence:(actual,{requireReceipt})=>verifyTrustedRecoveryEvidence({state:actual,home:f.home,githubApi:api,requireReceipt}),
     macosPrerequisites:()=>{calls.push("prerequisites");if(settings.queueDuringPrerequisites){queueRoute();deliverRoute();settings.queueDuringPrerequisites=false;}if(settings.offlineAfterFirstProof)settings.offline=true;return {node:true,git:true,gh:true,codex:true,session_auth:true,github_auth:true,native_helper:{status:"PASS"},legacy_native_helper_gate:"PASS"};},
     migrationPreflight:()=>({status:"READY"}),authenticatedGithubLogin:()=>state.github_login,
+    safeKey:x=>x,auditMacosPrivatePreparationPaths:()=>({status:"PASS",issues:[]}),
     prepareMigrationIntent:()=>({path:path.join(state.instance_root,"migration-intent.json"),phase:"PREPARED"}),
     prepareControlEnvironment:()=>assert.fail("prepared Control must not be recreated"),
     verifyMacosGeneratedRepositories:()=>({control_repository_id:"101",sandbox_repository_id:"202",github_owner_id:"42"}),
@@ -536,7 +538,7 @@ test("new profile setup with missing native helper reaches explicit selection wi
   const state={macos_setup_approved:true,installation_id:"new-install",github_login:"owner",target_repository:"owner/target",reviewer_chat_url:"https://chatgpt.com/c/approved",github_plugin_authorized:true,control_repository:"owner/control",control_repository_id:"101",sandbox_repository:"owner/sandbox",sandbox_repository_id:"202",github_plugin_authorization_verified:true,github_plugin_authorization_installation_id:"new-install",github_plugin_authorization_control_repository:"owner/control",github_plugin_authorization_sandbox_repository:"owner/sandbox",github_plugin_authorization_chat_url:"https://chatgpt.com/c/approved",codex_trust_sandbox:true,reviewer_browser_ready:true};
   const calls=[],emissions=[],saves=[];
   const setup=cli.slice(cli.indexOf("function runSetup() {"),cli.indexOf("function codexLogin()"));
-  const context=vm.createContext({crypto:{randomUUID:()=>"unexpected"},process:{platform:"darwin",cwd:()=>"/synthetic"},os:{homedir:()=>"/synthetic-home"},loadState:()=>state,ensureStateLanguage:()=>"en",hasTrustedSingleUserReadinessProfileMarker:()=>false,hasTrustedSingleUserReadinessProfile:()=>false,hasMacosPersonalUsePolicy:()=>false,isMacosFreshFirstInstallBootstrap:()=>false,macosRecoveryReport:()=>({status:"ABSENT"}),macosTrustedRecoveryEvidence:()=>({status:"ABSENT"}),macosFreshBootstrapMayAdvance:()=>false,macosBootstrapMayAdvance:()=>false,macosStateBound:()=>false,findRegisteredChatRoute:()=>null,normalizeChatUrl:x=>x,macosPrerequisites:()=>{calls.push("prerequisites/preflight");return {node:true,git:true,gh:true,codex:true,session_auth:true,github_auth:true,native_helper:{status:"MISSING"},legacy_native_helper_gate:"DEFERRED_PENDING_PROFILE_SELECTION"};},migrationPreflight:()=>({status:"READY"}),authenticatedGithubLogin:()=>"owner",prepareMigrationIntent:()=>{calls.push("migration intent");return {path:"/synthetic/intent",phase:"PREPARED"};},saveState:actual=>saves.push(JSON.parse(JSON.stringify(actual))),prepareControlEnvironment:()=>{calls.push("Control/Sandbox preparation");return {control_repository:"owner/control",control_repository_id:"101",sandbox_repository:"owner/sandbox",sandbox_repository_id:"202"};},verifyMacosGeneratedRepositories:()=>{calls.push("independent repo identities");return {control_repository_id:"101",sandbox_repository_id:"202"};},advanceMacosFirstBootRunner:()=>({status:"NEEDS_USER_ACTION",action_id:"macos_personal_use_service_policy",approval_challenge:"I understand trusted-single-user-v1"}),prepareMacosNativeHelper:()=>{calls.push("native helper");return {status:"PASS"};},ensureInstallerChatRegistration:()=>{calls.push("registration");return {status:"READY"};},sandboxSmokeStatus:()=>({status:"WAITING"}),startSandboxSmoke:()=>assert.fail("no Sandbox activation"),action:(actual,id)=>({status:"NEEDS_USER_ACTION",action_id:id}),emit:(result,code=0)=>emissions.push({result,code})});
+  const context=vm.createContext({crypto:{randomUUID:()=>"unexpected"},process:{platform:"darwin",cwd:()=>"/synthetic"},os:{homedir:()=>"/synthetic-home"},loadState:()=>state,ensureStateLanguage:()=>"en",hasTrustedSingleUserReadinessProfileMarker:()=>false,hasTrustedSingleUserReadinessProfile:()=>false,hasMacosPersonalUsePolicy:()=>false,isMacosFreshFirstInstallBootstrap:()=>false,macosRecoveryReport:()=>({status:"ABSENT"}),macosTrustedRecoveryEvidence:()=>({status:"ABSENT"}),macosFreshBootstrapMayAdvance:()=>false,macosBootstrapMayAdvance:()=>false,macosStateBound:()=>false,findRegisteredChatRoute:()=>null,normalizeChatUrl:x=>x,macosPrerequisites:()=>{calls.push("prerequisites/preflight");return {node:true,git:true,gh:true,codex:true,session_auth:true,github_auth:true,native_helper:{status:"MISSING"},legacy_native_helper_gate:"DEFERRED_PENDING_PROFILE_SELECTION"};},migrationPreflight:()=>({status:"READY"}),authenticatedGithubLogin:()=>"owner",safeKey:x=>x,auditMacosPrivatePreparationPaths:()=>({status:"PASS",issues:[]}),prepareMigrationIntent:()=>{calls.push("migration intent");return {path:"/synthetic/intent",phase:"PREPARED"};},saveState:actual=>saves.push(JSON.parse(JSON.stringify(actual))),prepareControlEnvironment:()=>{calls.push("Control/Sandbox preparation");return {control_repository:"owner/control",control_repository_id:"101",sandbox_repository:"owner/sandbox",sandbox_repository_id:"202"};},verifyMacosGeneratedRepositories:()=>{calls.push("independent repo identities");return {control_repository_id:"101",sandbox_repository_id:"202"};},advanceMacosFirstBootRunner:()=>({status:"NEEDS_USER_ACTION",action_id:"macos_personal_use_service_policy",approval_challenge:"I understand trusted-single-user-v1"}),prepareMacosNativeHelper:()=>{calls.push("native helper");return {status:"PASS"};},ensureInstallerChatRegistration:()=>{calls.push("registration");return {status:"READY"};},sandboxSmokeStatus:()=>({status:"WAITING"}),startSandboxSmoke:()=>assert.fail("no Sandbox activation"),action:(actual,id)=>({status:"NEEDS_USER_ACTION",action_id:id}),emit:(result,code=0)=>emissions.push({result,code})});
   vm.runInContext(setup+"\nthis.runSetup=runSetup;",context);context.runSetup();
   assert.deepEqual(calls,["prerequisites/preflight","migration intent","Control/Sandbox preparation","independent repo identities"]);const result=emissions.at(-1).result;assert.equal(result.status,"NEEDS_USER_ACTION");assert.equal(result.action_id,"macos_personal_use_service_policy");assert.match(result.approval_challenge,/trusted-single-user-v1/);assert.equal(calls.some(call=>/native|runner|registration/.test(call)),false);assert.equal(saves.length>0,true);
   const selected={...state,macos_service_policy:{schema_version:1,policy:MACOS_PERSONAL_USE_POLICY,readiness_profile:TRUSTED_SINGLE_USER_READINESS_PROFILE,selected_through:"official-installer",installation_id:state.installation_id,github_login:state.github_login,control_repository:state.control_repository,control_repository_id:state.control_repository_id,approval:trustedSingleUserReadinessProfileChallenge(state),approved_at:"2026-10-22T00:00:00Z"}};
@@ -559,7 +561,7 @@ test("legacy valid policy with helper PASS enters native preparation",()=>{
   const policy=JSON.stringify(state.macos_service_policy),commandRunner=name=>{calls.push("command "+name);return {ok:true,output:name==="node"?"v22.0.0":"synthetic"};};
   assert.equal(hasMacosPersonalUsePolicy(state),true);assert.equal(hasTrustedSingleUserReadinessProfile(state),false);assert.equal(Object.hasOwn(state.macos_service_policy,"readiness_profile"),false);
   const setup=cli.slice(cli.indexOf("function runSetup() {"),cli.indexOf("function codexLogin()"));
-  const context=vm.createContext({process:{platform:"darwin",cwd:()=>"/synthetic"},os:{homedir:()=>"/synthetic-home"},loadState:()=>state,ensureStateLanguage:()=>"en",hasMacosPersonalUsePolicy,hasTrustedSingleUserReadinessProfileMarker:()=>false,hasTrustedSingleUserReadinessProfile,isMacosFreshFirstInstallBootstrap:()=>false,macosRecoveryReport:()=>({status:"ABSENT"}),macosTrustedRecoveryEvidence:()=>({status:"ABSENT"}),macosFreshBootstrapMayAdvance:()=>false,macosBootstrapMayAdvance:()=>false,macosStateBound:()=>false,findRegisteredChatRoute:()=>null,macosPrerequisites:options=>macosPrerequisites({...options,commandRunner,nativeHelperPreflight:()=>({status:"PASS"})}),migrationPreflight:()=>{calls.push("migration preflight");return {status:"READY"};},authenticatedGithubLogin:()=>"owner",prepareMigrationIntent:()=>{calls.push("migration intent");return {path:"/synthetic/intent",phase:"PREPARED"};},saveState:actual=>saves.push(JSON.parse(JSON.stringify(actual))),verifyMacosGeneratedRepositories:()=>{calls.push("repository identities");return {control_repository_id:"101",sandbox_repository_id:"202"};},prepareMacosNativeHelper:options=>{calls.push("native helper");assert.equal(options.state.installation_id,"legacy");assert.equal(options.approved,true);assert.equal(options.home,"/synthetic-home");return {status:"NEEDS_USER_ACTION",error_id:"SYNTHETIC-NATIVE-STOP",mutations_performed:false};},prepareControlEnvironment:()=>assert.fail("legacy Control must be reused"),advanceMacosFirstBootRunner:()=>assert.fail("legacy policy must not request profile selection"),ensureInstallerChatRegistration:()=>assert.fail("native stop precedes registration"),startSandboxSmoke:()=>assert.fail("native stop precedes target activation"),emit:(result,code=0)=>emissions.push({result,code})});
+  const context=vm.createContext({process:{platform:"darwin",cwd:()=>"/synthetic"},os:{homedir:()=>"/synthetic-home"},loadState:()=>state,ensureStateLanguage:()=>"en",hasMacosPersonalUsePolicy,hasTrustedSingleUserReadinessProfileMarker:()=>false,hasTrustedSingleUserReadinessProfile,isMacosFreshFirstInstallBootstrap:()=>false,macosRecoveryReport:()=>({status:"ABSENT"}),macosTrustedRecoveryEvidence:()=>({status:"ABSENT"}),macosFreshBootstrapMayAdvance:()=>false,macosBootstrapMayAdvance:()=>false,macosStateBound:()=>false,findRegisteredChatRoute:()=>null,macosPrerequisites:options=>macosPrerequisites({...options,commandRunner,nativeHelperPreflight:()=>({status:"PASS"})}),migrationPreflight:()=>{calls.push("migration preflight");return {status:"READY"};},authenticatedGithubLogin:()=>"owner",safeKey:x=>x,auditMacosPrivatePreparationPaths:()=>({status:"PASS",issues:[]}),prepareMigrationIntent:()=>{calls.push("migration intent");return {path:"/synthetic/intent",phase:"PREPARED"};},saveState:actual=>saves.push(JSON.parse(JSON.stringify(actual))),verifyMacosGeneratedRepositories:()=>{calls.push("repository identities");return {control_repository_id:"101",sandbox_repository_id:"202"};},prepareMacosNativeHelper:options=>{calls.push("native helper");assert.equal(options.state.installation_id,"legacy");assert.equal(options.approved,true);assert.equal(options.home,"/synthetic-home");return {status:"NEEDS_USER_ACTION",error_id:"SYNTHETIC-NATIVE-STOP",mutations_performed:false};},prepareControlEnvironment:()=>assert.fail("legacy Control must be reused"),advanceMacosFirstBootRunner:()=>assert.fail("legacy policy must not request profile selection"),ensureInstallerChatRegistration:()=>assert.fail("native stop precedes registration"),startSandboxSmoke:()=>assert.fail("native stop precedes target activation"),emit:(result,code=0)=>emissions.push({result,code})});
   vm.runInContext(setup+"\nthis.runSetup=runSetup;",context);context.runSetup();assert.equal(emissions.at(-1).result.error_id,"SYNTHETIC-NATIVE-STOP");assert.deepEqual(calls,["command node","command git","command gh","command codex","command codex","command gh","migration preflight","migration intent","repository identities","native helper"]);assert.equal(saves.length>0,true);assert.equal(JSON.stringify(state.macos_service_policy),policy);assert.equal(state.target_environment_ready,undefined);
 });
 
@@ -1400,4 +1402,90 @@ test("G3 entrypoint 01: actual CLI initial/answer/setup gate is stopped unless e
   fs.chmodSync(path.join(old,"manual-codex-evidence"),0o755);
   const stale=ctx.dry();assert.equal(stale.status,"ERROR");
   const before=ctx.saves;ctx.setup();assert.equal(records.at(-1).v.status,"ERROR");assert.equal(ctx.saves,before);
+});
+
+// G3-RV-03: exercise the actual runSetup preparation slice with a synthetic
+// state and isolated HOME, rather than writing an approved Mac installer state.
+test('G3-RV-03 six-role audit precedes new intent and installer-state writes',t=>{
+  const f=fixture(t);fs.chmodSync(f.home,0o700);
+  const start=cli.indexOf('    state.installation_id ||= crypto.randomUUID();',cli.indexOf('function runSetup()'));
+  const end=cli.indexOf('    if(!state.control_environment_ready){',start);
+  assert.ok(start>=0&&end>start);
+  const script=cli.slice(start,end);
+  const state={installation_id:'abcd1234-test',target_repository:'owner/target',
+    macos_control_layout:MACOS_PRIVATE_CONTROL_LAYOUT_V2,reviewer_chat_url:'https://chatgpt.com/c/original',
+    migration_intent_path:'existing-intent-must-be-retained',migration_intent_phase:'PREVIOUS',
+    macos_setup_approved:true};
+  const calls=[],emissions=[];
+  const context=vm.createContext({
+    state,lang:'en',freshFirstInstallAfterApproval:false,crypto,
+    os:{homedir:()=>f.home},process:{cwd:()=>'/verified/source'},
+    safeKey,MACOS_PRIVATE_CONTROL_LAYOUT_V2,
+    authenticatedGithubLogin:()=>{calls.push('identity-read');return 'owner';},
+    auditMacosPrivatePreparationPaths:options=>{
+      calls.push('full-path-audit');return auditMacosPrivatePreparationPaths(options);
+    },
+    prepareMigrationIntent:()=>{calls.push('new-migration-intent');return {path:'new-intent',phase:'PREPARED'};},
+    saveState:()=>{calls.push('installer-state-write');},
+    emit:(result,code)=>{emissions.push({result,code});return result;}
+  });
+  const run=vm.runInContext('(function(){'+script+'\nreturn "DONE";})',context);
+  const profile=path.join(f.home,'.chatgpt-codex-orchestrator','instances','abcd1234','browser-profile');
+  fs.mkdirSync(profile,{recursive:true,mode:0o700});fs.chmodSync(profile,0o755);
+  const prior=JSON.stringify(state);
+  const blocked=run();
+  assert.equal(blocked.error_id,'MACOS-PRIVATE-PATH-AUDIT');
+  assert.equal(blocked.mutations_performed,false);
+  assert.deepEqual(calls,['identity-read','full-path-audit']);
+  assert.equal(state.migration_intent_path,'existing-intent-must-be-retained');
+  assert.equal(state.migration_intent_phase,'PREVIOUS');
+  assert.equal(fs.lstatSync(profile).mode&0o777,0o755,'audit never chmods unsafe profile');
+  assert.equal(emissions.at(-1).result.error_id,'MACOS-PRIVATE-PATH-AUDIT');
+  fs.chmodSync(profile,0o700);
+  calls.length=0;
+  assert.equal(run(),'DONE');
+  assert.deepEqual(calls,['identity-read','full-path-audit','new-migration-intent','installer-state-write']);
+  assert.equal(state.migration_intent_path,'new-intent');
+  assert.notEqual(JSON.stringify(state),prior,'synthetic in-memory continuation proceeds after clean audit');
+});
+
+test('G3-RV-03 orphan Control blocks before intent and target/Sandbox preparation in actual setup slice',t=>{
+  const f=fixture(t);fs.chmodSync(f.home,0o700);
+  const id='abcd1234-test',projectKey='target';
+  const paths=defaultLocalPaths({home:f.home,installationId:id,projectKey,platform:'darwin',macosControlLayout:MACOS_PRIVATE_CONTROL_LAYOUT_V2});
+  fs.mkdirSync(path.join(paths.control,'.git'),{recursive:true,mode:0o700});
+  const calls=[];
+  const start=cli.indexOf('    state.installation_id ||= crypto.randomUUID();',cli.indexOf('function runSetup()'));
+  const end=cli.indexOf('    if(!state.control_environment_ready){',start);
+  const state={installation_id:id,target_repository:'owner/target',macos_control_layout:MACOS_PRIVATE_CONTROL_LAYOUT_V2,
+    reviewer_chat_url:'https://chatgpt.com/c/original',migration_intent_path:'persisted-intent'};
+  const context=vm.createContext({state,lang:'en',freshFirstInstallAfterApproval:false,crypto,
+    os:{homedir:()=>f.home},process:{cwd:()=>'/isolated'},safeKey,MACOS_PRIVATE_CONTROL_LAYOUT_V2,
+    authenticatedGithubLogin:()=> 'owner',auditMacosPrivatePreparationPaths,
+    prepareMigrationIntent:()=>assert.fail('orphan Control must block new migration intent'),
+    saveState:()=>assert.fail('orphan Control must not overwrite installer state'),
+    emit:result=>result});
+  const run=vm.runInContext('(function(){'+cli.slice(start,end)+'\nreturn "DONE";})',context);
+  const result=run();
+  assert.equal(result.error_id,'MACOS-PRIVATE-PATH-AUDIT');
+  assert.equal(result.issues.some(x=>x.role==='control_clone'&&x.reason==='existing_control_unbound'),true);
+  assert.equal(state.migration_intent_path,'persisted-intent');
+  assert.equal(fs.existsSync(paths.project),false);
+  assert.equal(fs.existsSync(path.join(path.dirname(paths.project),'sandbox-abcd1234')),false);
+});
+
+test('G3-RV-03 actual G3 preparer audits identity before local clone or remote repository creation',()=>{
+  const env=fs.readFileSync(new URL('../src/lib/control-env.mjs',import.meta.url),'utf8');
+  const start=env.indexOf('export function prepareControlEnvironment(');
+  const body=env.slice(start);
+  const audit=body.indexOf('const checked=auditMacosPrivatePreparationPaths(');
+  const target=body.indexOf('inspectExistingClone(paths.project,"Target")');
+  const sandbox=body.indexOf('ensureOwnedPrivateRepo({fullName:sandboxRepository');
+  assert.ok(audit>0&&target>audit&&sandbox>target);
+  const cstart=cli.indexOf('function runSetup()');
+  const setup=cli.slice(cstart,cli.indexOf('function dryRun()',cstart));
+  const earlier=setup.indexOf('const preparationPaths=auditMacosPrivatePreparationPaths(');
+  const intent=setup.indexOf('const intent=prepareMigrationIntent(');
+  const write=setup.indexOf('state.macos_native_setup="PREPARING";');
+  assert.ok(earlier>0&&intent>earlier&&write>intent);
 });

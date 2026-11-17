@@ -9,7 +9,7 @@ import { t, normalizeLanguage } from "./lib/i18n.mjs";
 import { ERROR_CATALOG } from "./lib/errors.mjs";
 import { sanitizeObject } from "./lib/sanitize.mjs";
 import { submitDiagnosticReport } from "./lib/reporting.mjs";
-import { prepareControlEnvironment, activateTargetProject, upgradeControlEnvironment, refreshControlRuntime, verifyMacosGeneratedRepositories, githubLogin as authenticatedGithubLogin } from "./lib/control-env.mjs";
+import { prepareControlEnvironment, auditMacosPrivatePreparationPaths, activateTargetProject, upgradeControlEnvironment, refreshControlRuntime, verifyMacosGeneratedRepositories, githubLogin as authenticatedGithubLogin } from "./lib/control-env.mjs";
 import { renderProjectInstructions } from "./lib/project-instructions.mjs";
 import { ensureInstallerChatRegistration, findRegisteredChatRoute, normalizeChatUrl } from "./lib/chat-registration.mjs";
 import { pendingCallbackCount, doctorHealth, repairHealth } from "./lib/runtime-health.mjs";
@@ -19,7 +19,7 @@ import { inspectMacosExistingInstanceRecovery, inspectMacosSelectedFreshInstance
 import { MACOS_PERSONAL_USE_POLICY, hasMacosPersonalUsePolicy, hasTrustedSingleUserReadinessProfile, hasTrustedSingleUserReadinessProfileMarker, hasTrustedSingleUserReadinessIdentity, macosPersonalUsePolicyChallenge, trustedSingleUserReadinessProfileChallenge, TRUSTED_SINGLE_USER_READINESS_PROFILE } from "./lib/macos-personal-use-service.mjs";
 import { inspectMacosRunnerBootstrap, approveMacosRunnerBootstrap } from "./lib/macos-runner-bootstrap.mjs";
 import { verifyTrustedRecoveryEvidence, issueTrustedRecoveryEvidence, githubReadOnlyApi } from "./lib/macos-trusted-recovery-evidence.mjs";
-import { canonicalInstallationId, MACOS_PRIVATE_CONTROL_LAYOUT_V2 } from "./lib/control-render.mjs";
+import { canonicalInstallationId, safeKey, MACOS_PRIVATE_CONTROL_LAYOUT_V2 } from "./lib/control-render.mjs";
 import {
   sandboxSmokeStatus,
   startSandboxSmoke,
@@ -801,6 +801,18 @@ function runSetup() {
     state.installation_id ||= crypto.randomUUID();
     try {
       state.github_login=authenticatedGithubLogin();
+      // No new migration intent/state write precedes this full path + Control
+      // identity inventory. A rejection preserves all already-saved evidence.
+      const controlLayout=state.macos_control_layout===undefined&&freshFirstInstallAfterApproval
+        ? MACOS_PRIVATE_CONTROL_LAYOUT_V2 : (state.macos_control_layout??null);
+      const preparationPaths=auditMacosPrivatePreparationPaths({
+        home:os.homedir(),installationId:state.installation_id,
+        projectKey:safeKey(state.target_repository.split("/").pop()),
+        macosControlLayout:controlLayout,expectedGithubLogin:state.github_login
+      });
+      if(preparationPaths.status!=="PASS") return emit({status:"ERROR",error_id:"MACOS-PRIVATE-PATH-AUDIT",recoverable:false,preferred_language:lang,
+        message:"macOS preparation paths or existing Control identity are unsafe; existing state and migration intent were not changed.",
+        issues:preparationPaths.issues,mutations_performed:false},1);
       const intent=prepareMigrationIntent({state,sourceRoot:process.cwd(),home:os.homedir()});
       state.migration_intent_path=intent.path;
       state.migration_intent_phase=intent.phase;
