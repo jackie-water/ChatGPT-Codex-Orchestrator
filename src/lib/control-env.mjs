@@ -12,7 +12,8 @@ import {
   renderConfigPs1,
   renderWorkflow,
   safeKey,
-  canonicalInstallationId
+  canonicalInstallationId,
+  MACOS_PRIVATE_CONTROL_LAYOUT_V2
 } from "./control-render.mjs";
 import { trustedCodeReviewCodexExecutable } from "./macos-code-review-runtime.mjs";
 
@@ -76,6 +77,64 @@ export function verifyMacosGeneratedRepositories({state,commandRunner=run}){
   }
   if(ids.control_repository_id===ids.sandbox_repository_id) throw new Error("Control and Sandbox trust domains must be distinct");
   return {...ids,github_owner_id:String(user.id)};
+}
+
+// Read-only inventory before the first filesystem mutation. Inspect all five
+// canonical preparation paths, rather than hiding later blockers behind the
+// first unsafe ancestor. Names and absolute paths never appear in the report.
+// Missing paths are eligible for the ordinary private 0700 mkdir operation;
+// pre-existing unsafe paths are NEVER adopted or chmod'ed.
+export function auditMacosPrivatePreparationPaths({home,installationId,projectKey,macosControlLayout=null,fsImpl=fs}={}){
+  const base=path.resolve(home||""),paths=defaultLocalPaths({home:base,installationId,projectKey,platform:"darwin",macosControlLayout});
+  const instanceRoot=path.join(base,".chatgpt-codex-orchestrator","instances",canonicalInstallationId(installationId));
+  const targets=[
+    ["instance_root",instanceRoot],
+    ["automation_parent",path.dirname(paths.project)],
+    ["control_parent",path.dirname(paths.control)],
+    ["control_clone",paths.control],
+    ["browser_profile",path.join(instanceRoot,"browser-profile")],
+    ["pending_wakes",path.join(instanceRoot,"pending-wakes")]
+  ];
+  const issues=[],observed=[];
+  if(!home||!path.isAbsolute(home)||base!==home){
+    return {status:"BLOCKED",issues:[{role:"home",reason:"noncanonical_home"}],observed:[],mutations_performed:false};
+  }
+  const uid=typeof process.getuid==="function"?process.getuid():null;
+  for(const [role,absolute] of targets){
+    if(!absolute.startsWith(base+path.sep)||path.resolve(absolute)!==absolute){issues.push({role,reason:"path_escape"});continue;}
+    let cursor=path.parse(absolute).root,missing=false;
+    const parts=absolute.slice(cursor.length).split(path.sep).filter(Boolean);
+    for(const part of parts){
+      cursor=path.join(cursor,part);
+      if(missing)continue;
+      let st;
+      try{st=fsImpl.lstatSync(cursor);}catch(e){
+        if(e.code==="ENOENT"){missing=true;continue;}
+        issues.push({role,reason:"stat_failed"});break;
+      }
+      const within=cursor===base||cursor.startsWith(base+path.sep);
+      const owned=uid===null||st.uid===uid||(!within&&st.uid===0);
+      const writable=(st.mode&0o022)!==0&&!(st.uid===0&&(st.mode&0o1000)!==0&&!within);
+      if(st.isSymbolicLink()||!st.isDirectory()||!owned||writable){
+        issues.push({role,reason:st.isSymbolicLink()?"symlink":!st.isDirectory()?"not_directory":!owned?"foreign_owner":"unsafe_writable_ancestor"});break;
+      }
+      if(cursor===absolute&&(st.mode&0o7777)!==0o700){
+        issues.push({role,reason:"existing_leaf_not_private"});break;
+      }
+    }
+    observed.push({role,exists:!missing});
+  }
+  if(macosControlLayout===MACOS_PRIVATE_CONTROL_LAYOUT_V2){
+    // An old canonical Control for the SAME installation ID must not be
+    // silently replaced by a new path. A legacy shared parent, however,
+    // cannot veto an otherwise isolated fresh namespace.
+    const legacy=defaultLocalPaths({home:base,installationId,projectKey,platform:"darwin"}).control;
+    try{
+      fsImpl.lstatSync(legacy);
+      issues.push({role:"legacy_control_clone",reason:"existing_v1_binding_requires_separate_migration"});
+    }catch(e){if(e.code!=="ENOENT")issues.push({role:"legacy_control_clone",reason:"identity_unavailable"});}
+  }
+  return {status:issues.length?"BLOCKED":"PASS",issues,observed,mutations_performed:false};
 }
 
 function preparePrivateMacDirectory(directory,home){
@@ -304,6 +363,12 @@ function requireMacosRegistrationMetadata(metadata,state){
   // Old C2 metadata has the earlier runner identity without these instance,
   // browser, outbox and immutable repository pins. Refuse it while read-only.
   const instanceRoot=path.join(os.homedir(),".chatgpt-codex-orchestrator","instances",state.instance_id);
+  const layout=state.macos_control_layout??null;
+  if(layout!==null&&layout!==MACOS_PRIVATE_CONTROL_LAYOUT_V2) throw new Error("MACOS-CONTROL-LAYOUT-UNSUPPORTED");
+  if((metadata.macos_control_layout??null)!==layout) throw new Error("MACOS-CONTROL-LAYOUT-MISMATCH");
+  const canonicalControl=defaultLocalPaths({home:os.homedir(),installationId:state.installation_id,
+    projectKey:state.sandbox_project_key||"__unbound-project__",platform:"darwin",macosControlLayout:layout}).control;
+  if(layout===MACOS_PRIVATE_CONTROL_LAYOUT_V2&&state.control_clone_path!==canonicalControl) throw new Error("MACOS-CONTROL-LAYOUT-INVALID-PATH");
   const repositoryId=String(metadata.control_repository_id||"");
   if(metadata.arch!=="arm64"||!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(String(metadata.installation_id||""))||
     metadata.installation_id!==state.installation_id||metadata.instance_root!==instanceRoot||state.instance_root!==instanceRoot||
@@ -362,6 +427,12 @@ function upgradeRuntimeIdentity({state,instanceId,commandRunner=run}){
   }
   if(platform==="win32"&&(metadata.launch_agent_label!==null||state.launch_agent_label!=null)) throw new Error("Persisted Windows instance has an ambiguous LaunchAgent identity");
   if(platform==="darwin"){
+    const layout=state.macos_control_layout??null;
+    if((layout!==null&&layout!==MACOS_PRIVATE_CONTROL_LAYOUT_V2)||
+       (metadata.macos_control_layout??null)!==layout||
+       (layout===MACOS_PRIVATE_CONTROL_LAYOUT_V2&&state.control_clone_path!==defaultLocalPaths({home:os.homedir(),installationId:state.installation_id,
+         projectKey:state.sandbox_project_key||"__unbound-project__",platform:"darwin",macosControlLayout:layout}).control))
+      throw new Error("MACOS-CONTROL-LAYOUT-MIGRATION-REQUIRED");
     if(!/^com\.chatgpt\.codex\.[A-Za-z0-9-]+$/.test(String(state.launch_agent_label||""))||metadata.launch_agent_label!==state.launch_agent_label) throw new Error("Existing macOS LaunchAgent identity is incomplete or mismatched for upgrade");
     if(Object.hasOwn(metadata,"codex_executable")){
       if(typeof metadata.codex_executable!=="string"||!path.isAbsolute(metadata.codex_executable)) throw new Error("Existing macOS Codex executable pin is invalid");
@@ -550,7 +621,8 @@ export function prepareControlEnvironment({
   trustedGithubLogin,
   macosSetupApproved=false,
   sourceRoot=process.cwd(),
-  home=os.homedir()
+  home=os.homedir(),
+  macosControlLayout=null
 }){
   if(!installationId) throw new Error("installationId is required");
   if(!/^https:\/\/chatgpt\.com\//i.test(reviewerChatUrl)) throw new Error("Invalid reviewer Chat URL");
@@ -560,7 +632,7 @@ export function prepareControlEnvironment({
   if(trustedGithubLogin && String(trustedGithubLogin)!==login) throw new Error("Authenticated GitHub identity changed; refusing to retarget generated repositories");
   const target=repositoryInfo(targetRepository);
   const projectKey=safeKey(String(targetRepository).split("/").pop());
-  const paths=defaultLocalPaths({home,installationId,projectKey});
+  const paths=defaultLocalPaths({home,installationId,projectKey,platform:process.platform,macosControlLayout});
   const short=installationShortId(installationId);
   const instanceRoot=path.join(home,".chatgpt-codex-orchestrator","instances",short);
   const browserProfile=process.platform==="win32"
@@ -570,8 +642,10 @@ export function prepareControlEnvironment({
   const chatRouteFile=path.join(instanceRoot,"chat-routes.json");
   const pendingWakeOutbox=path.join(instanceRoot,"pending-wakes");
   if(process.platform==="darwin"){
-    for(const directory of [instanceRoot,path.dirname(paths.project),path.dirname(paths.control),browserProfile,pendingWakeOutbox]) preparePrivateMacDirectory(directory,home);
-    if(fs.existsSync(paths.control)){
+    const checked=auditMacosPrivatePreparationPaths({home,installationId,projectKey,macosControlLayout});
+    if(checked.status!=="PASS") throw new Error("MACOS-PRIVATE-PATH-AUDIT:"+checked.issues.map(x=>x.role+":"+x.reason).join(","));
+    for(const directory of [instanceRoot,path.dirname(paths.project),path.dirname(paths.control),paths.control,browserProfile,pendingWakeOutbox]) preparePrivateMacDirectory(directory,home);
+    if(fs.existsSync(paths.control)&&fs.existsSync(path.join(paths.control,"instance.json"))){
       assertSafeRuntimePath(path.join(paths.control,"instance.json"),{type:"file"});
       const prior=JSON.parse(fs.readFileSync(path.join(paths.control,"instance.json"),"utf8"));
       if(prior.installation_id!==installationId||prior.instance_id!==short||prior.role!=="control") throw new Error("Existing Control clone is not this exact approved installation");
@@ -598,7 +672,7 @@ export function prepareControlEnvironment({
   ensureClone(controlRepository,paths.control);
   const runtimeFiles=prepareControlRuntimeFiles({sourceRoot,controlRoot:paths.control});
   const workflow=prepareRuntimeWorkflow({sourceRoot,controlPath:paths.control,platform:process.platform,arch:process.arch,runnerLabel:paths.runnerLabel,trustedGithubUsername:login});
-  writeInstanceMetadata(paths.control,{instanceId:short,installationId,trustedGithubUsername:login,launchAgentLabel:process.platform==="darwin"?`com.chatgpt.codex.${short.toLowerCase()}`:null,runnerLabel:paths.runnerLabel,controlRepository,sandboxRepository,codexExecutable:pinCodexExecutable(process.platform),macosBindings:{...immutableIdentities,instance_root:instanceRoot,browser_profile:browserProfile,browser_port:browserPort,chat_route_file:chatRouteFile,pending_wake_outbox:pendingWakeOutbox}});
+  writeInstanceMetadata(paths.control,{instanceId:short,installationId,trustedGithubUsername:login,launchAgentLabel:process.platform==="darwin"?`com.chatgpt.codex.${short.toLowerCase()}`:null,runnerLabel:paths.runnerLabel,controlRepository,sandboxRepository,codexExecutable:pinCodexExecutable(process.platform),macosBindings:{...immutableIdentities,...(macosControlLayout===MACOS_PRIVATE_CONTROL_LAYOUT_V2?{macos_control_layout:macosControlLayout}:{}),instance_root:instanceRoot,browser_profile:browserProfile,browser_port:browserPort,chat_route_file:chatRouteFile,pending_wake_outbox:pendingWakeOutbox}});
   writeControlRuntimeFiles({controlRoot:paths.control,files:runtimeFiles});
   fs.mkdirSync(path.dirname(workflow.workflowPath),{recursive:true});
   fs.writeFileSync(workflow.workflowPath,workflow.content);
@@ -670,6 +744,7 @@ export function prepareControlEnvironment({
     sandbox_validation_profile:sandboxValidationProfile,
     runner_path:paths.runner,
     runner_label:paths.runnerLabel,
+    ...(process.platform==="darwin"&&macosControlLayout===MACOS_PRIVATE_CONTROL_LAYOUT_V2?{macos_control_layout:macosControlLayout}:{}),
     launch_agent_label:process.platform==="darwin"?`com.chatgpt.codex.${short.toLowerCase()}`:null,
     runner_owner:installationId,
     sandbox_only:true,

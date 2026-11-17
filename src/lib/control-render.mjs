@@ -95,11 +95,20 @@ export function renderWorkflow(template,{runnerLabel,platform=process.platform,a
   return rendered.replaceAll("{{TRUSTED_GITHUB_USERNAME}}",String(trustedGithubUsername||""));
 }
 
-export function defaultLocalPaths({home,installationId,projectKey,platform=process.platform}){
+// V1 is the historical macOS Control location outside the private instance.
+// V2 is opt-in for approved fresh macOS preparations only. Persist this
+// selection; never infer a new authority from a legacy directory's contents.
+export const MACOS_PRIVATE_CONTROL_LAYOUT_V2 = "macos-instance-private-control-v2";
+export function defaultLocalPaths({home,installationId,projectKey,platform=process.platform,macosControlLayout=null}){
+  if(macosControlLayout!==null&&macosControlLayout!==undefined&&
+     (platform!=="darwin"||macosControlLayout!==MACOS_PRIVATE_CONTROL_LAYOUT_V2))
+    throw new Error("Unrecognized or cross-platform Control clone layout");
   const short=historicalInstallationId(installationId);
   const instanceRoot=path.join(home,".chatgpt-codex-orchestrator","instances",canonicalInstallationId(installationId));
   return {
-    control:path.join(home,"ChatGPTCodexOrchestrator","control-"+short),
+    control:macosControlLayout===MACOS_PRIVATE_CONTROL_LAYOUT_V2
+      ? path.join(instanceRoot,"control")
+      : path.join(home,"ChatGPTCodexOrchestrator","control-"+short),
     project:platform==="darwin"?path.join(instanceRoot,"automation",projectKey):path.join(home,"ChatGPTCodexProjects",projectKey),
     runner:platform==="darwin"?path.join(instanceRoot,"runner"):path.join(home,"ChatGPTCodexOrchestrator","runner-"+short),
     runnerLabel:"codex-orchestrator-"+short.toLowerCase()

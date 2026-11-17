@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
-import { canonicalInstallationId, defaultLocalPaths } from "./control-render.mjs";
+import { canonicalInstallationId, defaultLocalPaths, MACOS_PRIVATE_CONTROL_LAYOUT_V2 } from "./control-render.mjs";
 
 export const TRUSTED_RECOVERY_EVIDENCE_VERSION = 1;
 const ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -42,7 +42,10 @@ const freshInstallAssessment = (state, controlMetadata) => {
   const owner = stateTopology?.owner || metadataTopology.owner;
   const canonicalControl = `${owner}/chatgpt-codex-orchestrator-control-${short}`;
   const canonicalSandbox = `${owner}/chatgpt-codex-orchestrator-sandbox-${short}`;
+  const layout=state.macos_control_layout??null;
   const metadataMatchesTopology = !controlMetadata || (
+    (layout===null||layout===MACOS_PRIVATE_CONTROL_LAYOUT_V2) &&
+    (controlMetadata.macos_control_layout??null)===layout &&
     controlMetadata.instance_id === state.instance_id && controlMetadata.installation_id === state.installation_id &&
     controlMetadata.platform === "darwin" && controlMetadata.arch === "arm64" &&
     controlMetadata.role === "control" && controlMetadata.trusted_github_username === owner &&
@@ -264,12 +267,15 @@ function validatedRouteRecords(routeFile) {
 }
 
 function canonicalLocalPaths({ state, home, instanceRoot }) {
+  const layout=state.macos_control_layout??null;
+  if(layout!==null&&layout!==MACOS_PRIVATE_CONTROL_LAYOUT_V2) return {ok:false,reason:"unsupported_control_layout"};
   const expectedControl = path.resolve(defaultLocalPaths({
     home,
     installationId: state.installation_id,
     projectKey: typeof state.sandbox_project_key === "string" && state.sandbox_project_key.length > 0
       ? state.sandbox_project_key
-      : "__unbound-project__"
+      : "__unbound-project__",
+    platform:"darwin",macosControlLayout:layout
   }).control);
   const expectedRoute = path.resolve(instanceRoot, "chat-routes.json");
   const declaredControl = state.control_clone_path === undefined ? expectedControl : path.resolve(String(state.control_clone_path));
@@ -311,6 +317,7 @@ function verifyLocalIdentity(local, state) {
     gates.push("trusted_manifest_issued_at");
   }
   if (control && control.role !== "control") gates.push("control_clone_role");
+  if (control && (control.macos_control_layout??null)!==(state.macos_control_layout??null)) gates.push("control_layout_binding");
   if (control && control.origin !== undefined && !repositoryOriginMatches(control.origin, state.control_repository)) gates.push("control_clone_origin");
   if (control && control.remote_origin !== undefined && !repositoryOriginMatches(control.remote_origin, state.control_repository)) gates.push("control_clone_remote_origin");
   const expected = { instance_id: state.instance_id, installation_id: state.installation_id, control_repository: state.control_repository, sandbox_repository: state.sandbox_repository };

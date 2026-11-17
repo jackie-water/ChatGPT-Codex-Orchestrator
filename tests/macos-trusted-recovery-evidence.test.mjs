@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import { issueTrustedRecoveryEvidence, verifyTrustedRecoveryEvidence, verifyMacosGeneratedRepositoryIdentity, githubReadOnlyApi } from "../src/lib/macos-trusted-recovery-evidence.mjs";
-import { defaultLocalPaths } from "../src/lib/control-render.mjs";
+import { defaultLocalPaths, MACOS_PRIVATE_CONTROL_LAYOUT_V2 as V2 } from "../src/lib/control-render.mjs";
 import { ensureInstallerChatRegistration, findRegisteredChatRoute } from "../src/lib/chat-registration.mjs";
 
 function fixture() {
@@ -1045,4 +1045,30 @@ test("missing or forged delivery proof stays WAITING without a second registrati
     assert.equal(creates, 0, name);
     assert.equal(registrationPendingSnapshot(f), before, name);
   }
+});
+
+// V2 is a distinct, version-pinned fresh-install path. This preserves the
+// original v1 test fixture and ensures no old route/proof can be reinterpreted
+// after the clone moves into an instance-private namespace.
+test("fresh-install v2 Control requires matching persisted metadata and exact private canonical path", t=>{
+  const f=registrationPendingFixture(t);
+  const newControl=defaultLocalPaths({home:f.home,installationId:f.state.installation_id,
+    projectKey:f.state.sandbox_project_key,platform:"darwin",macosControlLayout:V2}).control;
+  fs.mkdirSync(newControl,{recursive:true,mode:0o700});
+  fs.chmodSync(newControl,0o700);
+  f.state.macos_control_layout=V2;
+  f.state.control_clone_path=newControl;
+  f.metadata.macos_control_layout=V2;
+  const newMetadata=path.join(newControl,"instance.json");
+  f.writeJson(newMetadata,f.metadata);
+  const baseline=f.verify();
+  assert.notEqual(baseline.status,"CONFLICT",JSON.stringify(baseline));
+  delete f.metadata.macos_control_layout;
+  f.writeJson(newMetadata,f.metadata);
+  const bad=f.verify();
+  assert.equal(bad.status,"CONFLICT");
+  f.metadata.macos_control_layout=V2;
+  f.writeJson(newMetadata,f.metadata);
+  f.state.control_clone_path=f.control;
+  assert.equal(f.verify().status,"CONFLICT");
 });

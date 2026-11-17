@@ -236,3 +236,25 @@ Before continuing to Codex trust:
 4. only then save `generated_repo_authorization=true` and resume.
 
 Local `gh` access is not sufficient proof of ChatGPT GitHub access.
+
+## macOS Control clone layout v2 — approved fresh preparation only
+
+The historical Control clone path remains authoritative for **existing v1**
+installations. It is never automatically moved or adopted. For a newly approved
+macOS fresh-first-install without an existing matching Control clone, the
+installer selects the explicitly versioned `macos-instance-private-control-v2`
+layout described in `docs/macos-private-control-layout-v2.md`. The Control clone
+then lives within the selected private instance root, independently of any old
+shared `~/ChatGPTCodexOrchestrator` directory.
+
+The installer must conduct a read-only audit of **all** scoped preparation
+paths before any new file or repository creation, and reject unsafe ancestors,
+symlinks, owner mismatch, pre-existing nonprivate leaves, or a matching legacy
+Control clone. No `chmod`, deletion, automated adoption, or implicit migration
+is permitted. An unknown or mismatched Control layout marker blocks recovery
+and runtime refresh. Windows retains its existing layout.
+
+Source-only validation of a revised layout is **not** authorization to resume
+an already interrupted G3 setup. The old exact challenge and migration intent
+remain preserved, but a different source SHA or pinned source location requires
+fresh, explicitly authorized reconciliation under the official installer.

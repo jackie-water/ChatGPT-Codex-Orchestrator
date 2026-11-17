@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
-import { canonicalInstallationId, defaultLocalPaths } from "./control-render.mjs";
+import { canonicalInstallationId, defaultLocalPaths, MACOS_PRIVATE_CONTROL_LAYOUT_V2 } from "./control-render.mjs";
 import { verifyMacosGeneratedRepositoryIdentity, verifyTrustedRecoveryEvidence } from "./macos-trusted-recovery-evidence.mjs";
 import { inspectMacosRunnerPackageLeaves } from "./macos-runner-bootstrap.mjs";
 
@@ -108,7 +108,7 @@ function verifiedRunnerPackageLeaf(relative, stat, packageLeaves) {
   return leaf.kind === "generated" && name === "svc.sh" && stat.isFile() && !stat.isSymbolicLink() && (stat.mode & 0o7777) === 0o755;
 }
 
-function safeInstanceTree(fsImpl, root, { strictOwner = false, selectedRunnerWork = false, selectedRuntimeBrowserProfileSingletons = false, selectedRunnerPackage = null, selectedRunnerEnvironment = false } = {}) {
+function safeInstanceTree(fsImpl, root, { strictOwner = false, selectedRunnerWork = false, selectedRuntimeBrowserProfileSingletons = false, selectedRunnerPackage = null, selectedRunnerEnvironment = false, selectedPrivateControl = false } = {}) {
   const pending = [{ file: path.resolve(root), depth: 0 }];
   // The separately bounded archive inventory may exceed the unrelated instance
   // data budget; only its already verified names acquire this selected allowance.
@@ -128,7 +128,7 @@ function safeInstanceTree(fsImpl, root, { strictOwner = false, selectedRunnerWor
     }
     if (!uidAllowed(stat) || (strictOwner && typeof process.getuid === "function" && stat.uid !== process.getuid())) return { ok: false, reason: "unsafe-owner" };
     const runnerWork = path.join("runner", "_work");
-    const passive = relative === "" || relative === ".git" || relative.startsWith(`.git${path.sep}`) || relative === "browser-profile" || relative.startsWith(`browser-profile${path.sep}`) || relative === "automation" || relative.startsWith(`automation${path.sep}`) || relative === "logs" || relative.startsWith(`logs${path.sep}`) || (selectedRunnerWork && (relative === runnerWork || relative.startsWith(`${runnerWork}${path.sep}`)));
+    const passive = (selectedPrivateControl && (relative === "control" || relative.startsWith(`control${path.sep}`))) || relative === "" || relative === ".git" || relative.startsWith(`.git${path.sep}`) || relative === "browser-profile" || relative.startsWith(`browser-profile${path.sep}`) || relative === "automation" || relative.startsWith(`automation${path.sep}`) || relative === "logs" || relative.startsWith(`logs${path.sep}`) || (selectedRunnerWork && (relative === runnerWork || relative.startsWith(`${runnerWork}${path.sep}`)));
     if (stat.isDirectory()) {
       if (!passive && !privateMode(stat, true)) return { ok: false, reason: "odd-directory-mode" };
       if (passive && !ancestorModeAllowed(stat)) return { ok: false, reason: "unsafe-passive-directory" };
@@ -222,12 +222,12 @@ function snapshotNames(fsImpl, instanceRoot, entries) {
   return names.sort();
 }
 
-function candidate(fsImpl, instancesRoot, id) {
+function candidate(fsImpl, instancesRoot, id, { macosControlLayout = null } = {}) {
   const root = path.join(instancesRoot, id);
   let entries;
   try { entries = fsImpl.readdirSync(root, { withFileTypes: true }).map(entry => entry.name).sort(); }
   catch { return { instance_id: id, status: "CONFLICT", missing_verification_gates: ["enumerable_instance"] }; }
-  const tree = safeInstanceTree(fsImpl, root);
+  const tree = safeInstanceTree(fsImpl, root, { selectedPrivateControl: macosControlLayout === MACOS_PRIVATE_CONTROL_LAYOUT_V2 });
   if (!tree.ok) return { instance_id: id, status: "CONFLICT", missing_verification_gates: ["safe_instance_tree"] };
   const routeFile = readJson(fsImpl, path.join(root, "chat-routes.json"));
   const routeNamesFound = routeFile.valid ? routeNames(routeFile.value) : [];
@@ -400,7 +400,9 @@ function classifyLegacyIsolation({ fsImpl, home, instancesRoot, entries, state }
       if (!safeName(state.installation_id) || !safeName(state.instance_id) || state.instance_id !== canonicalInstallationId(state.installation_id) || state.instance_id.toLowerCase() === LEGACY_ID || state.instance_root !== path.join(instancesRoot, state.instance_id) || entries.length !== 2 || !entries.includes(state.instance_id) || state.control_environment_ready !== true || state.target_environment_ready === true || state.sandbox_project_key !== `sandbox-${state.instance_id}` || !safeName(state.sandbox_project_key) || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(state.control_repository || "") || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(state.sandbox_repository || "") || state.control_repository.toLowerCase() === state.sandbox_repository.toLowerCase() || ![state.control_repository_id, state.sandbox_repository_id].every(validRepositoryId) || String(state.control_repository_id) === String(state.sandbox_repository_id)) throw new LegacyPolicyError("new_identity");
       const fresh = lstat(fsImpl, state.instance_root), old = lstat(fsImpl, roots[2]);
       if (!fresh.ok || fresh.stat.isSymbolicLink() || !fresh.stat.isDirectory() || !strictOwner(fresh.stat) || (fresh.stat.mode & 0o7777) !== 0o700 || !safeDirectory(fsImpl, state.instance_root).ok || fsImpl.realpathSync(state.instance_root) !== state.instance_root || (fresh.stat.dev === old.stat.dev && fresh.stat.ino === old.stat.ino)) throw new LegacyPolicyError("new_root");
-      const official = defaultLocalPaths({ home, installationId: state.installation_id, projectKey: state.sandbox_project_key, platform: "darwin" });
+      const layout = state.macos_control_layout ?? null;
+      if(layout!==null&&layout!==MACOS_PRIVATE_CONTROL_LAYOUT_V2) throw new LegacyPolicyError("control_layout_version");
+      const official = defaultLocalPaths({ home, installationId: state.installation_id, projectKey: state.sandbox_project_key, platform: "darwin", macosControlLayout: layout });
       if ((state.control_clone_path !== undefined && state.control_clone_path !== official.control) || (state.sandbox_clone_path !== undefined && state.sandbox_clone_path !== official.project) || (state.chat_route_file !== undefined && state.chat_route_file !== path.join(state.instance_root, "chat-routes.json"))) throw new LegacyPolicyError("new_path");
       roots.push(state.instance_root);
     }
@@ -486,7 +488,7 @@ function classifyLegacyIsolation({ fsImpl, home, instancesRoot, entries, state }
     const historical = { instance_id: LEGACY_ID, status: "CONFLICT", missing_verification_gates: ["safe_instance_tree"], fresh_first_install_candidate: true, legacy_evidence_isolation: marker };
     const instances = [historical];
     if (!initial) {
-      const selected = candidate(fsImpl, instancesRoot, state.instance_id);
+      const selected = candidate(fsImpl, instancesRoot, state.instance_id, { macosControlLayout: state.macos_control_layout ?? null });
       if (selected.status === "CONFLICT" || selected.route_names.some(name => routeIds.includes(name.toLowerCase()))) throw new LegacyPolicyError("new_candidate_or_route_collision");
       instances.push(selected);
     }
@@ -508,6 +510,8 @@ function classifyLegacyIsolation({ fsImpl, home, instancesRoot, entries, state }
 
 export function inspectMacosExistingInstanceRecovery({ home = os.homedir(), fsImpl = fs, state = {} } = {}) {
   const report = { status: "ABSENT", mutations_performed: false, instances_root_present: false, instance_ids: [], instances: [], missing_verification_gates: [] };
+  if(state.macos_control_layout!==undefined&&state.macos_control_layout!==MACOS_PRIVATE_CONTROL_LAYOUT_V2)
+    return {...report,status:"CONFLICT",missing_verification_gates:["control_layout_version"]};
   const homePath = path.resolve(home);
   const policyFailure = reason => ({ ...report, status: "CONFLICT", fresh_first_install_candidate: false, missing_verification_gates: ["safe_instance_tree"], legacy_evidence_isolation: { ...LEGACY_AUDIT, classification: "REJECTED", reason } });
   const homeCheck = safeDirectory(fsImpl, homePath, { privateDirectory: false });
@@ -533,7 +537,9 @@ export function inspectMacosExistingInstanceRecovery({ home = os.homedir(), fsIm
     if (!check.ok) report.instances.push({ instance_id: id, status: "CONFLICT", missing_verification_gates: ["safe_instance_directory"] });
     else {
       try {
-        const item = candidate(fsImpl, instancesRoot, id);
+        const item = candidate(fsImpl, instancesRoot, id, {
+          macosControlLayout:state.instance_id===id?state.macos_control_layout??null:null
+        });
         if (item.status === "CONFLICT" && id === "1832f0bb" && safeLegacyFreshTree(fsImpl, dir)) item.fresh_first_install_candidate = true;
         report.instances.push(item);
       }
@@ -747,6 +753,8 @@ export function inspectMacosSelectedFreshInstance({ state = {}, home = os.homedi
   const instancesRoot = path.join(homePath, INSTANCE_ROOT_NAME, "instances");
   const root = path.join(instancesRoot, state.instance_id);
   if (state.instance_root !== root) return selectedResult("CONFLICT", ["canonical_selected_instance_root"]);
+  const layout = state.macos_control_layout ?? null;
+  if(layout!==null&&layout!==MACOS_PRIVATE_CONTROL_LAYOUT_V2) return selectedResult("CONFLICT", ["control_layout_version"]);
   for (const directory of [path.join(homePath, INSTANCE_ROOT_NAME), instancesRoot, root]) {
     const check = safeDirectory(fsImpl, directory);
     const stat = lstat(fsImpl, directory);
@@ -755,8 +763,8 @@ export function inspectMacosSelectedFreshInstance({ state = {}, home = os.homedi
   let selectedRunnerPackage;
   try { selectedRunnerPackage = inspectMacosRunnerPackageLeaves({ state, home: homePath, fsImpl }); }
   catch { return selectedResult("CONFLICT", ["safe_selected_instance_tree"]); }
-  if (!safeInstanceTree(fsImpl, root, { strictOwner: true, selectedRunnerWork: true, selectedRuntimeBrowserProfileSingletons: true, selectedRunnerPackage, selectedRunnerEnvironment: true }).ok) return selectedResult("CONFLICT", ["safe_selected_instance_tree"]);
-  const expectedControl = path.resolve(defaultLocalPaths({ home: homePath, installationId: state.installation_id, projectKey: state.sandbox_project_key }).control);
+  if (!safeInstanceTree(fsImpl, root, { strictOwner: true, selectedRunnerWork: true, selectedRuntimeBrowserProfileSingletons: true, selectedRunnerPackage, selectedRunnerEnvironment: true, selectedPrivateControl: layout === MACOS_PRIVATE_CONTROL_LAYOUT_V2 }).ok) return selectedResult("CONFLICT", ["safe_selected_instance_tree"]);
+  const expectedControl = path.resolve(defaultLocalPaths({ home: homePath, installationId: state.installation_id, projectKey: state.sandbox_project_key, platform: "darwin", macosControlLayout: layout }).control);
   if (state.control_clone_path !== expectedControl || state.chat_route_file !== path.join(root, "chat-routes.json")) return selectedResult("CONFLICT", ["canonical_selected_proof_paths"]);
   const control = selectedJson(fsImpl, path.join(expectedControl, "instance.json"));
   const instance = selectedJson(fsImpl, path.join(root, "instance.json"), { allowMissing: true });
@@ -767,6 +775,7 @@ export function inspectMacosSelectedFreshInstance({ state = {}, home = os.homedi
   if (!control.ok || !instance.ok || !intent.ok || !routes.ok || !receipt.ok) return selectedResult("CONFLICT", ["selected_proof_integrity"]);
   const identity = { instance_id: state.instance_id, installation_id: state.installation_id, control_repository: state.control_repository, sandbox_repository: state.sandbox_repository };
   if (Object.entries(identity).some(([key, value]) => typeof value !== "string" || !value || control.value[key] !== value || (!instance.missing && instance.value[key] !== value) || (!routes.missing && routes.value[key] !== undefined && routes.value[key] !== value)) ||
+      (control.value.macos_control_layout??null)!==layout ||
       control.value.schema_version !== 1 || control.value.role !== "control" || control.value.platform !== "darwin" || control.value.arch !== "arm64" ||
       (control.value.trusted_github_username !== undefined && control.value.trusted_github_username !== state.github_login) ||
       !selectedOriginMatches(control.value.origin, state.control_repository) || !selectedOriginMatches(control.value.remote_origin, state.control_repository) ||

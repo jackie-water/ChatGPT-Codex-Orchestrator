@@ -19,7 +19,7 @@ import { inspectMacosExistingInstanceRecovery, inspectMacosSelectedFreshInstance
 import { MACOS_PERSONAL_USE_POLICY, hasMacosPersonalUsePolicy, hasTrustedSingleUserReadinessProfile, hasTrustedSingleUserReadinessProfileMarker, hasTrustedSingleUserReadinessIdentity, macosPersonalUsePolicyChallenge, trustedSingleUserReadinessProfileChallenge, TRUSTED_SINGLE_USER_READINESS_PROFILE } from "./lib/macos-personal-use-service.mjs";
 import { inspectMacosRunnerBootstrap, approveMacosRunnerBootstrap } from "./lib/macos-runner-bootstrap.mjs";
 import { verifyTrustedRecoveryEvidence, issueTrustedRecoveryEvidence, githubReadOnlyApi } from "./lib/macos-trusted-recovery-evidence.mjs";
-import { canonicalInstallationId } from "./lib/control-render.mjs";
+import { canonicalInstallationId, MACOS_PRIVATE_CONTROL_LAYOUT_V2 } from "./lib/control-render.mjs";
 import {
   sandboxSmokeStatus,
   startSandboxSmoke,
@@ -810,7 +810,12 @@ function runSetup() {
       return emit({status:"ERROR",error_id:"MACOS-MIGRATION-INTENT",recoverable:true,preferred_language:lang,message:"Durable macOS migration intent could not be prepared; no Control/Sandbox mutation was performed.",details:String(error.message||error),mutations_performed:false},1);
     }
     if(!state.control_environment_ready){
-      try { const control=prepareControlEnvironment({installationId:state.installation_id,targetRepository:state.target_repository,reviewerChatUrl:state.reviewer_chat_url,trustedGithubLogin:state.github_login,macosSetupApproved:state.macos_setup_approved===true,sourceRoot:process.cwd(),home:os.homedir()}); Object.assign(state,control,{control_environment_ready:true,routing_architecture:"explicit-route-v1",target_environment_ready:false,macos_rollback:{available:true,automatic:false,created_at:new Date().toISOString()}}); saveState(state); }
+      try { const control=prepareControlEnvironment({installationId:state.installation_id,targetRepository:state.target_repository,reviewerChatUrl:state.reviewer_chat_url,trustedGithubLogin:state.github_login,macosSetupApproved:state.macos_setup_approved===true,sourceRoot:process.cwd(),home:os.homedir(),
+        // A new, explicitly approved first-install is eligible for the
+        // versioned private instance Control layout. Existing installations
+        // retain their saved location and are never silently relocated.
+        macosControlLayout:state.macos_control_layout===undefined&&freshFirstInstallAfterApproval
+          ? MACOS_PRIVATE_CONTROL_LAYOUT_V2 : (state.macos_control_layout??null)}); Object.assign(state,control,{control_environment_ready:true,routing_architecture:"explicit-route-v1",target_environment_ready:false,macos_rollback:{available:true,automatic:false,created_at:new Date().toISOString()}}); saveState(state); }
       catch(error){ state.last_error={error_id:"SETUP-011",message:String(error.message||error),at:new Date().toISOString()}; saveState(state); return emit({status:"ERROR",error_id:"SETUP-011",recoverable:true,preferred_language:lang,message:"Native macOS Control/Sandbox preparation failed; no runner or service was started.",details:String(error.message||error)},1); }
     }
     if(state.github_plugin_authorization_verified!==true || state.github_plugin_authorization_installation_id!==state.installation_id || state.github_plugin_authorization_control_repository!==state.control_repository || state.github_plugin_authorization_sandbox_repository!==state.sandbox_repository || state.github_plugin_authorization_chat_url!==state.reviewer_chat_url) return emit(action(state,"generated_repo_authorization","setup.generated_repo.connect",{repositories:[state.control_repository,state.sandbox_repository],chat_url:state.reviewer_chat_url,verification_requirement:"The controlling Chat must confirm access to these exact generated private repositories and record this exact current Chat URL; local gh status and boolean answers are not proof.",mutations_performed:true}));
