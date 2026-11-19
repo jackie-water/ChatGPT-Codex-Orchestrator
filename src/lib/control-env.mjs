@@ -448,7 +448,7 @@ function macosG3CloneClean(target,purpose){
      runG3Git(["ls-files","--stage"],{cwd:target}).stdout==="")return;
   throw new Error(`${purpose} clone contains dirty, unsafe or unverifiable Git state; refusing to fetch or overwrite it`);
 }
-function preflightMacosG3ExistingClones({targetPath,targetRepository,sandboxPath,sandboxRepository,controlPath,controlRepository}){
+export function preflightMacosG3ExistingClones({targetPath,targetRepository,sandboxPath,sandboxRepository,controlPath,controlRepository}){
   if(process.platform!=="darwin")return;
   for(const [directory,purpose,repository] of [
     [targetPath,"Target",targetRepository],

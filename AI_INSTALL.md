@@ -42,6 +42,38 @@ macOS official bootstrap:
 
 The macOS entrypoint performs a read-only prerequisite and migration preflight first. It does not install services, create repositories, activate a runner, copy credentials, or change an existing runner. macOS setup remains approval-gated and uses the same CLI state/resume path.
 
+### G3-RECEIPT-CONTINUITY-01 · Interrupted SETUP-011, newer source
+
+For a preserved `SETUP-011` from an older official source, **do not** run
+`answer` again with `macos_official_fresh_preparation`, rerun the old
+`Install.command`, overwrite the old official-source directory, or delete
+`install-state.json`, the saved migration intent, historical receipt, lock or
+claims. The old receipt's structure and historical bytes may be intact even
+though its pre-setup challenge cannot be reconstructed from the partial
+post-setup state. Such a historical match is **not** new-source consent.
+
+The new, separate `macos_receipt_continuity_approval` is applicable only to
+a canonical, clean, committed, reviewed new macOS source, the exact existing
+failed installation and original immutable migration intent, private legacy
+roots, safe G3 local paths and complete authenticated owner-remote absence
+proof. `dry-run --json` or `recovery-preflight --json` refuses unknown remote
+or local partial side effects before emitting any challenge. It never uses
+`1832f0bb` or another project's Runner, repo, approval or Chat route. If a
+verified challenge is emitted, the user must separately approve the exact
+new source-bound `answer --action macos_receipt_continuity_approval --value
+'<current exact challenge>' --json`; source-only testing does not grant it.
+The new permission covers **one** original-installation private
+Control/Sandbox preparation attempt only; no Runner/Chat/merge/target effect.
+
+The later separately authorized official `setup/resume` rechecks that
+approval and all read-only identities, retains the **original** intent rather
+than writing a replacement, and writes its own unique continuity attempt
+*before* private Control/Sandbox preparation. Any interruption or ambiguous
+result retains the attempt and fails closed on subsequent calls. The normal
+generated-repository connector, Runner install/start, pinned Chat route,
+Sandbox and exact-SHA merge gates remain separate. See
+`docs/macos-receipt-continuity-v1.md` for the full contract and exclusions.
+
 ### G3 official fresh-preparation entrypoint and separate consent
 
 `Install.command` delegates to `install.sh`, which anchors the current directory to the verified script/source root before invoking the Node CLI. The wrapper runs one read-only `dry-run --json` and advances to `setup` or `resume` **only** if the preflight exits 0 with the exact `PASS / dry_run:true / mutations_performed:false` contract. A legitimate `NEEDS_USER_ACTION` with exit 1 is deliberately **not** converted to success and must be reported as an explicit next action. Invalid JSON, malformed success, unsupported flags and platform mismatch are hard stops.

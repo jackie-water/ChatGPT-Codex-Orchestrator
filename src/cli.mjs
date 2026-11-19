@@ -9,17 +9,18 @@ import { t, normalizeLanguage } from "./lib/i18n.mjs";
 import { ERROR_CATALOG } from "./lib/errors.mjs";
 import { sanitizeObject } from "./lib/sanitize.mjs";
 import { submitDiagnosticReport } from "./lib/reporting.mjs";
-import { prepareControlEnvironment, auditMacosPrivatePreparationPaths, activateTargetProject, upgradeControlEnvironment, refreshControlRuntime, verifyMacosGeneratedRepositories, githubLogin as authenticatedGithubLogin } from "./lib/control-env.mjs";
+import { prepareControlEnvironment, auditMacosPrivatePreparationPaths, preflightMacosG3ExistingClones, activateTargetProject, upgradeControlEnvironment, refreshControlRuntime, verifyMacosGeneratedRepositories, githubLogin as authenticatedGithubLogin } from "./lib/control-env.mjs";
 import { renderProjectInstructions } from "./lib/project-instructions.mjs";
 import { ensureInstallerChatRegistration, findRegisteredChatRoute, normalizeChatUrl } from "./lib/chat-registration.mjs";
 import { pendingCallbackCount, doctorHealth, repairHealth } from "./lib/runtime-health.mjs";
 import { macosPrerequisites, migrationPreflight, macosRuntimeAction, prepareMigrationIntent, trustedClaimRead } from "./lib/macos-platform.mjs";
 import { macosNativeHelperPreflight, prepareMacosNativeHelper, verifyMacosNativeCapability } from "./lib/macos-native-helper-install.mjs";
 import { inspectMacosExistingInstanceRecovery, inspectMacosSelectedFreshInstance, approveMacosSelectedFreshInstance, isMacosFreshFirstInstallBootstrap, macosOfficialFreshPreparationChallenge, hasMacosOfficialFreshPreparationApproval, macosOfficialFreshPreparationReceipt } from "./lib/macos-existing-instance-recovery.mjs";
+import { inspectMacosReceiptContinuity, makeMacosReceiptContinuityReceipt, MACOS_RECEIPT_CONTINUITY_ACTION } from "./lib/macos-receipt-continuity.mjs";
 import { MACOS_PERSONAL_USE_POLICY, hasMacosPersonalUsePolicy, hasTrustedSingleUserReadinessProfile, hasTrustedSingleUserReadinessProfileMarker, hasTrustedSingleUserReadinessIdentity, macosPersonalUsePolicyChallenge, trustedSingleUserReadinessProfileChallenge, TRUSTED_SINGLE_USER_READINESS_PROFILE } from "./lib/macos-personal-use-service.mjs";
 import { inspectMacosRunnerBootstrap, approveMacosRunnerBootstrap } from "./lib/macos-runner-bootstrap.mjs";
 import { verifyTrustedRecoveryEvidence, issueTrustedRecoveryEvidence, githubReadOnlyApi } from "./lib/macos-trusted-recovery-evidence.mjs";
-import { canonicalInstallationId, safeKey, MACOS_PRIVATE_CONTROL_LAYOUT_V2 } from "./lib/control-render.mjs";
+import { canonicalInstallationId, safeKey, defaultLocalPaths, MACOS_PRIVATE_CONTROL_LAYOUT_V2 } from "./lib/control-render.mjs";
 import {
   sandboxSmokeStatus,
   startSandboxSmoke,
@@ -460,6 +461,81 @@ function advanceMacosFirstBootRunner(state,{inspect=inspectMacosRunnerBootstrap,
 }
 
 
+// G3 receipt continuity is a distinct, source-bound recovery permission.
+// It NEVER upgrades a historic fresh-preparation receipt to new-source consent.
+function isMacosReceiptContinuityCandidate(state){
+  return process.platform==="darwin" && state?.control_environment_ready!==true &&
+    state?.macos_official_fresh_preparation_approval!==undefined &&
+    state?.last_error?.error_id==="SETUP-011" && Boolean(state?.migration_intent_path);
+}
+function readOnlyMacosGeneratedRepoInventory({state}){
+  // A 404 alone does NOT prove absence. Enumerate the authenticated owner's
+  // complete owner-affiliation inventory and fail closed on incomplete pages.
+  const call=arg=>{
+    const result=spawnSafeSync("gh",["api",arg,"--hostname","github.com"],
+      {encoding:"utf8",timeout:12000,maxBuffer:1024*1024});
+    if(result.status!==0||result.error||result.signal)throw new Error("remote-owner-inventory-unavailable");
+    return JSON.parse(result.stdout);
+  };
+  try{
+    const user=call("user");
+    if(user.login!==state.github_login||!Number.isSafeInteger(user.id)||user.id<=0)
+      throw new Error("authenticated-owner-mismatch");
+    const short=canonicalInstallationId(state.installation_id);
+    const names=["control","sandbox"].map(role=>`${state.github_login}/chatgpt-codex-orchestrator-${role}-${short}`.toLowerCase());
+    const seen=new Set();let complete=false;
+    for(let page=1;page<=20;page++){
+      const rows=call(`user/repos?affiliation=owner&per_page=100&page=${page}&visibility=all`);
+      if(!Array.isArray(rows)||rows.length>100)throw new Error("remote-owner-inventory-incomplete");
+      for(const repo of rows){
+        if(repo.owner?.id!==user.id||!Number.isSafeInteger(repo.id)||repo.id<=0||typeof repo.full_name!=="string"||
+           seen.has(repo.id))throw new Error("remote-owner-inventory-contradictory");
+        seen.add(repo.id);
+        if(names.includes(repo.full_name.toLowerCase()))
+          throw new Error("existing-repository-requires-manual-reconciliation");
+      }
+      if(rows.length<100){complete=true;break;}
+    }
+    if(!complete)throw new Error("remote-owner-inventory-bounded");
+    return {status:"PASS",owner_login:user.login,owner_id:user.id,
+      control:"VERIFIED_ABSENT",sandbox:"VERIFIED_ABSENT"};
+  }catch{return {status:"BLOCKED",owner_login:null,owner_id:null,
+    control:"UNKNOWN",sandbox:"UNKNOWN"};}
+}
+function macosReceiptContinuityInspection(state){
+  return inspectMacosReceiptContinuity({state,home:os.homedir(),sourceRoot:OFFICIAL_SOURCE_ROOT,
+    localPreflight:()=>{
+      try{
+        const short=canonicalInstallationId(state.installation_id), project=safeKey(state.target_repository.split("/")[1]);
+        const layout=state.macos_control_layout??MACOS_PRIVATE_CONTROL_LAYOUT_V2;
+        const paths=defaultLocalPaths({home:os.homedir(),installationId:state.installation_id,projectKey:project,
+          platform:"darwin",macosControlLayout:layout});
+        const privateAudit=auditMacosPrivatePreparationPaths({home:os.homedir(),installationId:state.installation_id,
+          projectKey:project,macosControlLayout:layout,
+          expectedGithubLogin:state.github_login});
+        if(privateAudit.status!=="PASS")return {status:"BLOCKED",mutations_performed:false};
+        // A partial Control, Sandbox, browser profile or outbox must be
+        // reconciled instead of silently reused or overwritten.
+        const instanceRoot=path.join(os.homedir(),".chatgpt-codex-orchestrator","instances",short);
+        for(const dir of [paths.control,path.join(instanceRoot,"automation",`sandbox-${short}`),
+          path.join(instanceRoot,"browser-profile"),path.join(instanceRoot,"pending-wakes")]){
+          try{fs.lstatSync(dir);return {status:"BLOCKED",mutations_performed:false};}
+          catch(error){if(error.code!=="ENOENT")return {status:"BLOCKED",mutations_performed:false};}
+        }
+        preflightMacosG3ExistingClones({targetPath:paths.project,targetRepository:state.target_repository,
+          sandboxPath:path.join(instanceRoot,"automation",`sandbox-${short}`),
+          sandboxRepository:`${state.github_login}/chatgpt-codex-orchestrator-sandbox-${short}`,
+          controlPath:paths.control,controlRepository:`${state.github_login}/chatgpt-codex-orchestrator-control-${short}`});
+        return {status:"PASS",mutations_performed:false};
+      }catch{return {status:"BLOCKED",mutations_performed:false};}
+    },remotePreflight:()=>readOnlyMacosGeneratedRepoInventory({state})});
+}
+function emitMacosContinuityGate(result,{dryRun=false}={}){
+  const approved=result.status==="PASS"&&result.authorized===true;
+  return emit({...result,dry_run:dryRun,installation_authorized:approved,
+    setup_executed:false,runner_not_started:true,target_disabled:true},approved?0:1);
+}
+
 function dryRun() {
   let state;
   try { state=loadState({create:false}); }
@@ -469,6 +545,7 @@ function dryRun() {
     return emit({status:"ERROR",error_id:"MACOS-EXISTING-INSTANCE-REVIEW",preferred_language:"en",message:"macOS installer state is unreadable; dry-run stopped before any external setup action.",dry_run:true,existing_instance_recovery:existingInstanceRecovery,mutations_performed:false,plan:[]},1);
   }
   const lang=ensureStateLanguage(state);
+  if(isMacosReceiptContinuityCandidate(state))return emitMacosContinuityGate(macosReceiptContinuityInspection(state),{dryRun:true});
   const existingInstanceRecovery=process.platform==="darwin"?macosRecoveryReport(state):null;
   if(existingInstanceRecovery?.selection_mode&&existingInstanceRecovery.status!=="SELECTED_FRESH_INSTANCE_VERIFIED") return emit({status:existingInstanceRecovery.status==="CONFLICT"?"ERROR":"NEEDS_USER_ACTION",action_id:"macos_selected_fresh_instance_approval",error_id:"MACOS-SELECTED-FRESH-INSTANCE",dry_run:true,existing_instance_recovery:existingInstanceRecovery,approval_challenge:existingInstanceRecovery.approval_challenge,mutations_performed:false,plan:[]},1);
   if(existingInstanceRecovery && typeof existingInstanceRecovery === "object" && Object.hasOwn(existingInstanceRecovery,"legacy_evidence_isolation") && existingInstanceRecovery.legacy_evidence_isolation?.reason !== "continued_passive_legacy") {
@@ -591,7 +668,13 @@ function answer() {
 
   const bool = v => /^(true|yes|y|1|done|completed)$/i.test(String(v || ""));
 
-  if(actionId === "macos_official_fresh_preparation"){
+  if(actionId === MACOS_RECEIPT_CONTINUITY_ACTION){
+    if(!isMacosReceiptContinuityCandidate(state))return emit({status:"ERROR",error_id:"G3-CONTINUITY-NOT-ELIGIBLE",mutations_performed:false},1);
+    const inspection=macosReceiptContinuityInspection(state);
+    const receipt=makeMacosReceiptContinuityReceipt({state,value,inspection});
+    if(!receipt)return emit({status:"ERROR",error_id:"G3-CONTINUITY-APPROVAL-MISMATCH",mutations_performed:false},1);
+    state.macos_receipt_continuity_approval=receipt;
+  } else if(actionId === "macos_official_fresh_preparation"){
     if(process.platform!=="darwin")return emit({status:"ERROR",error_id:"MACOS-OFFICIAL-FRESH-APPROVAL-PLATFORM",mutations_performed:false},1);
     const recovery=macosRecoveryReport(state);
     const receipt=macosOfficialFreshPreparationReceipt({state,recovery,value,home:os.homedir(),sourceRoot:OFFICIAL_SOURCE_ROOT});
@@ -723,15 +806,20 @@ function runSetup() {
   const lang = ensureStateLanguage(state);
   if(process.platform==="darwin") {
     if(hasTrustedSingleUserReadinessProfileMarker(state)&&!hasTrustedSingleUserReadinessProfile(state)) return emit({status:"ERROR",error_id:"MACOS-READINESS-PROFILE-INVALID",recoverable:false,preferred_language:lang,mutations_performed:false},1);
+    const continuityCandidate=isMacosReceiptContinuityCandidate(state);
+    const continuity=continuityCandidate?macosReceiptContinuityInspection(state):null;
+    if(continuityCandidate&&!(continuity.status==="PASS"&&continuity.authorized===true))
+      return emitMacosContinuityGate(continuity);
+    const continuityAuthorized=continuityCandidate;
     const existingInstanceRecovery=macosRecoveryReport(state);
     const initialFreshFirstInstall=isMacosFreshFirstInstallBootstrap({state,recovery:existingInstanceRecovery,installStateMissing:state.__macos_install_state_missing===true});
-    if(existingInstanceRecovery && Object.hasOwn(existingInstanceRecovery,"legacy_evidence_isolation") &&
+    if(!continuityAuthorized&&existingInstanceRecovery && Object.hasOwn(existingInstanceRecovery,"legacy_evidence_isolation") &&
         existingInstanceRecovery.legacy_evidence_isolation?.reason !== "continued_passive_legacy" &&
         existingInstanceRecovery.legacy_evidence_isolation?.reason !== "initial_passive_legacy")
       return emit({status:"ERROR",error_id:"MACOS-OFFICIAL-FRESH-REVIEW",preferred_language:lang,
         message:"Historical isolation classification is rejected; setup stopped before external actions.",
         existing_instance_recovery:existingInstanceRecovery,mutations_performed:false},1);
-    if(existingInstanceRecovery?.legacy_evidence_isolation?.reason === "initial_passive_legacy"){
+    if(!continuityAuthorized&&existingInstanceRecovery?.legacy_evidence_isolation?.reason === "initial_passive_legacy"){
       const challenge=macosOfficialFreshPreparationChallenge({state,recovery:existingInstanceRecovery,home:os.homedir(),sourceRoot:OFFICIAL_SOURCE_ROOT});
       const approved=Boolean(challenge && hasMacosOfficialFreshPreparationApproval({state,recovery:existingInstanceRecovery,home:os.homedir(),sourceRoot:OFFICIAL_SOURCE_ROOT}));
       if(!approved) return emit({status:challenge&&state.macos_official_fresh_preparation_approval===undefined?"NEEDS_USER_ACTION":"ERROR",
@@ -748,7 +836,9 @@ function runSetup() {
     if(freshFirstInstall&&!state.macos_setup_approved)return emit({status:"NEEDS_USER_ACTION",action_id:"macos_setup_approval",preferred_language:lang,message_key:"setup.macos.approval",message:t(lang,"setup.macos.approval"),resume_command:"node src/cli.mjs resume --json",mutations_performed:false,details:"Approval is required before native setup can write instance state or a LaunchAgent."});
     earlyTrustedEvidence=macosTrustedRecoveryEvidence(state,{requireReceipt:false});
     const approvedFreshContinuation=macosFreshBootstrapMayAdvance(state,existingInstanceRecovery,earlyTrustedEvidence);
-    const freshFirstInstallAfterApproval=freshFirstInstall || approvedFreshContinuation;
+    const freshFirstInstallAfterApproval=freshFirstInstall || approvedFreshContinuation || continuityAuthorized;
+    if(continuityAuthorized&&!['ABSENT','NEEDS_HUMAN_LEGACY'].includes(earlyTrustedEvidence.status))
+      return emit({status:"BLOCKED",error_id:"G3-CONTINUITY-TRUSTED-EVIDENCE-CHANGED",mutations_performed:false},1);
     const pendingFirstRegistration=earlyTrustedEvidence.status==="NEW_INSTALL_REGISTRATION_PENDING";
     if(!freshFirstInstallAfterApproval&&existingInstanceRecovery.status!=="ABSENT" && !macosBootstrapMayAdvance(state, existingInstanceRecovery, earlyTrustedEvidence) && (!macosStateBound(state, existingInstanceRecovery) || existingInstanceRecovery.status==="CONFLICT")) return emit({status:existingInstanceRecovery.status==="CONFLICT"?"ERROR":"NEEDS_USER_ACTION",error_id:"MACOS-EXISTING-INSTANCE-REVIEW",recoverable:existingInstanceRecovery.status!=="CONFLICT",preferred_language:lang,message:"An existing macOS instance was found without authoritative binding evidence. Setup/resume stopped before installer state, migration intent, Control, Sandbox, runner, or helper changes.",existing_instance_recovery:existingInstanceRecovery,mutations_performed:false},1);
     if(earlyTrustedEvidence.status==="NEW_INSTALL_AWAITING_CONNECTOR_AUTH") return emit(action(state,"generated_repo_authorization","setup.generated_repo.connect",{repositories:[state.control_repository,state.sandbox_repository],chat_url:state.reviewer_chat_url,verification_requirement:"The controlling Chat must confirm access to these exact generated private repositories and record this exact current Chat URL; local gh status and boolean answers are not proof.",mutations_performed:false}));
@@ -784,7 +874,8 @@ function runSetup() {
       try { routeProof=Boolean(delivered && String(delivered.installation_id)===String(state.installation_id) && Number(delivered.registration_issue)===savedIssueId && String(delivered.project)===String(state.sandbox_project_key) && normalizeChatUrl(delivered.chat_url)===normalizeChatUrl(state.reviewer_chat_url)); } catch {}
       if(!identityProof || !routeProof) return emit({status:"WAITING",action_id:"sandbox_chat_registration",recoverable:true,preferred_language:lang,message:"The first Sandbox registration Issue is pinned; exact originating Chat delivery proof is required before resume.",registration_issue:state.sandbox_chat_registration_issue||null,trusted_recovery_evidence:trustedEvidence,mutations_performed:false});
     }
-    const migration=migrationPreflight({state});
+    const migration=continuityAuthorized?{status:"READY",existing_intent_reused:true,
+      original_intent_immutable:true}:migrationPreflight({state});
     const ready=prerequisites.node&&prerequisites.git&&prerequisites.gh&&prerequisites.codex&&prerequisites.session_auth&&["PASS","DEFERRED_PENDING_PROFILE_SELECTION","NOT_APPLICABLE_SUPERSEDED"].includes(prerequisites.legacy_native_helper_gate)&&migration.status==="READY";
     if(!ready) return emit({status:"ERROR",error_id:"MACOS-PREREQUISITE-OR-MIGRATION",recoverable:true,preferred_language:lang,mutations_performed:false,message:"macOS preflight found a prerequisite or migration conflict; no installation mutation was performed.",prerequisites,migration},1);
     if(!state.macos_setup_approved) return emit(action(state,"macos_setup_approval","setup.macos.approval",{mutations_performed:false,details:"Approval is required before native setup can write instance state or a LaunchAgent."}));
@@ -813,10 +904,20 @@ function runSetup() {
       if(preparationPaths.status!=="PASS") return emit({status:"ERROR",error_id:"MACOS-PRIVATE-PATH-AUDIT",recoverable:false,preferred_language:lang,
         message:"macOS preparation paths or existing Control identity are unsafe; existing state and migration intent were not changed.",
         issues:preparationPaths.issues,mutations_performed:false},1);
-      const intent=prepareMigrationIntent({state,sourceRoot:process.cwd(),home:os.homedir()});
+      const intent=continuityAuthorized
+        ? {path:state.migration_intent_path,phase:state.migration_intent_phase}
+        : prepareMigrationIntent({state,sourceRoot:process.cwd(),home:os.homedir()});
       state.migration_intent_path=intent.path;
       state.migration_intent_phase=intent.phase;
       state.macos_native_setup="PREPARING";
+      if(continuityAuthorized){
+        // One durable attempt only. A crash or failed Control preparation must
+        // be reconciled; it cannot consume this approval again automatically.
+        state.macos_receipt_continuity_attempt={schema_version:1,phase:"INTENT_RECORDED",
+          operation_id:crypto.randomUUID(),installation_id:state.installation_id,
+          source_commit:continuity.source_commit,source_tree:continuity.source_tree,
+          binding_sha256:continuity.binding_sha256,recorded_at:new Date().toISOString()};
+      }
       saveState(state);
     } catch(error) {
       return emit({status:"ERROR",error_id:"MACOS-MIGRATION-INTENT",recoverable:true,preferred_language:lang,message:"Durable macOS migration intent could not be prepared; no Control/Sandbox mutation was performed.",details:String(error.message||error),mutations_performed:false},1);
@@ -827,8 +928,19 @@ function runSetup() {
         // versioned private instance Control layout. Existing installations
         // retain their saved location and are never silently relocated.
         macosControlLayout:state.macos_control_layout===undefined&&freshFirstInstallAfterApproval
-          ? MACOS_PRIVATE_CONTROL_LAYOUT_V2 : (state.macos_control_layout??null)}); Object.assign(state,control,{control_environment_ready:true,routing_architecture:"explicit-route-v1",target_environment_ready:false,macos_rollback:{available:true,automatic:false,created_at:new Date().toISOString()}}); saveState(state); }
-      catch(error){ state.last_error={error_id:"SETUP-011",message:String(error.message||error),at:new Date().toISOString()}; saveState(state); return emit({status:"ERROR",error_id:"SETUP-011",recoverable:true,preferred_language:lang,message:"Native macOS Control/Sandbox preparation failed; no runner or service was started.",details:String(error.message||error)},1); }
+          ? MACOS_PRIVATE_CONTROL_LAYOUT_V2 : (state.macos_control_layout??null)}); Object.assign(state,control,{control_environment_ready:true,routing_architecture:"explicit-route-v1",target_environment_ready:false,macos_rollback:{available:true,automatic:false,created_at:new Date().toISOString()}});
+        if(continuityAuthorized&&state.macos_receipt_continuity_attempt)
+          state.macos_receipt_continuity_attempt.phase="CONTROL_PREPARED_AWAITING_CONNECTOR";
+        saveState(state); }
+      catch(error){
+        if(continuityAuthorized&&state.macos_receipt_continuity_attempt)
+          state.macos_receipt_continuity_attempt.phase="UNRECONCILED_AFTER_ATTEMPT";
+        state.last_error={error_id:"SETUP-011",message:String(error.message||error),at:new Date().toISOString()};
+        try{saveState(state);}catch{return emit({status:"ERROR",error_id:"G3-CONTINUITY-RESULT-PERSIST-UNKNOWN",mutations_performed:"UNKNOWN"},1);}
+        return emit({status:"ERROR",error_id:"SETUP-011",recoverable:false,preferred_language:lang,
+          message:"G3 Control/Sandbox attempt is preserved and needs independent reconciliation; do not repeat setup/resume.",
+          mutations_performed:"UNKNOWN"},1);
+      }
     }
     if(state.github_plugin_authorization_verified!==true || state.github_plugin_authorization_installation_id!==state.installation_id || state.github_plugin_authorization_control_repository!==state.control_repository || state.github_plugin_authorization_sandbox_repository!==state.sandbox_repository || state.github_plugin_authorization_chat_url!==state.reviewer_chat_url) return emit(action(state,"generated_repo_authorization","setup.generated_repo.connect",{repositories:[state.control_repository,state.sandbox_repository],chat_url:state.reviewer_chat_url,verification_requirement:"The controlling Chat must confirm access to these exact generated private repositories and record this exact current Chat URL; local gh status and boolean answers are not proof.",mutations_performed:true}));
     try{Object.assign(state,verifyMacosGeneratedRepositories({state}));saveState(state);}
@@ -1522,6 +1634,8 @@ function recoveryPreflight() {
   let state;
   let stateInvalid=false;
   try { state=loadState({create:false}); } catch { state={}; stateInvalid=true; }
+  if(!stateInvalid&&isMacosReceiptContinuityCandidate(state))
+    return emitMacosContinuityGate(macosReceiptContinuityInspection(state),{dryRun:true});
   const report=macosRecoveryReport(state);
   if(!stateInvalid && report && typeof report === "object" && Object.hasOwn(report,"legacy_evidence_isolation") && report.legacy_evidence_isolation?.reason !== "continued_passive_legacy") {
     const eligible=report.legacy_evidence_isolation?.classification === "OPAQUE_PRESERVED_NONAUTHORITY" && isMacosFreshFirstInstallBootstrap({state,recovery:report});

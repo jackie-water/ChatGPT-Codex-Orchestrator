@@ -156,7 +156,7 @@ function isolatedInternalModule(t){
   const original=fs.readFileSync(sourceUrl,'utf8');
   const text=original.replace(/from "\.\/([^"\n]+)"/g,(_,name)=>
     `from ${JSON.stringify(new URL('../src/lib/'+name,import.meta.url).href)}`)+
-    '\nexport {runG3Git,macosG3GitEnvironment,commitAndPush,safeG3CloneCommand,preflightMacosG3ExistingClones};\n';
+    '\nexport {runG3Git,macosG3GitEnvironment,commitAndPush,safeG3CloneCommand};\n';
   const file=path.join(root,'test-only-export.mjs');fs.writeFileSync(file,text);
   return pathToFileURL(file).href;
 }

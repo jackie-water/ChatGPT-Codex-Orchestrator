@@ -98,3 +98,15 @@ change does not grant authority to run them or claim that the Mac installer
 has been executed. Exact source SHA review, official setup approval,
 Runner startup, Chat registration and Sandbox-only merge still require their
 respective independent gates.
+
+## G3 receipt continuity after a prior SETUP-011
+
+An existing initial fresh-preparation receipt is a historical record, not
+consent for a different committed source. Recheck the original private
+`migration-intent.json` and owner-only history *without editing it*. The new
+`macos_receipt_continuity_approval` uses a separate source/intent/installation/
+Chat/owner-bound challenge and a single durable attempt. A nonempty Control
+clone, Sandbox remote, uncertain GitHub inventory, stale receipt, or unknown
+partial write blocks continuation. Do not replace the existing intent,
+recreate the installation ID or use an old Windows Control. See the dedicated
+`docs/macos-receipt-continuity-v1.md` for preflight, approval and replay gates.
