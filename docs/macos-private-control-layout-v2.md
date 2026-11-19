@@ -56,3 +56,45 @@ The saved G3 challenge/intent is **not** new-source authorization and must not
 be reused after the source SHA or source location changes. Existing state
 reads and prior approved intent are retained as historical evidence; a new
 unsafe-path rejection does not overwrite either one.
+
+## G3-RV-05 · Entire official preparation Git execution boundary
+
+The RV-04 pure read-only Control audit is **not** sufficient authorization
+for subsequent G3 Git operations. On macOS, `prepareControlEnvironment`
+now performs an additional **three-checkout preflight** for the existing
+Target, Sandbox and Control clone **before any private directory creation,
+fetch, repository creation, sandbox seeding, configuration write or push**.
+An existing checkout must have a user-owned, ordinary `.git` directory, a
+bounded and readable config with exactly the expected GitHub HTTPS `origin`
+(and any explicit push URL), and a provably clean HEAD/index/worktree.
+Incomplete or unsupported repositories fail closed with an explicit G3 Git
+extension error. This does not delete or repair historical files and never
+consumes an existing `SETUP-011` claim.
+
+For the approved macOS preparation path only, a direct HTTPS `git clone`
+replaces the extra `gh repo clone` Git invocation layer. All Git children run
+under a fixed no-system/no-global configuration,
+without inherited `GIT_*` overrides or external Git templates. Built-in
+fsmonitor, global attribute paths, signing, non-HTTPS transports, automatic
+Git maintenance and Git hooks are disabled for those child processes. Only the explicitly configured
+`gh auth git-credential` helper is permitted for normal authorized GitHub
+HTTPS authentication; it is **not** a general-purpose extension allowance.
+No repository-defined executable hooks, filters, diff/merge drivers, included
+configs, external push destinations or executable attributes are admitted.
+The same policy is checked again on newly cloned repositories, and
+immediately before G3 staging and commit/push. An unborn **empty** checkout
+is only eligible during new Sandbox/Control preparation, never as a replacement
+for a nonempty or unidentified older installation. The existing macOS v1
+`0755` verified-Control and v2 `0700` requirements remain unchanged.
+
+This is a conservative safety gate. Repositories using Git LFS filters,
+submodules, custom hooks, SSH transports, nonstandard includes or external
+attribute transformations may be rejected pending **separate explicit**
+review/authorization; the installer must not silently disable an extension
+and pretend its transformed files are equivalent. Windows retains its
+existing Git behavior. Runtime refresh, post-Sandbox merge and target
+activation are **separate** lifecycle gates; this scoped G3 source-only
+change does not grant authority to run them or claim that the Mac installer
+has been executed. Exact source SHA review, official setup approval,
+Runner startup, Chat registration and Sandbox-only merge still require their
+respective independent gates.

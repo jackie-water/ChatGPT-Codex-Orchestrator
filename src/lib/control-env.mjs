@@ -17,8 +17,8 @@ import {
 } from "./control-render.mjs";
 import { trustedCodeReviewCodexExecutable } from "./macos-code-review-runtime.mjs";
 
-function run(command,args,{cwd,allowFailure=false}={}){
-  const r=spawnSafeSync(command,args,{cwd,encoding:"utf8",...(process.platform==="darwin"&&command==="gh"?{env:{...process.env,GH_HOST:"github.com"}}:{})});
+function run(command,args,{cwd,allowFailure=false,env}={}){
+  const r=spawnSafeSync(command,args,{cwd,encoding:"utf8",...(process.platform==="darwin"&&command==="gh"?{env:{...process.env,GH_HOST:"github.com",...env}}:env?{env}:{})});
   if(r.status!==0&&!allowFailure){
     throw new Error((r.stderr||r.stdout||command+" failed").trim());
   }
@@ -84,7 +84,7 @@ export function verifyMacosGeneratedRepositories({state,commandRunner=run}){
 // The plumbing commands below enumerate only object/index/path identities;
 // actual worktree bytes are hashed by Node, WITHOUT invoking Git filters.
 // Unknown formats, missing files, staged changes and unsafe symlinks fail closed.
-function inspectControlCleanTreeWithoutGitExtensions({control,fsImpl,gitRunner}){
+function inspectControlCleanTreeWithoutGitExtensions({control,fsImpl,gitRunner,requireControlIdentity=true}){
   const gitRead=args=>{
     const r=gitRunner("git",[
       "--no-optional-locks","-c","core.fsmonitor=false",
@@ -121,7 +121,7 @@ function inspectControlCleanTreeWithoutGitExtensions({control,fsImpl,gitRunner})
     const indexed=new Map(index.map(x=>[x.file,x]));
     // The authority-bearing identity file itself must be part of the
     // committed checkout; an ignored, locally planted marker is not enough.
-    if(!indexed.has("instance.json")||!head.some(x=>x.file==="instance.json"))
+    if(requireControlIdentity&&(!indexed.has("instance.json")||!head.some(x=>x.file==="instance.json")))
       return {ok:false,reason:"existing_control_git_unverified"};
     if(indexed.size!==index.length||head.length!==index.length)
       return {ok:false,reason:"existing_control_dirty"};
@@ -297,19 +297,180 @@ function preparePrivateMacDirectory(directory,home,{verifiedLegacyControl=null}=
   }
 }
 
+// G3-RV-05: trusted single-user does not imply that repository Git extensions
+// may execute during official setup. These settings propagate to Git launched
+// by `gh repo clone` as well as our direct Git child. The *only* approved
+// external credential process is the installed `gh auth git-credential`.
+// Do not inherit user-supplied GIT_CONFIG_*, templates, SSH/proxy commands,
+// repo-local filters, executable hooks or global Git attributes.
+const MACOS_G3_GIT_SETTINGS=[
+  ["core.hooksPath","/dev/null"],
+  ["core.fsmonitor","false"],
+  ["core.untrackedCache","false"],
+  ["core.attributesFile","/dev/null"],
+  ["commit.gpgsign","false"],
+  ["tag.gpgsign","false"],
+  ["protocol.allow","never"],
+  ["protocol.https.allow","always"],
+  ["protocol.file.allow","never"],
+  ["protocol.ssh.allow","never"],
+  ["credential.helper",""],
+  ["credential.helper","!gh auth git-credential"],
+  ["gc.auto","0"],
+  ["maintenance.auto","false"],
+  ["fetch.writeCommitGraph","false"]
+];
+function macosG3GitEnvironment(){
+  const env={...process.env};
+  for(const key of Object.keys(env)){
+    if(key.startsWith("GIT_")||key==="SSH_ASKPASS"||key==="SSH_COMMAND")delete env[key];
+  }
+  Object.assign(env,{
+    GIT_CONFIG_NOSYSTEM:"1",GIT_CONFIG_SYSTEM:"/dev/null",
+    GIT_CONFIG_GLOBAL:"/dev/null",GIT_TEMPLATE_DIR:"/dev/null",
+    GIT_TERMINAL_PROMPT:"0",GIT_ALLOW_PROTOCOL:"https",
+    GIT_CONFIG_COUNT:String(MACOS_G3_GIT_SETTINGS.length)
+  });
+  MACOS_G3_GIT_SETTINGS.forEach(([key,value],i)=>{
+    env[`GIT_CONFIG_KEY_${i}`]=key;
+    env[`GIT_CONFIG_VALUE_${i}`]=value;
+  });
+  return env;
+}
+function runG3Git(args,options={}){
+  if(process.platform!=="darwin")return run("git",args,options);
+  return run("git",["--no-optional-locks",...args],{...options,env:macosG3GitEnvironment()});
+}
+function safeG3CloneCommand(repository,target){
+  if(process.platform!=="darwin")return run("gh",["repo","clone",repository,target]);
+  if(!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository))
+    throw new Error("MACOS-G3-GIT-EXTENSION-BLOCKED:invalid_clone_repository");
+  // Use the *same* bounded Git child and authenticated HTTPS protocol as
+  // staging/commit/push. `gh repo clone` would add another uninspected Git
+  // invocation layer whose local hook/filter settings cannot be pinned.
+  return runG3Git(["clone","--no-recurse-submodules",`https://github.com/${repository}.git`,target]);
+}
+
+// Only a bounded, locally identified GitHub HTTPS clone is eligible for G3.
+// Reject rather than execute repo-local extension and transport configuration.
+function assertMacosG3RepositoryPolicy(target,expectedRepository){
+  if(process.platform!=="darwin")return;
+  const gitPath=path.join(target,".git"),configPath=path.join(gitPath,"config");
+  let gitStat,configStat,config;
+  try{
+    gitStat=fs.lstatSync(gitPath);
+    configStat=fs.lstatSync(configPath);
+    if(!gitStat.isDirectory()||gitStat.isSymbolicLink()||
+       !configStat.isFile()||configStat.isSymbolicLink()||configStat.nlink!==1||configStat.size>65536||
+       (typeof process.getuid==="function"&&(gitStat.uid!==process.getuid()||configStat.uid!==process.getuid()))||
+       (gitStat.mode&0o022)!==0||(configStat.mode&0o022)!==0)
+      throw new Error("unsafe Git metadata");
+    config=fs.readFileSync(configPath,"utf8");
+  }catch{throw new Error("MACOS-G3-GIT-EXTENSION-BLOCKED:unverified_git_directory");}
+  let section="",subsection="",origin=null,pushUrl=null;
+  for(const sourceLine of config.split(/\r?\n/)){
+    const line=sourceLine.trim();
+    if(!line||line.startsWith("#")||line.startsWith(";"))continue;
+    if(line.startsWith("[")){
+      const match=/^\[([a-zA-Z][\w-]*)(?:\s+"([^"]+)")?\]$/.exec(line);
+      if(!match)throw new Error("MACOS-G3-GIT-EXTENSION-BLOCKED:config_format");
+      section=match[1].toLowerCase();subsection=(match[2]||"").toLowerCase();
+      if(!["core","remote","branch","user","init","gc","fetch","pack"].includes(section))
+        throw new Error("MACOS-G3-GIT-EXTENSION-BLOCKED:config_extension");
+      if(section==="remote"&&subsection!=="origin")throw new Error("MACOS-G3-GIT-EXTENSION-BLOCKED:unexpected_remote");
+      continue;
+    }
+    const kv=/^([a-zA-Z][\w-]*)\s*=\s*(.*)$/.exec(line);
+    if(!kv||!section)throw new Error("MACOS-G3-GIT-EXTENSION-BLOCKED:config_format");
+    const key=kv[1].toLowerCase(),value=kv[2].trim();
+    if(section==="core"){
+      const safe=new Set(["repositoryformatversion","filemode","bare","logallrefupdates",
+        "ignorecase","precomposeunicode","protecthfs","protectntfs","symlinks",
+        "quotepath","autocrlf","eol","trustctime","fsmonitor"]);
+      if(!safe.has(key)||(key==="fsmonitor"&&value.toLowerCase()!=="false"))
+        throw new Error("MACOS-G3-GIT-EXTENSION-BLOCKED:core_extension");
+    }
+    if(section==="branch"&&!["remote","merge","rebase","description"].includes(key))
+      throw new Error("MACOS-G3-GIT-EXTENSION-BLOCKED:branch_extension");
+    if(section==="remote"){
+      if(key==="url"){if(origin!==null)throw new Error("MACOS-G3-GIT-EXTENSION-BLOCKED:multiple_origins");origin=value;}
+      else if(key==="pushurl"){if(pushUrl!==null)throw new Error("MACOS-G3-GIT-EXTENSION-BLOCKED:multiple_push_urls");pushUrl=value;}
+      else if(!["fetch","promisor","partialclonefilter"].includes(key))throw new Error("MACOS-G3-GIT-EXTENSION-BLOCKED:remote_extension");
+    }
+  }
+  const https=`https://github.com/${expectedRepository}.git`.toLowerCase();
+  const normalized=url=>String(url||"").replace(/\/$/,"").toLowerCase().replace(/\.git$/,"");
+  if(normalized(origin)!==normalized(https)||(pushUrl!==null&&normalized(pushUrl)!==normalized(https)))
+    throw new Error("MACOS-G3-GIT-EXTENSION-BLOCKED:foreign_or_executable_remote");
+  const hooksPath=path.join(gitPath,"hooks");
+  try{
+    const st=fs.lstatSync(hooksPath);
+    if(!st.isDirectory()||st.isSymbolicLink())throw new Error("unsafe hooks");
+    for(const name of fs.readdirSync(hooksPath)){
+      const hook=fs.lstatSync(path.join(hooksPath,name));
+      if(hook.isSymbolicLink()||!hook.isFile()||(hook.mode&0o111)!==0&&!name.endsWith(".sample"))
+        throw new Error("executable hooks");
+    }
+  }catch(e){if(e.code!=="ENOENT")throw new Error("MACOS-G3-GIT-EXTENSION-BLOCKED:git_hooks");}
+  const checkAttributes=file=>{
+    try{
+      const stat=fs.lstatSync(file);
+      if(!stat.isFile()||stat.isSymbolicLink()||stat.size>65536||
+         /(^|\s)(?:filter|diff|merge|working-tree-encoding)\s*(?:=|-|\b)/im.test(fs.readFileSync(file,"utf8")))
+        throw new Error("executable attributes");
+    }catch(e){if(e.code!=="ENOENT")throw new Error("MACOS-G3-GIT-EXTENSION-BLOCKED:attributes");}
+  };
+  checkAttributes(path.join(gitPath,"info","attributes"));
+  // Attribute files in all checked-out subdirectories can enable filters.
+  let inspectedPaths=0;
+  const walk=(directory,depth=0)=>{
+    if(++inspectedPaths>20000)throw new Error("MACOS-G3-GIT-EXTENSION-BLOCKED:unbounded_attributes");
+    if(depth>20)throw new Error("MACOS-G3-GIT-EXTENSION-BLOCKED:unbounded_attributes");
+    for(const name of fs.readdirSync(directory)){
+      if(name===".git")continue;
+      if(++inspectedPaths>20000)throw new Error("MACOS-G3-GIT-EXTENSION-BLOCKED:unbounded_attributes");
+      const item=path.join(directory,name),st=fs.lstatSync(item);
+      if(name===".gitattributes")checkAttributes(item);
+      if(st.isDirectory()&&!st.isSymbolicLink())walk(item,depth+1);
+    }
+  };
+  try{walk(target);}catch(e){if(String(e.message).startsWith("MACOS-G3-"))throw e;throw new Error("MACOS-G3-GIT-EXTENSION-BLOCKED:unreadable_attributes");}
+}
+function macosG3CloneClean(target,purpose){
+  const clean=inspectControlCleanTreeWithoutGitExtensions({control:target,fsImpl:fs,
+    gitRunner:(command,args,options)=>runG3Git(args,options),requireControlIdentity:false});
+  if(clean.ok)return;
+  // A freshly created, unborn private Sandbox/Control Git repository can be
+  // empty, with no HEAD/index. A nonempty or dirty unborn repo is not eligible.
+  if((purpose==="Sandbox"||purpose==="Control"||purpose==="Fresh")&&
+     fs.readdirSync(target).every(x=>x===".git")&&
+     !runG3Git(["rev-parse","--verify","HEAD"],{cwd:target,allowFailure:true}).ok&&
+     runG3Git(["ls-files","--stage"],{cwd:target}).stdout==="")return;
+  throw new Error(`${purpose} clone contains dirty, unsafe or unverifiable Git state; refusing to fetch or overwrite it`);
+}
+function preflightMacosG3ExistingClones({targetPath,targetRepository,sandboxPath,sandboxRepository,controlPath,controlRepository}){
+  if(process.platform!=="darwin")return;
+  for(const [directory,purpose,repository] of [
+    [targetPath,"Target",targetRepository],
+    [sandboxPath,"Sandbox",sandboxRepository],
+    [controlPath,"Control",controlRepository]
+  ])inspectExistingClone(directory,purpose,repository);
+}
+
 function ensureClone(repository,target){
   if(fs.existsSync(path.join(target,".git"))){
-    const origin=run("git",["remote","get-url","origin"],{cwd:target}).stdout;
+    const origin=runG3Git(["remote","get-url","origin"],{cwd:target}).stdout;
     if(process.platform==="darwin"?normalizedGithubRepository(origin)!==repository.toLowerCase():!origin.toLowerCase().includes(repository.toLowerCase())) throw new Error("Existing local folder points to a different Git repository");
-    run("git",["fetch","origin","--prune"],{cwd:target});
+    runG3Git(["fetch","origin","--prune"],{cwd:target});
     return;
   }
   if(fs.existsSync(target)&&fs.readdirSync(target).length>0) throw new Error("Target clone directory already exists and is not empty");
   fs.mkdirSync(path.dirname(target),{recursive:true});
-  run("gh",["repo","clone",repository,target]);
+  safeG3CloneCommand(repository,target);
+  if(process.platform==="darwin")inspectExistingClone(target,"Fresh",repository);
 }
 
-function inspectExistingClone(target, purpose){
+function inspectExistingClone(target,purpose,expectedRepository=null){
   if(!fs.existsSync(target)) return;
   const st=fs.lstatSync(target);
   if(st.isSymbolicLink() || !st.isDirectory() || (typeof process.getuid === "function" && st.uid !== process.getuid())) throw new Error(`${purpose} clone directory is symlinked, foreign-owned, or not a directory`);
@@ -317,8 +478,14 @@ function inspectExistingClone(target, purpose){
   if(fs.existsSync(git)) {
     const gs=fs.lstatSync(git);
     if(gs.isSymbolicLink() || (typeof process.getuid === "function" && gs.uid !== process.getuid())) throw new Error(`${purpose} clone Git directory is symlinked or foreign-owned`);
-    const status=run("git",["status","--porcelain","--untracked-files=all"],{cwd:target}).stdout;
-    if(status) throw new Error(`${purpose} clone contains dirty or untracked state; refusing to fetch or overwrite it`);
+    if(process.platform==="darwin"){
+      if(!expectedRepository)throw new Error("MACOS-G3-GIT-EXTENSION-BLOCKED:unbound_repository");
+      assertMacosG3RepositoryPolicy(target,expectedRepository);
+      macosG3CloneClean(target,purpose);
+    }else{
+      const status=run("git",["status","--porcelain","--untracked-files=all"],{cwd:target}).stdout;
+      if(status) throw new Error(`${purpose} clone contains dirty or untracked state; refusing to fetch or overwrite it`);
+    }
   } else if(fs.readdirSync(target).length) throw new Error(`${purpose} clone directory is not an empty Git checkout`);
 }
 
@@ -328,20 +495,27 @@ function requireCleanOwnedClone(target, purpose){
   if(status) throw new Error(`${purpose} clone contains dirty or untracked state; refusing to overwrite it`);
 }
 
-function commitAndPush({repoPath,message,branch="main"}){
-  run("git",["add","-A"],{cwd:repoPath});
-  const diff=run("git",["diff","--cached","--quiet"],{cwd:repoPath,allowFailure:true});
+function commitAndPush({repoPath,message,branch="main",expectedRepository=null}){
+  if(process.platform==="darwin"){
+    if(!expectedRepository)throw new Error("MACOS-G3-GIT-EXTENSION-BLOCKED:unbound_commit");
+    assertMacosG3RepositoryPolicy(repoPath,expectedRepository);
+  }
+  runG3Git(["add","-A"],{cwd:repoPath});
+  const diff=runG3Git(process.platform==="darwin"
+    ?["diff","--no-ext-diff","--no-textconv","--cached","--quiet"]
+    :["diff","--cached","--quiet"],{cwd:repoPath,allowFailure:true});
   if(diff.ok) return {changed:false};
-  run("git",[
+  if(process.platform==="darwin"&&diff.status!==1)throw new Error("Git staged comparison failed; refusing to commit or push");
+  runG3Git([
     "-c","user.name=ChatGPT Codex Orchestrator",
     "-c","user.email=codex-orchestrator@users.noreply.github.com",
     "commit","-m",message
   ],{cwd:repoPath});
-  run("git",["push","-u","origin","HEAD:"+branch],{cwd:repoPath});
+  runG3Git(["push","-u","origin","HEAD:"+branch],{cwd:repoPath});
   return {changed:true};
 }
 
-function seedSandbox({repoPath,installationId}){
+function seedSandbox({repoPath,installationId,expectedRepository=null}){
   const marker=path.join(repoPath,".orchestrator-sandbox");
   if(fs.existsSync(marker)){
     const value=fs.readFileSync(marker,"utf8").trim();
@@ -386,15 +560,15 @@ function seedSandbox({repoPath,installationId}){
   return commitAndPush({
     repoPath,
     message:"chore: initialize isolated orchestrator sandbox",
-    branch:"main"
+    branch:"main",expectedRepository
   });
 }
 
-function commitControlRepo(controlPath){
+function commitControlRepo(controlPath,expectedRepository=null){
   return commitAndPush({
     repoPath:controlPath,
     message:"chore: configure private orchestrator control plane",
-    branch:"main"
+    branch:"main",expectedRepository
   });
 }
 
@@ -786,9 +960,15 @@ export function prepareControlEnvironment({
   const browserPort=browserPortForInstallation(short);
   const chatRouteFile=path.join(instanceRoot,"chat-routes.json");
   const pendingWakeOutbox=path.join(instanceRoot,"pending-wakes");
+  const sandboxProjectKey="sandbox-"+short;
+  const sandboxRepository=login+"/chatgpt-codex-orchestrator-sandbox-"+short;
+  const sandboxClonePath=path.join(home,".chatgpt-codex-orchestrator","instances",short,"automation",sandboxProjectKey);
+  const controlRepository=login+"/chatgpt-codex-orchestrator-control-"+short;
   if(process.platform==="darwin"){
     const checked=auditMacosPrivatePreparationPaths({home,installationId,projectKey,macosControlLayout,expectedGithubLogin:login});
     if(checked.status!=="PASS") throw new Error("MACOS-PRIVATE-PATH-AUDIT:"+checked.issues.map(x=>x.role+":"+x.reason).join(","));
+    preflightMacosG3ExistingClones({targetPath:paths.project,targetRepository,
+      sandboxPath:sandboxClonePath,sandboxRepository,controlPath:paths.control,controlRepository});
     const verifiedLegacyControl=macosControlLayout===MACOS_PRIVATE_CONTROL_LAYOUT_V2?null:paths.control;
     for(const directory of [instanceRoot,path.dirname(paths.project),path.dirname(paths.control),paths.control,browserProfile,pendingWakeOutbox])
       preparePrivateMacDirectory(directory,home,{verifiedLegacyControl});
@@ -799,23 +979,19 @@ export function prepareControlEnvironment({
     }
   }
 
-  inspectExistingClone(paths.project,"Target");
+  inspectExistingClone(paths.project,"Target",targetRepository);
   ensureClone(targetRepository,paths.project);
   const validationProfile=detectProjectProfile(paths.project);
 
-  const sandboxProjectKey="sandbox-"+short;
-  const sandboxRepository=login+"/chatgpt-codex-orchestrator-sandbox-"+short;
-  const sandboxClonePath=path.join(home,".chatgpt-codex-orchestrator","instances",short,"automation",sandboxProjectKey);
   ensureOwnedPrivateRepo({fullName:sandboxRepository,installationId,purpose:"sandbox"});
-  inspectExistingClone(sandboxClonePath,"Sandbox");
+  inspectExistingClone(sandboxClonePath,"Sandbox",sandboxRepository);
   ensureClone(sandboxRepository,sandboxClonePath);
-  seedSandbox({repoPath:sandboxClonePath,installationId});
+  seedSandbox({repoPath:sandboxClonePath,installationId,expectedRepository:sandboxRepository});
   const sandboxValidationProfile=detectProjectProfile(sandboxClonePath);
 
-  const controlRepository=login+"/chatgpt-codex-orchestrator-control-"+short;
   ensureOwnedPrivateRepo({fullName:controlRepository,installationId,purpose:"control"});
   const immutableIdentities=process.platform==="darwin"?verifyMacosGeneratedRepositories({state:{installation_id:installationId,github_login:login,control_repository:controlRepository,sandbox_repository:sandboxRepository}}):{};
-  inspectExistingClone(paths.control,"Control");
+  inspectExistingClone(paths.control,"Control",controlRepository);
   ensureClone(controlRepository,paths.control);
   const runtimeFiles=prepareControlRuntimeFiles({sourceRoot,controlRoot:paths.control});
   const workflow=prepareRuntimeWorkflow({sourceRoot,controlPath:paths.control,platform:process.platform,arch:process.arch,runnerLabel:paths.runnerLabel,trustedGithubUsername:login});
@@ -873,7 +1049,7 @@ export function prepareControlEnvironment({
   });
   fs.writeFileSync(configPath,configText,{mode:0o600});
 
-  const commit=commitControlRepo(paths.control);
+  const commit=commitControlRepo(paths.control,controlRepository);
 
   return {
     github_login:login,

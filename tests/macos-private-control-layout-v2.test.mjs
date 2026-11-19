@@ -246,7 +246,7 @@ test('G3-RV-01 approved v1 0755 directory can be traversed by private preparer w
   const f=localControlFixture(t,{mode:0o755});
   const vm=await import('node:vm');
   const src=fs.readFileSync(new URL('../src/lib/control-env.mjs',import.meta.url),'utf8');
-  const start=src.indexOf('function preparePrivateMacDirectory('),end=src.indexOf('\nfunction ensureClone(',start);
+  const start=src.indexOf('function preparePrivateMacDirectory('),end=src.indexOf('\n// G3-RV-05:',start);
   assert.ok(start>=0&&end>start);
   const fn=vm.runInNewContext(src.slice(start,end)+'\npreparePrivateMacDirectory;',{fs,path,process,Error});
   const mode=fs.statSync(f.control).mode;

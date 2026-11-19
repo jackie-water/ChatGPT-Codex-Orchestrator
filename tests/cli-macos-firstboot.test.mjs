@@ -1479,9 +1479,11 @@ test('G3-RV-03 actual G3 preparer audits identity before local clone or remote r
   const start=env.indexOf('export function prepareControlEnvironment(');
   const body=env.slice(start);
   const audit=body.indexOf('const checked=auditMacosPrivatePreparationPaths(');
-  const target=body.indexOf('inspectExistingClone(paths.project,"Target")');
+  const preflight=body.indexOf('preflightMacosG3ExistingClones(');
+  const target=body.indexOf('inspectExistingClone(paths.project,"Target",targetRepository)');
   const sandbox=body.indexOf('ensureOwnedPrivateRepo({fullName:sandboxRepository');
-  assert.ok(audit>0&&target>audit&&sandbox>target);
+  assert.ok(audit>0&&preflight>audit&&target>preflight&&sandbox>target,
+    'path audit and all existing Git clone safety checks must precede any target/Sandbox remote effects');
   const cstart=cli.indexOf('function runSetup()');
   const setup=cli.slice(cstart,cli.indexOf('function dryRun()',cstart));
   const earlier=setup.indexOf('const preparationPaths=auditMacosPrivatePreparationPaths(');
