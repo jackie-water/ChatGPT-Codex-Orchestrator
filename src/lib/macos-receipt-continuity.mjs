@@ -110,7 +110,7 @@ function readJson(fsImpl,file){
 }
 // git rev-parse / ls-tree / ls-files cannot invoke clean filters. Git process
 // and configuration are isolated; worktree content is hashed by Node, not Git.
-function inspectSource(sourceRoot,{fsImpl=fs,gitRun}={}){
+export function inspectMacosCommittedSource(sourceRoot,{fsImpl=fs,gitRun}={}){
   canonicalDir(fsImpl,sourceRoot,{privateDir:false});
   const gitDir=path.join(sourceRoot,'.git');
   const gd=fsImpl.lstatSync(gitDir);
@@ -203,7 +203,7 @@ function checkExistingIntent({state,home,fsImpl=fs}){
      obj.generated_repositories?.sandbox!==`${state.github_login}/chatgpt-codex-orchestrator-sandbox-${short}`||
      obj.preservation?.registry?.target_environment_ready===true)throw new Error('INTENT_IDENTITY_DRIFT');
   canonicalDir(fsImpl,oldSource,{privateDir:false});
-  const originalGit=inspectSource(oldSource,{fsImpl});
+  const originalGit=inspectMacosCommittedSource(oldSource,{fsImpl});
   if(originalGit.source_commit!==oldSha||obj.source?.git?.dirty_count!==0)
     throw new Error('ORIGINAL_SOURCE_GIT_DRIFT');
   const oldFingerprints=[];
@@ -237,7 +237,7 @@ export function inspectMacosReceiptContinuity({state={},home=os.homedir(),source
     canonicalDir(fsImpl,home,{privateDir:false});
     const legacyIdentity=checkLegacyRoot(home,fsImpl);
     const history=checkExistingIntent({state,home,fsImpl});
-    const source=inspectSource(path.resolve(sourceRoot),{fsImpl,gitRun});
+    const source=inspectMacosCommittedSource(path.resolve(sourceRoot),{fsImpl,gitRun});
     if(history.original_source_head===source.source_commit) return fail('G3-CONTINUITY-SAME-SOURCE-NOT-RECOVERY');
     if(!validRepo(state.target_repository)||!isNonempty(state.github_login)||
        !/^[A-Za-z0-9-]+$/.test(state.github_login)||!/^https:\/\/chatgpt\.com\/(?:g\/[A-Za-z0-9_-]+\/)?c\/[0-9a-f-]+\/?$/i.test(state.reviewer_chat_url||''))return fail('G3-CONTINUITY-MISSING_BINDINGS');

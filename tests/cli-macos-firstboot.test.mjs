@@ -19,7 +19,13 @@ const helpers=cli.slice(cli.indexOf("function macosRunnerActionChallenge("),cli.
 // module. Supply the EXACT new predicate extracted from the source, not a
 // permissive stub; retain every historical assertion unchanged.
 function isolatedCliContext(bindings){
-  const context=vm.createContext({ MACOS_RECEIPT_CONTINUITY_ACTION:"macos_receipt_continuity_approval", ...bindings });
+  const context=vm.createContext({
+    MACOS_RECEIPT_CONTINUITY_ACTION:"macos_receipt_continuity_approval",
+    MACOS_CHAT_HANDOVER_ACTION:"macos_chat_handover_approval",
+    MACOS_CHAT_HANDOVER_RESUME_ACTION:"macos_chat_handover_resume_approval",
+    // Historical fixtures explicitly have NO newly authorized successor Chat.
+    // The real handover predicate is tested separately in dedicated tests.
+    isMacosChatHandoverCandidate:()=>false,...bindings });
   const predicate=cli.slice(cli.indexOf("function isMacosReceiptContinuityCandidate("),
     cli.indexOf("function readOnlyMacosGeneratedRepoInventory("));
   assert.ok(predicate.startsWith("function isMacosReceiptContinuityCandidate(") && predicate.includes("state?.last_error?.error_id"));
@@ -1429,7 +1435,8 @@ test('G3-RV-03 six-role audit precedes new intent and installer-state writes',t=
     macos_setup_approved:true};
   const calls=[],emissions=[];
   const context=isolatedCliContext({
-    state,lang:'en',freshFirstInstallAfterApproval:false,continuityAuthorized:false,crypto,
+    state,lang:'en',freshFirstInstallAfterApproval:false,continuityAuthorized:false,
+    handoverCandidate:false,crypto,
     os:{homedir:()=>f.home},process:{cwd:()=>'/verified/source'},
     safeKey,MACOS_PRIVATE_CONTROL_LAYOUT_V2,
     authenticatedGithubLogin:()=>{calls.push('identity-read');return 'owner';},

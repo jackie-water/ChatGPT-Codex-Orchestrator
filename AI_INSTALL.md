@@ -74,6 +74,34 @@ generated-repository connector, Runner install/start, pinned Chat route,
 Sandbox and exact-SHA merge gates remain separate. See
 `docs/macos-receipt-continuity-v1.md` for the full contract and exclusions.
 
+### G3-CHAT-HANDOVER-01 · Existing reviewer Chat has reached its message limit
+
+When the original `reviewer_chat_url` belongs to an exhausted Chat, **do not**
+edit `install-state.json`, reuse the old `macos_receipt_continuity_approval`,
+copy a historical review route, or run `resume` under a different Chat. Preserve
+the old receipt, original `migration-intent.json`, old official source and
+`SETUP-011` evidence. The original Chat may remain reachable but is no longer
+an authorized recipient for new callbacks.
+
+A separate, **newly reviewed and committed** handover-capable source is required
+before taking any action. Read-only `recovery-preflight --successor-chat-url
+'<current new Chat URL>' --json` verifies the predecessor's frozen source and
+continuity approval, full new-source Git tree/commit, owner inventory, local
+partial effects, installation ID, target, original intent and both distinct Chat
+IDs. If the old Chat was project-scoped, the new URL must be in that same
+project. A missing URL produces `macos_chat_successor_url`; an invalid source
+or unknown side effect returns BLOCKED, with no challenge or writes.
+
+The separately user-approved `macos_chat_handover_approval` answer records a
+**successor identity only**; it does not change the pinned Chat or permit GitHub
+operations. A second exact `macos_chat_handover_resume_approval` is mandatory
+for a single private Control/Sandbox preparation attempt; the source-only
+revision approval is not either of these installation approvals. A successful
+new-source resume, only after independent user authorization, persists the new
+Chat binding together with a unique attempt **before** any external side
+control, preserving predecessor evidence. It cannot register the new Chat or
+start the Runner. See `docs/macos-chat-handover-v1.md`.
+
 ### G3 official fresh-preparation entrypoint and separate consent
 
 `Install.command` delegates to `install.sh`, which anchors the current directory to the verified script/source root before invoking the Node CLI. The wrapper runs one read-only `dry-run --json` and advances to `setup` or `resume` **only** if the preflight exits 0 with the exact `PASS / dry_run:true / mutations_performed:false` contract. A legitimate `NEEDS_USER_ACTION` with exit 1 is deliberately **not** converted to success and must be reported as an explicit next action. Invalid JSON, malformed success, unsupported flags and platform mismatch are hard stops.

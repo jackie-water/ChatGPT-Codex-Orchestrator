@@ -17,6 +17,7 @@ import { macosPrerequisites, migrationPreflight, macosRuntimeAction, prepareMigr
 import { macosNativeHelperPreflight, prepareMacosNativeHelper, verifyMacosNativeCapability } from "./lib/macos-native-helper-install.mjs";
 import { inspectMacosExistingInstanceRecovery, inspectMacosSelectedFreshInstance, approveMacosSelectedFreshInstance, isMacosFreshFirstInstallBootstrap, macosOfficialFreshPreparationChallenge, hasMacosOfficialFreshPreparationApproval, macosOfficialFreshPreparationReceipt } from "./lib/macos-existing-instance-recovery.mjs";
 import { inspectMacosReceiptContinuity, makeMacosReceiptContinuityReceipt, MACOS_RECEIPT_CONTINUITY_ACTION } from "./lib/macos-receipt-continuity.mjs";
+import { inspectMacosChatHandover, makeMacosChatHandoverReceipt, makeMacosChatHandoverResumeReceipt, MACOS_CHAT_HANDOVER_ACTION, MACOS_CHAT_HANDOVER_RESUME_ACTION } from "./lib/macos-chat-handover.mjs";
 import { MACOS_PERSONAL_USE_POLICY, hasMacosPersonalUsePolicy, hasTrustedSingleUserReadinessProfile, hasTrustedSingleUserReadinessProfileMarker, hasTrustedSingleUserReadinessIdentity, macosPersonalUsePolicyChallenge, trustedSingleUserReadinessProfileChallenge, TRUSTED_SINGLE_USER_READINESS_PROFILE } from "./lib/macos-personal-use-service.mjs";
 import { inspectMacosRunnerBootstrap, approveMacosRunnerBootstrap } from "./lib/macos-runner-bootstrap.mjs";
 import { verifyTrustedRecoveryEvidence, issueTrustedRecoveryEvidence, githubReadOnlyApi } from "./lib/macos-trusted-recovery-evidence.mjs";
@@ -502,8 +503,8 @@ function readOnlyMacosGeneratedRepoInventory({state}){
   }catch{return {status:"BLOCKED",owner_login:null,owner_id:null,
     control:"UNKNOWN",sandbox:"UNKNOWN"};}
 }
-function macosReceiptContinuityInspection(state){
-  return inspectMacosReceiptContinuity({state,home:os.homedir(),sourceRoot:OFFICIAL_SOURCE_ROOT,
+function macosReceiptContinuityInspection(state,sourceRoot=OFFICIAL_SOURCE_ROOT){
+  return inspectMacosReceiptContinuity({state,home:os.homedir(),sourceRoot,
     localPreflight:()=>{
       try{
         const short=canonicalInstallationId(state.installation_id), project=safeKey(state.target_repository.split("/")[1]);
@@ -530,6 +531,30 @@ function macosReceiptContinuityInspection(state){
       }catch{return {status:"BLOCKED",mutations_performed:false};}
     },remotePreflight:()=>readOnlyMacosGeneratedRepoInventory({state})});
 }
+// Handover is explicitly selected by a successor URL or a separately
+// committed new source. Never reinterpret the old Chat as the current Chat.
+function isMacosChatHandoverCandidate(state){
+  if(process.platform!=="darwin"||!isMacosReceiptContinuityCandidate(state))return false;
+  const old=state?.macos_receipt_continuity_approval?.source_commit;
+  const current=path.basename(OFFICIAL_SOURCE_ROOT);
+  return Boolean(state.macos_chat_handover_approval!==undefined||
+    state.macos_chat_handover_resume_approval!==undefined||
+    valueOf("--successor-chat-url")!==undefined||
+    (/^[0-9a-f]{40}$/.test(String(old))&&/^[0-9a-f]{40}$/.test(current)&&old!==current));
+}
+function macosChatHandoverInspection(state,successorChatUrl=valueOf("--successor-chat-url")){
+  return inspectMacosChatHandover({state,home:os.homedir(),sourceRoot:OFFICIAL_SOURCE_ROOT,
+    successorChatUrl,inspectPriorContinuity:originalSourceRoot=>
+      macosReceiptContinuityInspection(state,originalSourceRoot)});
+}
+function emitMacosHandoverGate(result,{dryRun=false}={}){
+  // Full Chat URLs belong only in the private installer journal. They must
+  // never be returned in general-purpose CLI JSON or diagnostic output.
+  const {successor_chat_url,predecessor_chat_url,...safe}=result;
+  const allowed=Boolean(result.status==="PASS"&&result.authorized===true);
+  return emit({...safe,dry_run:dryRun,installation_authorized:allowed,
+    setup_executed:false,runner_not_started:true,target_disabled:true},allowed?0:1);
+}
 function emitMacosContinuityGate(result,{dryRun=false}={}){
   const approved=result.status==="PASS"&&result.authorized===true;
   return emit({...result,dry_run:dryRun,installation_authorized:approved,
@@ -545,6 +570,7 @@ function dryRun() {
     return emit({status:"ERROR",error_id:"MACOS-EXISTING-INSTANCE-REVIEW",preferred_language:"en",message:"macOS installer state is unreadable; dry-run stopped before any external setup action.",dry_run:true,existing_instance_recovery:existingInstanceRecovery,mutations_performed:false,plan:[]},1);
   }
   const lang=ensureStateLanguage(state);
+  if(isMacosChatHandoverCandidate(state))return emitMacosHandoverGate(macosChatHandoverInspection(state),{dryRun:true});
   if(isMacosReceiptContinuityCandidate(state))return emitMacosContinuityGate(macosReceiptContinuityInspection(state),{dryRun:true});
   const existingInstanceRecovery=process.platform==="darwin"?macosRecoveryReport(state):null;
   if(existingInstanceRecovery?.selection_mode&&existingInstanceRecovery.status!=="SELECTED_FRESH_INSTANCE_VERIFIED") return emit({status:existingInstanceRecovery.status==="CONFLICT"?"ERROR":"NEEDS_USER_ACTION",action_id:"macos_selected_fresh_instance_approval",error_id:"MACOS-SELECTED-FRESH-INSTANCE",dry_run:true,existing_instance_recovery:existingInstanceRecovery,approval_challenge:existingInstanceRecovery.approval_challenge,mutations_performed:false,plan:[]},1);
@@ -668,7 +694,20 @@ function answer() {
 
   const bool = v => /^(true|yes|y|1|done|completed)$/i.test(String(v || ""));
 
-  if(actionId === MACOS_RECEIPT_CONTINUITY_ACTION){
+  if(actionId === MACOS_CHAT_HANDOVER_ACTION){
+    if(!isMacosChatHandoverCandidate(state))return emit({status:"ERROR",error_id:"G3-HANDOVER-NOT-ELIGIBLE",mutations_performed:false},1);
+    const inspection=macosChatHandoverInspection(state);
+    const receipt=makeMacosChatHandoverReceipt({state,value,inspection,
+      successorChatUrl:valueOf("--successor-chat-url")});
+    if(!receipt)return emit({status:"ERROR",error_id:"G3-HANDOVER-APPROVAL-MISMATCH",mutations_performed:false},1);
+    state.macos_chat_handover_approval=receipt;
+  } else if(actionId === MACOS_CHAT_HANDOVER_RESUME_ACTION){
+    if(!isMacosChatHandoverCandidate(state))return emit({status:"ERROR",error_id:"G3-HANDOVER-RESUME-NOT-ELIGIBLE",mutations_performed:false},1);
+    const inspection=macosChatHandoverInspection(state);
+    const receipt=makeMacosChatHandoverResumeReceipt({state,value,inspection});
+    if(!receipt)return emit({status:"ERROR",error_id:"G3-HANDOVER-RESUME-APPROVAL-MISMATCH",mutations_performed:false},1);
+    state.macos_chat_handover_resume_approval=receipt;
+  } else if(actionId === MACOS_RECEIPT_CONTINUITY_ACTION){
     if(!isMacosReceiptContinuityCandidate(state))return emit({status:"ERROR",error_id:"G3-CONTINUITY-NOT-ELIGIBLE",mutations_performed:false},1);
     const inspection=macosReceiptContinuityInspection(state);
     const receipt=makeMacosReceiptContinuityReceipt({state,value,inspection});
@@ -806,11 +845,16 @@ function runSetup() {
   const lang = ensureStateLanguage(state);
   if(process.platform==="darwin") {
     if(hasTrustedSingleUserReadinessProfileMarker(state)&&!hasTrustedSingleUserReadinessProfile(state)) return emit({status:"ERROR",error_id:"MACOS-READINESS-PROFILE-INVALID",recoverable:false,preferred_language:lang,mutations_performed:false},1);
-    const continuityCandidate=isMacosReceiptContinuityCandidate(state);
+    const handoverCandidate=isMacosChatHandoverCandidate(state);
+    const handover=handoverCandidate?macosChatHandoverInspection(state):null;
+    if(handoverCandidate&&!(handover.status==="PASS"&&handover.authorized===true))
+      return emitMacosHandoverGate(handover);
+    const continuityCandidate=!handoverCandidate&&isMacosReceiptContinuityCandidate(state);
     const continuity=continuityCandidate?macosReceiptContinuityInspection(state):null;
     if(continuityCandidate&&!(continuity.status==="PASS"&&continuity.authorized===true))
       return emitMacosContinuityGate(continuity);
-    const continuityAuthorized=continuityCandidate;
+    const continuityAuthorized=handoverCandidate||continuityCandidate;
+    const preparedConsent=handoverCandidate?handover:continuity;
     const existingInstanceRecovery=macosRecoveryReport(state);
     const initialFreshFirstInstall=isMacosFreshFirstInstallBootstrap({state,recovery:existingInstanceRecovery,installStateMissing:state.__macos_install_state_missing===true});
     if(!continuityAuthorized&&existingInstanceRecovery && Object.hasOwn(existingInstanceRecovery,"legacy_evidence_isolation") &&
@@ -910,13 +954,27 @@ function runSetup() {
       state.migration_intent_path=intent.path;
       state.migration_intent_phase=intent.phase;
       state.macos_native_setup="PREPARING";
+      if(handoverCandidate){
+        // Atomic with INTENT_RECORDED: no route or repo side effects can see
+        // the successor URL until the unique attempt is durable. Preserve the
+        // predecessor in an immutable, separately consented private receipt.
+        if(state.reviewer_chat_url!==handover.predecessor_chat_url||
+           state.macos_chat_handover_applied!==undefined)throw new Error("G3-HANDOVER-STATE-DRIFT");
+        state.reviewer_chat_url=handover.successor_chat_url;
+        state.macos_chat_handover_applied={schema_version:1,
+          predecessor_chat_sha256:crypto.createHash("sha256").update(handover.predecessor_chat_url).digest("hex"),
+          successor_chat_sha256:crypto.createHash("sha256").update(handover.successor_chat_url).digest("hex"),
+          handover_challenge:handover.handover_challenge,
+          binding_sha256:handover.binding_sha256,source_commit:handover.source_commit,
+          source_tree:handover.source_tree,recorded_at:new Date().toISOString()};
+      }
       if(continuityAuthorized){
         // One durable attempt only. A crash or failed Control preparation must
         // be reconciled; it cannot consume this approval again automatically.
         state.macos_receipt_continuity_attempt={schema_version:1,phase:"INTENT_RECORDED",
           operation_id:crypto.randomUUID(),installation_id:state.installation_id,
-          source_commit:continuity.source_commit,source_tree:continuity.source_tree,
-          binding_sha256:continuity.binding_sha256,recorded_at:new Date().toISOString()};
+          source_commit:preparedConsent.source_commit,source_tree:preparedConsent.source_tree,
+          binding_sha256:preparedConsent.binding_sha256,recorded_at:new Date().toISOString()};
       }
       saveState(state);
     } catch(error) {
@@ -1634,6 +1692,8 @@ function recoveryPreflight() {
   let state;
   let stateInvalid=false;
   try { state=loadState({create:false}); } catch { state={}; stateInvalid=true; }
+  if(!stateInvalid&&isMacosChatHandoverCandidate(state))
+    return emitMacosHandoverGate(macosChatHandoverInspection(state),{dryRun:true});
   if(!stateInvalid&&isMacosReceiptContinuityCandidate(state))
     return emitMacosContinuityGate(macosReceiptContinuityInspection(state),{dryRun:true});
   const report=macosRecoveryReport(state);

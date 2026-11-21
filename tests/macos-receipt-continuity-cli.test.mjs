@@ -23,6 +23,7 @@ function contextFor(opts={}){
     hasTrustedSingleUserReadinessProfileMarker:()=>false,
     hasTrustedSingleUserReadinessProfile:()=>true,
     isMacosReceiptContinuityCandidate:()=>true,
+    isMacosChatHandoverCandidate:()=>false,
     macosReceiptContinuityInspection:()=>opts.inspection||{status:'PASS',authorized:true,
       source_commit:'c'.repeat(40),source_tree:'d'.repeat(40),binding_sha256:'e'.repeat(64)},
     emit:(value,code=0)=>{events.push({value,code});return {value,code};},
@@ -50,6 +51,8 @@ function contextFor(opts={}){
     valueOf:()=>null,
     makeMacosReceiptContinuityReceipt:()=>null,
     MACOS_RECEIPT_CONTINUITY_ACTION:'macos_receipt_continuity_approval',
+    MACOS_CHAT_HANDOVER_ACTION:'macos_chat_handover_approval',
+    MACOS_CHAT_HANDOVER_RESUME_ACTION:'macos_chat_handover_resume_approval',
   };
   const global=vm.createContext(context);
   vm.runInContext(setupSource+'\nthis.execute=runSetup;',global);
@@ -95,6 +98,8 @@ test('G3 CLI answer uses a new action and does not rewrite old approval',()=>{
   const context=vm.createContext({loadState:()=>start,ensureStateLanguage:()=> 'en',
     valueOf:name=>name==='--action'?'macos_receipt_continuity_approval':name==='--value'?'exact':null,
     isMacosReceiptContinuityCandidate:()=>true,
+    MACOS_CHAT_HANDOVER_ACTION:'macos_chat_handover_approval',
+    MACOS_CHAT_HANDOVER_RESUME_ACTION:'macos_chat_handover_resume_approval',
     macosReceiptContinuityInspection:()=>({status:'NEEDS_USER_ACTION',approval_challenge:'exact'}),
     makeMacosReceiptContinuityReceipt:()=>fresh,
     MACOS_RECEIPT_CONTINUITY_ACTION:'macos_receipt_continuity_approval',
@@ -110,6 +115,7 @@ test('G3 CLI answer uses a new action and does not rewrite old approval',()=>{
 test('G3 CLI dry-run checks continuity before legacy processing or prerequisites',()=>{
   const events=[],ctx=vm.createContext({process:{platform:'darwin'},loadState:()=>state(),
     ensureStateLanguage:()=> 'en',isMacosReceiptContinuityCandidate:()=>true,
+    isMacosChatHandoverCandidate:()=>false,
     macosReceiptContinuityInspection:()=>({status:'BLOCKED',error_id:'G3-CONTINUITY-REMOTE_EFFECTS_UNVERIFIED'}),
     emitMacosContinuityGate:v=>events.push(v),macosRecoveryReport:()=>assert.fail('unexpected legacy fallback')});
   vm.runInContext(drySource+'\nthis.check=dryRun;',ctx);ctx.check();
